@@ -1,0 +1,11 @@
+[package]
+name = "vxl-phys-terrain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 可破坏地形：高度场体素账本 + 柱状支撑（断裂在 destruction）"
+
+[dependencies]
+vxl-phys-core = { workspace = true }
+vxl-phys-narrow = { workspace = true }
+vxl-phys-broad = { workspace = true }

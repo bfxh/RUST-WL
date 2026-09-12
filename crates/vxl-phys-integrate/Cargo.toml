@@ -1,0 +1,9 @@
+[package]
+name = "vxl-phys-integrate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 积分：半隐式欧拉 + 固定步/子步 + 批量积分"
+
+[dependencies]
+vxl-phys-core = { workspace = true }
