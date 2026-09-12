@@ -19,16 +19,42 @@ use std::collections::HashMap;
 use vxl_phys_core::{BodySet, JobSystem, PhysConfig};
 use vxl_phys_narrow::Manifold;
 
-/// 单接触点的已求解冲量缓存（warm starting）。
+/// 单接触点的已求解冲量缓存（warm starting + 接触回收）。
 #[derive(Clone, Copy, Debug)]
 struct WarmPoint {
-    point: Vec3,
     pn: f32,
     pt1: f32,
     pt2: f32,
     /// 接触特征 ID（窄相命名，跨帧稳定；0 = 无特征）。
     feature: u32,
+    /// 局部锚点（双方体局部坐标；M1 接触回收核心——锚点固定在材料点上，
+    /// 帧间只推进距离；Rapier `contact_recycling` 同族）。
+    la: Vec3,
+    lb: Vec3,
+    /// **烘焙时**的接触深度（正 = 穿透）。本帧有效深度 = 此值 + 锚点
+    /// 当前累计分离量沿法向的投影（存更新值会复合累计 → 二次增长，实测
+    /// 推出 0.44 m/s 虚假分离速度；必须存烘焙值）。
+    depth0: f32,
 }
+
+/// 接触回收半径（m；超过则锚点重烘焙。Rapier `normalized_contact_recycle_distance` 0.05）。
+const RECYCLE_DIST: f32 = 0.05;
+
+/// 切向锚点漂移回拉的强度标度（1 = Rapier 原式；0 = 关闭回拉只保留回收）。
+/// 消融中发现满强度会在 5 层堆留下 ~0.09 m/s 永久微抖（不入睡），
+/// 半强度为实测折中（塔蠕动停止增长 + 堆可入睡）。
+/// 切向锚点漂移回拉的强度标度（1 = Rapier 原式；0 = 关闭回拉只保留回收）。
+/// **默认 0（关闭）**：消融实测（M1 第十段）——满强度可让塔蠕动停止增长
+/// （0.34→0.26 衰减）但代价明显：5 层堆留 ~0.09 m/s 永久微抖（不入睡）、
+/// 门槛场景末态 38 体不睡且 p50 0.48→8.4ms。回收本身（scale=0）各场景行为
+/// 保持（门槛干净入睡/0.88ms、5 层堆全睡），故先落地回收、回拉留待精调。
+const DRIFT_BIAS_SCALE: f32 = 0.0;
+
+/// 切向漂移回拉的死区（m）：|漂移| ≤ 死区时不回拉——只纠正真实材料滑移，
+/// 不响应微倾/裁剪抖动引起的毫米级锚点错位。**默认 0（关闭）**：消融实测
+/// 1mm 死区利于 5 层堆（0.09→0.05）但让塔蠕动从「衰减」退回「微增」
+/// （0.34→0.26 变 0.22→0.29）——M1 验收主体是塔，取无死区。
+const DRIFT_DEADZONE: f32 = 0.0;
 
 #[derive(Clone, Debug)]
 struct WarmManifold {
@@ -49,6 +75,15 @@ struct PointConstraint {
     tmass2: f32,
     /// 切向 2×2 矩阵交叉项 k12（联立解用；见 `contact_mass_cross`）。
     tcross: f32,
+    /// 切向锚点漂移回拉目标（Rapier 切向 rhs 同义：`v_t → (pa−pb)·t·inv_dt`，
+    /// 由摩擦在锥内执行；回收锚点使其为真实材料点错位，非裁剪几何噪声）。
+    trhs1: f32,
+    trhs2: f32,
+    /// 局部锚点与烘焙深度（warm 回写 / 下一帧距离推进）；`depth0` =
+    /// 烘焙时深度（回写时必须存它，见 `WarmPoint::depth0` 注）。
+    la: Vec3,
+    lb: Vec3,
+    depth0: f32,
     /// M1 软接触（TGS-Soft 语义，与 Rapier 0.35 同构）：法向目标分离速度
     /// rhs = 去穿透速率（erp·depth，钳 ±max_corrective_velocity）− speculative
     /// 项（浅缝允许一个 tick 内闭合）+ 弹性目标（e·vn，e>0 时）。
@@ -667,10 +702,90 @@ fn build_constraint(
 
     let warmm = warm.get(&(m.a, m.b));
     let (t1, t2) = tangents(m.normal);
+    let pos_a = bodies.position[a];
+    let pos_b = bodies.position[b];
+    // 接触回收（Rapier `contact_recycling` 同族）：锚点存双方体局部坐标，
+    // 帧间还原到世界系并只推进距离——锚点固定在材料点上 ⇒ 力臂/暖启动/
+    // 切向漂移判断跨帧稳定（裁剪点每帧重算的几何噪声被消除）。
+    let rot_a = vxl_phys_core::Mat3::from_quat(bodies.rot(a));
+    let rot_b = vxl_phys_core::Mat3::from_quat(bodies.rot(b));
+    // 锚点当前世界位置（≤4 点定长数组，零分配；匹配/复用判定共用）。
+    let mut warm_world = [Vec3::ZERO; 4];
+    let mut warm_n = 0usize;
+    if let Some(wm) = warmm {
+        for w in wm.points.iter().take(4) {
+            warm_world[warm_n] =
+                (pos_a + rot_a.mul_vec3(w.la) + pos_b + rot_b.mul_vec3(w.lb)) * 0.5;
+            warm_n += 1;
+        }
+    }
     let mut pts: Vec<PointConstraint> = Vec::with_capacity(m.points.len());
     for cp in &m.points {
-        let ra = cp.point - bodies.position[a];
-        let rb = cp.point - bodies.position[b];
+        // warm starting 匹配：① 特征 ID 精确匹配（带距离护栏，锚点当前世界
+        // 位置量距）；② 近邻回退（无特征或 ID 未命中）。
+        let mut warm_pt: Option<WarmPoint> = None;
+        if let Some(wm) = warmm {
+            if warm_n > 0 && wm.normal.dot(m.normal) > 0.95 {
+                if cp.feature != 0 {
+                    warm_pt = (0..warm_n)
+                        .find(|&k| {
+                            wm.points[k].feature == cp.feature
+                                && (warm_world[k] - cp.point).length_squared()
+                                    < match_dist * match_dist
+                        })
+                        .map(|k| wm.points[k]);
+                }
+                if warm_pt.is_none() {
+                    warm_pt = (0..warm_n)
+                        .filter(|&k| {
+                            (warm_world[k] - cp.point).length_squared() < match_dist * match_dist
+                        })
+                        .min_by(|&x, &y| {
+                            (warm_world[x] - cp.point)
+                                .length_squared()
+                                .total_cmp(&(warm_world[y] - cp.point).length_squared())
+                        })
+                        .map(|k| wm.points[k]);
+                }
+            }
+        }
+
+        // 复用判定 + 有效几何：锚点世界分离 ≤ 回收半径 → 沿用锚点（深度/漂移
+        // 由锚点分离量推进）；否则按本帧裁剪点烘焙新锚点（la/lb 同源 ⇒ 初始分离 0）。
+        let (pt_world, depth, depth0, la, lb, drift) = match warm_pt {
+            Some(w) => {
+                let pa = pos_a + rot_a.mul_vec3(w.la);
+                let pb = pos_b + rot_b.mul_vec3(w.lb);
+                let sep_v = pa - pb;
+                if sep_v.length_squared() <= RECYCLE_DIST * RECYCLE_DIST {
+                    // 有效深度 = 烘焙深度 + 当前累计分离沿法向的投影（非增量式
+                    // 复合——烘焙深度全程不变，见 WarmPoint::depth0）。
+                    (
+                        (pa + pb) * 0.5,
+                        w.depth0 + sep_v.dot(m.normal),
+                        w.depth0,
+                        w.la,
+                        w.lb,
+                        sep_v,
+                    )
+                } else {
+                    let (la, lb) = (
+                        rot_a.transpose_mul_vec3(cp.point - pos_a),
+                        rot_b.transpose_mul_vec3(cp.point - pos_b),
+                    );
+                    (cp.point, cp.depth, cp.depth, la, lb, Vec3::ZERO)
+                }
+            }
+            None => {
+                let (la, lb) = (
+                    rot_a.transpose_mul_vec3(cp.point - pos_a),
+                    rot_b.transpose_mul_vec3(cp.point - pos_b),
+                );
+                (cp.point, cp.depth, cp.depth, la, lb, Vec3::ZERO)
+            }
+        };
+        let ra = pt_world - pos_a;
+        let rb = pt_world - pos_b;
         let nmass = contact_mass(
             bodies.inv_mass[a],
             bodies.inv_mass[b],
@@ -714,7 +829,7 @@ fn build_constraint(
             b,
         );
 
-        // —— M1 软接触目标（TGS-Soft 语义，Rapier 0.35 同构）——
+        // —— M1 软接触目标（TGS-Soft 语义，Rapier 0.35 同构；深度为回收后有效值）——
         // 弹性：预解相对法向速度。
         let va = bodies.velocity_at(a, ra);
         let vb = bodies.velocity_at(b, rb);
@@ -722,7 +837,7 @@ fn build_constraint(
         let bounce = if vn < -e_threshold { -e * vn } else { 0.0 };
         // speculative：浅缝（depth<0）允许一个 tick 内闭合剩余间隙（不再提前悬停）；
         // 去穿透：erp·(depth−slop)，钳 max_corrective_velocity（穿透→分离速度目标）。
-        let sep = -cp.depth;
+        let sep = -depth;
         let spec = sep.max(0.0) * sp.inv_dt;
         let is_static_pair = bodies.inv_mass[a] == 0.0 || bodies.inv_mass[b] == 0.0;
         let erp_inv_dt = if is_static_pair {
@@ -730,54 +845,28 @@ fn build_constraint(
         } else {
             sp.erp_inv_dt_dyn
         };
-        let pen = (cp.depth - sp.slop).max(0.0);
+        let pen = (depth - sp.slop).max(0.0);
         let bias = (erp_inv_dt * pen).min(sp.max_corr);
         let rhs = bias - spec + bounce;
         // 正则化：穿透接触 cfm=1（硬投影，支撑刚性）；speculative 接触 cfm<1
         // （等效柔度 ω/ζ，限制迭代增益，深堆不依赖跨层链收敛——金样定标结论）。
-        let cfm = if cp.depth >= 0.0 {
+        let cfm = if depth >= 0.0 {
             1.0
         } else if is_static_pair {
             sp.cfm_static
         } else {
             sp.cfm_dyn
         };
-
-        // warm starting 匹配：① 特征 ID 精确匹配（跨帧稳定，接触点集逐帧
-        // 微动/裁剪翻面不丢冲量缓存——Rapier contact_recycling / Box2D
-        // b2ContactFeature 同族；带距离护栏防几何突变后的错配旧冲量）；
-        // ② 近邻回退（无特征或 ID 未命中）。
-        let mut warm_pt: Option<WarmPoint> = None;
-        if let Some(wm) = warmm {
-            if wm.normal.dot(m.normal) > 0.95 {
-                if cp.feature != 0 {
-                    warm_pt = wm
-                        .points
-                        .iter()
-                        .find(|wp| {
-                            wp.feature == cp.feature
-                                && (wp.point - cp.point).length_squared() < match_dist * match_dist
-                        })
-                        .copied();
-                }
-                if warm_pt.is_none() {
-                    if let Some(wp) = wm
-                        .points
-                        .iter()
-                        .filter(|wp| {
-                            (wp.point - cp.point).length_squared() < match_dist * match_dist
-                        })
-                        .min_by(|x, y| {
-                            let dx = (x.point - cp.point).length_squared();
-                            let dy = (y.point - cp.point).length_squared();
-                            dx.total_cmp(&dy)
-                        })
-                    {
-                        warm_pt = Some(*wp);
-                    }
-                }
-            }
-        }
+        // 切向锚点漂移回拉（Rapier 切向 rhs 同义）：目标 `v_t = (pa−pb)·t·inv_dt`，
+        // 由摩擦在锥内执行——粘着接触的材料点错位被回正（回收锚点 ⇒ 漂移为
+        // 真实滑移量，非裁剪几何噪声；旧 shortcut 无锚点实测变差已回退）。
+        let drift_eff = if drift.length_squared() > DRIFT_DEADZONE * DRIFT_DEADZONE {
+            drift * (DRIFT_BIAS_SCALE * sp.inv_dt)
+        } else {
+            Vec3::ZERO
+        };
+        let trhs1 = drift_eff.dot(t1);
+        let trhs2 = drift_eff.dot(t2);
 
         pts.push(PointConstraint {
             ra,
@@ -788,6 +877,11 @@ fn build_constraint(
             tmass1,
             tmass2,
             tcross,
+            trhs1,
+            trhs2,
+            la,
+            lb,
+            depth0,
             rhs,
             cfm,
             friction: mu,
@@ -858,8 +952,9 @@ fn solve_constraint(
                 let va = group_vel(lv, av, local_of, ai, p.ra);
                 let vb = group_vel(lv, av, local_of, bi, p.rb);
                 let dv = vb - va;
-                let vt1 = dv.dot(p.t1);
-                let vt2 = dv.dot(p.t2);
+                // 目标 v_t = trhs（锚点漂移回拉；无漂移时为 0 = 原「抑制滑动」语义）。
+                let vt1 = dv.dot(p.t1) - p.trhs1;
+                let vt2 = dv.dot(p.t2) - p.trhs2;
                 let k11 = if p.tmass1 > 0.0 { 1.0 / p.tmass1 } else { 0.0 };
                 let k22 = if p.tmass2 > 0.0 { 1.0 / p.tmass2 } else { 0.0 };
                 let k12 = p.tcross;
@@ -973,11 +1068,13 @@ fn solve_island_group(
                 .points
                 .iter()
                 .map(|p| WarmPoint {
-                    point: bodies.position[c.a as usize] + p.ra,
                     pn: p.pn,
                     pt1: p.pt1,
                     pt2: p.pt2,
                     feature: p.feature,
+                    la: p.la,
+                    lb: p.lb,
+                    depth0: p.depth0,
                 })
                 .collect();
             warm_out.push((
