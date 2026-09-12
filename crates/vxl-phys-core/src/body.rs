@@ -1,9 +1,17 @@
 //! SoA 刚体存储（§3 内存目标：热数据 SoA，100 万刚体 ≤ 2 GB 的基线布局）。
 //!
+//! 热/冷分离（§0.1 #10）：**热组** = `position`（`PoseArray`，pos+rot 同 32B 记录）
+//! 与 `linvel`（`VelArray`，lin+ang 同 32B 记录）——宽/窄/积分每帧全量扫的部分；
+//! **冷组** = 形状/类型/质量/攒力/休眠/材质（低频或相外访问），索引与热组同序。
+//! 热组字段名保留 `position[i]` / `linvel[i]` 写法（数组实现 `Index/IndexMut`，
+//! 索引语义与旧 `Vec<Vec3>` 一致）；旋转与角速度经 `rot(i)`/`set_rot`、
+//! `angvel(i)`/`set_angvel`（同一 32B 记录的第二分量）。
+//!
 //! 确定性约束（§5）：所有遍历按体索引升序；写入顺序固定。
 
 use crate::mass::mass_props;
 use crate::math::{Quat, Vec3};
+use crate::mem::{PoseArray, VelArray};
 use crate::shape::Shape;
 
 pub type BodyId = u32;
@@ -17,12 +25,14 @@ pub enum BodyType {
 /// 结构化数组（SoA）刚体集合。
 #[derive(Clone, Debug, Default)]
 pub struct BodySet {
+    // ---- 热组（32B 记录、缓冲 32B 对齐、逐体连续）----
+    /// 位姿（pos 分量经 `position[i]`；rot 分量经 `rot(i)`/`set_rot`）。
+    pub position: PoseArray,
+    /// 速度（lin 分量经 `linvel[i]`；ang 分量经 `angvel(i)`/`set_angvel`）。
+    pub linvel: VelArray,
+    // ---- 冷组（低频 / 相外访问）----
     pub shape: Vec<Shape>,
     pub body_type: Vec<BodyType>,
-    pub position: Vec<Vec3>,
-    pub rotation: Vec<Quat>,
-    pub linvel: Vec<Vec3>,
-    pub angvel: Vec<Vec3>,
     pub inv_mass: Vec<f32>,
     pub local_inv_inertia: Vec<Vec3>,
     /// 外力/外力矩累加器（每子步被积分器消费并清零）。
@@ -74,10 +84,8 @@ impl BodySet {
         let id = self.shape.len() as BodyId;
         self.shape.push(shape);
         self.body_type.push(BodyType::Static);
-        self.position.push(position);
-        self.rotation.push(rotation);
-        self.linvel.push(Vec3::ZERO);
-        self.angvel.push(Vec3::ZERO);
+        self.position.push(position, rotation);
+        self.linvel.push(Vec3::ZERO, Vec3::ZERO);
         self.inv_mass.push(0.0);
         self.local_inv_inertia.push(Vec3::ZERO);
         self.force.push(Vec3::ZERO);
@@ -99,10 +107,8 @@ impl BodySet {
         let id = self.shape.len() as BodyId;
         self.shape.push(shape);
         self.body_type.push(BodyType::Dynamic);
-        self.position.push(position);
-        self.rotation.push(rotation);
-        self.linvel.push(Vec3::ZERO);
-        self.angvel.push(Vec3::ZERO);
+        self.position.push(position, rotation);
+        self.linvel.push(Vec3::ZERO, Vec3::ZERO);
         self.inv_mass.push(mp.inv_mass);
         self.local_inv_inertia.push(mp.local_inv_inertia);
         self.force.push(Vec3::ZERO);
@@ -111,6 +117,35 @@ impl BodySet {
         self.sleep_timer.push(0.0);
         self.material.push(0);
         id
+    }
+
+    /// 姿态（位置 + 旋转）只读快照。
+    #[inline]
+    pub fn pose(&self, i: usize) -> (Vec3, Quat) {
+        (self.position[i], self.position.rot(i))
+    }
+
+    /// 旋转（热组 32B 记录的第二分量；位置用 `position[i]`）。
+    #[inline]
+    pub fn rot(&self, i: usize) -> Quat {
+        self.position.rot(i)
+    }
+
+    #[inline]
+    pub fn set_rot(&mut self, i: usize, q: Quat) {
+        self.position.set_rot(i, q);
+    }
+
+    /// 角速度（热组 32B 记录的第二分量；线速度用 `linvel[i]`）。
+    #[inline]
+    pub fn angvel(&self, i: usize) -> Vec3 {
+        self.linvel.ang(i)
+    }
+
+    /// 角速度原始写入（引擎热路径；**不触碰唤醒状态**）。
+    #[inline]
+    pub fn set_angvel_raw(&mut self, i: usize, w: Vec3) {
+        self.linvel.set_ang(i, w);
     }
 
     #[inline]
@@ -126,15 +161,16 @@ impl BodySet {
         self.linvel[i] = v;
     }
 
+    /// 公共设置语义：唤醒后设置（镜像 `set_linvel`）。
     pub fn set_angvel(&mut self, i: usize, w: Vec3) {
         self.wake(i);
-        self.angvel[i] = w;
+        self.linvel.set_ang(i, w);
     }
 
     /// 世界系逆惯性作用：I⁻¹_world·L = R·diag(local_I⁻¹)·Rᵀ·L。
     #[inline]
     pub fn apply_world_inv_inertia(&self, i: usize, l: Vec3) -> Vec3 {
-        let r = crate::math::Mat3::from_quat(self.rotation[i]);
+        let r = crate::math::Mat3::from_quat(self.rot(i));
         let lt = r.transpose_mul_vec3(l);
         r.mul_vec3(lt.mul_per_elem(self.local_inv_inertia[i]))
     }
@@ -142,7 +178,7 @@ impl BodySet {
     /// 点接触速度 v + ω×r（r：COM → 作用点）。
     #[inline]
     pub fn velocity_at(&self, i: usize, r: Vec3) -> Vec3 {
-        self.linvel[i] + self.angvel[i].cross(r)
+        self.linvel[i] + self.angvel(i).cross(r)
     }
 
     /// 施加冲量（世界系，作用于世界点；自动唤醒）。
@@ -155,7 +191,7 @@ impl BodySet {
         let r = world_point - self.position[i];
         let l = r.cross(impulse);
         let dw = self.apply_world_inv_inertia(i, l);
-        self.angvel[i] += dw;
+        self.set_angvel_raw(i, self.angvel(i) + dw);
     }
 }
 
@@ -193,6 +229,6 @@ mod tests {
         b.apply_impulse(d as usize, Vec3::new(m, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         // 线速度 Δv = J/m = 1；角速度 = I⁻¹(r×J)。
         assert!((b.linvel[d as usize].x - 1.0).abs() < 1e-4);
-        assert!(b.angvel[d as usize].z < 0.0);
+        assert!(b.angvel(d as usize).z < 0.0);
     }
 }

@@ -16,6 +16,7 @@ pub mod config;
 pub mod mass;
 pub mod material;
 pub mod math;
+pub mod mem;
 pub mod schedule;
 pub mod shape;
 
@@ -24,5 +25,6 @@ pub use config::{FrictionModel, PhysConfig, Preset};
 pub use mass::{mass_props, MassProps};
 pub use material::{Material, MaterialId};
 pub use math::{Mat3, Quat, Vec3};
+pub use mem::{PhaseArena, Pose32, PoseArray, Vel32, VelArray};
 pub use schedule::{run_mut_sections, JobSystem, ScopedPool, SerialJobSystem};
 pub use shape::{HeightFieldId, Shape, CYLINDER_SEGMENTS};

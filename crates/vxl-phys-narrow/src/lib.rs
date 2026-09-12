@@ -539,8 +539,8 @@ impl DefaultNarrowPhase {
             try_point(&mut self.cand, center.x, center.z, h);
         }
         // 2) 所在格 + 邻域 3×3 网格节点。
-        let ix0 = ((center.x - hf.origin_x) / hf.cell).floor() as i64;
-        let iz0 = ((center.z - hf.origin_z) / hf.cell).floor() as i64;
+        let ix0 = ((center.x - hf.origin_x) / hf.spacing).floor() as i64;
+        let iz0 = ((center.z - hf.origin_z) / hf.spacing).floor() as i64;
         for dix in -1i64..=1 {
             for diz in -1i64..=1 {
                 let ix = ix0 + dix;
@@ -549,8 +549,8 @@ impl DefaultNarrowPhase {
                     continue;
                 }
                 let h = hf.height_ix(ix as u32, iz as u32);
-                let px = hf.origin_x + ix as f32 * hf.cell;
-                let pz = hf.origin_z + iz as f32 * hf.cell;
+                let px = hf.origin_x + ix as f32 * hf.spacing;
+                let pz = hf.origin_z + iz as f32 * hf.spacing;
                 try_point(&mut self.cand, px, pz, h);
             }
         }
@@ -658,8 +658,8 @@ impl DefaultNarrowPhase {
         let (sa, sb) = (&bodies.shape[a as usize], &bodies.shape[b as usize]);
         let pa = bodies.position[a as usize];
         let pb = bodies.position[b as usize];
-        let ra = bodies.rotation[a as usize];
-        let rb = bodies.rotation[b as usize];
+        let ra = bodies.rot(a as usize);
+        let rb = bodies.rot(b as usize);
 
         // 高度场参与的对。
         let hf_a = match sa {

@@ -15,16 +15,43 @@
 pub use vxl_phys_broad::{Aabb, BroadPhase, BvhBroadPhase, GridBroadPhase};
 pub use vxl_phys_core as core;
 pub use vxl_phys_core::{
-    BodyId, BodySet, BodyType, FrictionModel, JobSystem, Material, PhysConfig, Preset, Quat,
-    ScopedPool, SerialJobSystem, Shape, Vec3,
+    BodyId, BodySet, BodyType, FrictionModel, JobSystem, Material, PhaseArena, PhysConfig, Preset,
+    Quat, ScopedPool, SerialJobSystem, Shape, Vec3,
 };
 pub use vxl_phys_field::{FieldRegistry, ForceField, GravityField};
 pub use vxl_phys_integrate::Integrator;
 pub use vxl_phys_narrow::heightfield::HeightField;
 pub use vxl_phys_narrow::{ContactPoint, DefaultNarrowPhase, Manifold, NarrowPhase};
-pub use vxl_phys_replay::{Fnv1aHash, Recorder, StateHash};
+pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
+
+/// 帧级相位暂存（§0.1 #10：相内 bump，相末 reset，全帧零 free）。
+///
+/// M0 已接入的消费者 = 帧末状态哈希的规范化缓冲（每次哈希 alloc→打包→reset，
+/// 600 tick 内 high_water 恒定、overflows = 0）；宽/窄/求解三相的缓冲化与其
+/// R1 顶尖化同批接入（M1）——机制与计数在本相已实证。
+#[derive(Debug)]
+pub struct FrameArenas {
+    pub hash: PhaseArena,
+}
+
+impl FrameArenas {
+    pub fn new() -> Self {
+        Self {
+            hash: PhaseArena::with_capacity(HASH_SCRATCH_BYTES),
+        }
+    }
+}
+
+impl Default for FrameArenas {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 哈希规范化暂存预算（固定 8KB；流式打包与体数无关，永不溢出）。
+pub const HASH_SCRATCH_BYTES: usize = 8 << 10;
 
 /// §3 稳定性健康报告（NaN/Inf 计数、静默穿透计数、抖动审计的输入）。
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -80,6 +107,8 @@ pub struct World {
     pub fields: FieldRegistry,
     /// 任务调度（§6 依赖注入：SerialJobSystem / ScopedPool / 自定义实现）。
     pub jobs: Box<dyn JobSystem>,
+    /// 帧级相位暂存（§0.1 #10；M0 接入 = 哈希规范化缓冲）。
+    pub arenas: FrameArenas,
     pub tick: u64,
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<Manifold>,
@@ -117,6 +146,7 @@ impl World {
             terrain: TerrainSet::new(),
             fields,
             jobs,
+            arenas: FrameArenas::new(),
             tick: 0,
             pairs: Vec::new(),
             manifolds: Vec::new(),
@@ -172,8 +202,19 @@ impl World {
         &self.manifolds
     }
 
-    pub fn state_hash(&self) -> u64 {
-        Fnv1aHash.hash_bodies(&self.bodies)
+    /// 规范状态哈希（§5 xxh3-128 唯一真值；热组 32B 记录按 id 序打包）。
+    ///
+    /// 规范化缓冲走帧级相位 arena（`arenas.hash`）：每次调用 alloc→打包→reset，
+    /// 全帧零堆分配、缓冲永不增长。因世界自持暂存，故取 `&mut self`。
+    pub fn state_hash(&mut self) -> u128 {
+        let scratch = self
+            .arenas
+            .hash
+            .alloc(HASH_SCRATCH_BYTES, 8)
+            .expect("哈希暂存预算固定 8KB，流式打包不随体数增长");
+        let h = vxl_phys_replay::hash_bodies_streaming(&self.bodies, scratch);
+        self.arenas.hash.reset();
+        h
     }
 
     /// 推进一个固定 60Hz tick（内部按 config.substeps 细分，§4.2）。

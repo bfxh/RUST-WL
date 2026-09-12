@@ -166,6 +166,7 @@ fn group_vel(lv: &[Vec3], av: &[Vec3], local_of: &[u32], i: usize, r: Vec3) -> V
 /// 组内冲量施加：动态侧写 scratch；静态/越组侧跳过（旧路径为 inv_mass=0
 /// 的空写，数值结果相同）。
 #[inline]
+#[allow(clippy::too_many_arguments)] // 组内热路径内联目标：避免引入打包结构体的额外构造成本
 fn group_apply(
     lv: &mut [Vec3],
     av: &mut [Vec3],
@@ -183,11 +184,11 @@ fn group_apply(
     let q = k as usize;
     let im = bodies.inv_mass[i];
     if minus {
-        lv[q] = lv[q] - imp * im;
-        av[q] = av[q] - bodies.apply_world_inv_inertia(i, ra.cross(imp));
+        lv[q] -= imp * im;
+        av[q] -= bodies.apply_world_inv_inertia(i, ra.cross(imp));
     } else {
-        lv[q] = lv[q] + imp * im;
-        av[q] = av[q] + bodies.apply_world_inv_inertia(i, ra.cross(imp));
+        lv[q] += imp * im;
+        av[q] += bodies.apply_world_inv_inertia(i, ra.cross(imp));
     }
 }
 
@@ -343,7 +344,7 @@ impl ImpulseSolver {
                     let i = bi as usize;
                     local_of[i] = group_lv[g].len() as u32;
                     group_lv[g].push(bodies.linvel[i]);
-                    group_av[g].push(bodies.angvel[i]);
+                    group_av[g].push(bodies.angvel(i));
                 }
             }
         }
@@ -354,7 +355,7 @@ impl ImpulseSolver {
         if g_count > 1 {
             let bodies_ref: &BodySet = bodies;
             let awake_ref: &[usize] = &awake;
-            let islands_ref: &[Island] = &islands;
+            let islands_ref: &[Island] = islands;
             let warm_ref: &HashMap<(u32, u32), WarmManifold> = &warm;
             let local_ref: &[u32] = &local_of;
             std::thread::scope(|s| {
@@ -396,7 +397,7 @@ impl ImpulseSolver {
         } else if !awake.is_empty() {
             solve_island_group(
                 &awake,
-                &islands,
+                islands,
                 manifolds,
                 bodies,
                 &warm,
@@ -420,7 +421,7 @@ impl ImpulseSolver {
                 for &bi in &islands[ii].bodies {
                     let i = bi as usize;
                     bodies.linvel[i] = group_lv[g][k];
-                    bodies.angvel[i] = group_av[g][k];
+                    bodies.set_angvel_raw(i, group_av[g][k]);
                     k += 1;
                 }
             }
@@ -475,7 +476,7 @@ impl ImpulseSolver {
             for &bi in &island.bodies {
                 let i = bi as usize;
                 let lin = bodies.linvel[i].length();
-                let ang = bodies.angvel[i].length();
+                let ang = bodies.angvel(i).length();
                 if lin >= config.sleep_linear || ang >= config.sleep_angular {
                     all_slow = false;
                     break;
@@ -493,7 +494,7 @@ impl ImpulseSolver {
                         let i = bi as usize;
                         bodies.awake[i] = false;
                         bodies.linvel[i] = Vec3::ZERO;
-                        bodies.angvel[i] = Vec3::ZERO;
+                        bodies.set_angvel_raw(i, Vec3::ZERO);
                     }
                 }
             } else {
@@ -671,8 +672,8 @@ fn solve_island_group(
     bodies: &BodySet,
     warm: &HashMap<(u32, u32), WarmManifold>,
     local_of: &[u32],
-    lv: &mut Vec<Vec3>,
-    av: &mut Vec<Vec3>,
+    lv: &mut [Vec3],
+    av: &mut [Vec3],
     cbuf: &mut Vec<ContactConstraint>,
     warm_out: &mut Vec<((u32, u32), WarmManifold)>,
     iters: u32,

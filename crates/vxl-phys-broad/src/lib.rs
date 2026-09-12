@@ -181,7 +181,7 @@ impl BroadPhase for GridBroadPhase {
             let aabb = shape_aabb(
                 &bodies.shape[i],
                 bodies.position[i],
-                bodies.rotation[i],
+                bodies.rot(i),
                 self.skin,
                 hf_bounds,
             );
@@ -375,7 +375,7 @@ impl BroadPhase for BvhBroadPhase {
                         *s = shape_aabb(
                             &bodies_ref.shape[i],
                             bodies_ref.position[i],
-                            bodies_ref.rotation[i],
+                            bodies_ref.rot(i),
                             skin,
                             hfs,
                         );
