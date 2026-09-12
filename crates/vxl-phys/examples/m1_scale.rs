@@ -66,14 +66,14 @@ fn main() {
         let bd = w.broad.breakdown_us();
         let th = w.broad.tree_height();
         eprintln!(
-            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2} 排序 {:5.2}) tree_h {th:3} narrow {:6.2} solve {:6.2}",
+            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} | solve 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
             tim.broadphase_us as f64 / 1000.0,
             bd.0 as f64 / 1000.0,
             bd.1 as f64 / 1000.0,
             bd.2 as f64 / 1000.0,
-            bd.3 as f64 / 1000.0,
-            tim.narrowphase_us as f64 / 1000.0,
-            tim.solve_us as f64 / 1000.0,
+            w.solver.last_phase_us.0 as f64 / 1000.0,
+            w.solver.last_phase_us.1 as f64 / 1000.0,
+            w.solver.last_phase_us.2 as f64 / 1000.0,
         );
         if t % 100 == 0 {
             let h = w.health();

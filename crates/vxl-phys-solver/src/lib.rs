@@ -79,6 +79,12 @@ pub struct ImpulseSolver {
     group_av: Vec<Vec<Vec3>>,
     /// 体 → 组内局部索引（u32::MAX = 静态/不在清醒岛）。
     local_of: Vec<u32>,
+    /// 诊断：上一帧内部阶段耗时（µs）=(岛构建, 约束构建+迭代, 休眠/其他, 保留)。
+    pub last_phase_us: (u64, u64, u64, u64),
+    /// 并查集缓冲（跨帧复用）。
+    parent: Vec<u32>,
+    /// 岛池（跨帧复用：Vec 容量保留，全清醒场景不逐帧分配）。
+    island_pool: Vec<Island>,
 }
 
 struct Island {
@@ -197,6 +203,9 @@ impl ImpulseSolver {
             group_lv: Vec::new(),
             group_av: Vec::new(),
             local_of: Vec::new(),
+            last_phase_us: (0, 0, 0, 0),
+            parent: Vec::new(),
+            island_pool: Vec::new(),
         }
     }
 
@@ -218,10 +227,14 @@ impl ImpulseSolver {
         let iters = config.velocity_iterations.max(1);
         let threads = jobs.threads().max(1);
         let match_dist = self.match_dist;
+        let t_island = std::time::Instant::now();
 
         // 1) 并查集分岛（直接对流形；双静态对不入岛）。固定规则：小索引为根（确定性）。
+        //    缓冲跨帧复用（self.parent），避免每帧 20 万级 alloc/fill。
         let n = bodies.len();
-        let mut parent: Vec<u32> = (0..n as u32).collect();
+        let mut parent = std::mem::take(&mut self.parent);
+        parent.clear();
+        parent.extend(0..n as u32);
         for m in manifolds {
             let (a, b) = (m.a as usize, m.b as usize);
             if bodies.is_dynamic(a) && bodies.is_dynamic(b) {
@@ -230,52 +243,69 @@ impl ImpulseSolver {
         }
 
         // 2) 岛桶。体按索引升序；岛内流形按全局流形序（§4.14 确定性模式）。
+        //    只有「与清醒体连通」的体参与建岛：
+        //    - 第一遍：清醒动体建岛（睡眠体不建岛 → 全睡眠帧岛构建 ≈ O(查是否为空)）；
+        //    - 第二遍：睡眠动体若其连通分量已被激活（root 已在槽位表）则并入——
+        //      保证「被撞唤醒」的接触对里有沉睡侧的体（求解冲量要施加到它并唤醒）。
+        //    岛池跨帧复用（Vec 容量保留），全清醒场景（10 万岛）不再逐帧分配。
         let mut root_slot: HashMap<u32, usize> = HashMap::new();
-        let mut islands: Vec<Island> = Vec::new();
-        let mut in_island = vec![false; n];
-        for (i, used) in in_island.iter_mut().enumerate() {
-            if !bodies.is_dynamic(i) {
+        let mut pool = std::mem::take(&mut self.island_pool);
+        let mut islands_used = 0usize;
+        for i in 0..n {
+            if !(bodies.is_dynamic(i) && bodies.awake[i]) {
                 continue;
             }
             let r = find_small_root(&mut parent, i as u32);
             let slot = *root_slot.entry(r).or_insert_with(|| {
-                islands.push(Island {
-                    bodies: Vec::new(),
-                    manifs: Vec::new(),
-                });
-                islands.len() - 1
+                if islands_used == pool.len() {
+                    pool.push(Island {
+                        bodies: Vec::new(),
+                        manifs: Vec::new(),
+                    });
+                }
+                let s = islands_used;
+                pool[s].bodies.clear();
+                pool[s].manifs.clear();
+                islands_used += 1;
+                s
             });
-            islands[slot].bodies.push(i as u32);
-            *used = true;
+            pool[slot].bodies.push(i as u32);
         }
-        for (mi, m) in manifolds.iter().enumerate() {
-            let (a, b) = (m.a as usize, m.b as usize);
-            if !bodies.is_dynamic(a) && !bodies.is_dynamic(b) {
-                continue;
+        if !root_slot.is_empty() {
+            // 睡眠侧并入（其根已被清醒体激活的连通分量）。
+            for i in 0..n {
+                if !bodies.is_dynamic(i) || bodies.awake[i] {
+                    continue;
+                }
+                let r = find_small_root(&mut parent, i as u32);
+                if let Some(&slot) = root_slot.get(&r) {
+                    pool[slot].bodies.push(i as u32);
+                }
             }
-            let root = if bodies.is_dynamic(a) {
-                find_small_root(&mut parent, m.a)
-            } else {
-                find_small_root(&mut parent, m.b)
-            };
-            if let Some(&slot) = root_slot.get(&root) {
-                islands[slot].manifs.push(mi);
+            for (mi, m) in manifolds.iter().enumerate() {
+                let (a, b) = (m.a as usize, m.b as usize);
+                if !bodies.is_dynamic(a) && !bodies.is_dynamic(b) {
+                    continue;
+                }
+                let root = if bodies.is_dynamic(a) {
+                    find_small_root(&mut parent, m.a)
+                } else {
+                    find_small_root(&mut parent, m.b)
+                };
+                if let Some(&slot) = root_slot.get(&root) {
+                    pool[slot].manifs.push(mi);
+                }
             }
         }
+        let islands = &pool[..islands_used];
+        self.parent = parent;
         self.island_count = islands.len();
 
-        // 3) 清醒岛（任一成员 awake → 全岛解算）；沉睡岛整体跳过——不建约束
-        //    不解算，warm 条目原样保留（**不得**对沉睡体施加缓存冲量，否则
-        //    沉睡体会被缓存的支撑冲量逐帧加速发射）。
-        //    清醒岛分组（连续岛段）：组内岛串行、组间体集合不相交 → 并行（§6），
-        //    gather→solve→scatter 走组内 scratch 速度缓冲（岛间本就无浮点交互，
-        //    §5 → 与串行 bit 级一致）。
-        let mut awake: Vec<usize> = Vec::new();
-        for (ii, isl) in islands.iter().enumerate() {
-            if isl.bodies.iter().any(|&bi| bodies.awake[bi as usize]) {
-                awake.push(ii);
-            }
-        }
+        // 3) 清醒岛（任一成员 awake → 全岛解算）；沉睡岛整体跳过（上面的建岛已
+        //    只收「与清醒体连通」的岛，因此这里恒为全清醒）。分组（连续岛段）：
+        //    组内岛串行、组间体集合不相交 → 并行（§6），gather→solve→scatter
+        //    走组内 scratch 速度缓冲（岛间本就无浮点交互，§5 → 与串行 bit 级一致）。
+        let awake: Vec<usize> = (0..islands.len()).collect();
         // 并行门槛：spawn ≈ 90µs/个（Windows 实测）；流形 < 4096 时并行不划算
         // （解算工作量 ≈ 1µs/接触/帧），走单组串行（数值路径不变）。
         let g_count = if threads <= 1 || manifolds.len() < 4096 {
@@ -318,6 +348,8 @@ impl ImpulseSolver {
             }
         }
 
+        let d_island = t_island.elapsed().as_micros() as u64;
+        let t_solve = std::time::Instant::now();
         // 4) 并行解算（§6 契约：组间写槽位不相交，组内 = 串行语义）。
         if g_count > 1 {
             let bodies_ref: &BodySet = bodies;
@@ -422,16 +454,16 @@ impl ImpulseSolver {
         self.group_av = group_av;
         self.local_of = local_of;
 
+        let d_solve = t_solve.elapsed().as_micros() as u64;
+        let t_sleep = std::time::Instant::now();
         // 5) 岛级休眠与唤醒（§4.11 / §3 稳定性）。
-        //    - 休眠岛（全员 asleep）保持冻结，不解算不积分（积分器跳过 asleep）；
+        //    - 建岛阶段已只收「与清醒体连通」的岛（含被牵连的睡眠体），
+        //      遗漏的睡眠体天然保持冻结（不解算不积分）；
         //    - 清醒岛：任一成员 awake → 全岛同步为 awake（外部唤醒传播）；
         //    - 全员速度低于阈值持续 sleep_time → 岛内**原子**入睡（同帧全员睡），
-        //      不存在"部分睡部分醒"状态，从机制上排除反复唤醒。
-        for island in &islands {
-            let has_awake = island.bodies.iter().any(|&bi| bodies.awake[bi as usize]);
-            if !has_awake {
-                continue;
-            }
+        //      不存在"部分睡部分醒"状态，从机制上排除反复唤醒；
+        //    - 无接触的孤立清醒动体 = 单成员岛，走同一套休眠判定。
+        for island in islands {
             for &bi in &island.bodies {
                 let i = bi as usize;
                 if !bodies.awake[i] {
@@ -472,24 +504,8 @@ impl ImpulseSolver {
                 }
             }
         }
-        // 无接触的孤立动体（不在任何岛内）：单独计时。
-        for (i, used) in in_island.iter().enumerate() {
-            if *used || !bodies.is_dynamic(i) || !bodies.awake[i] {
-                continue;
-            }
-            let lin = bodies.linvel[i].length();
-            let ang = bodies.angvel[i].length();
-            if lin < config.sleep_linear && ang < config.sleep_angular {
-                bodies.sleep_timer[i] += dt;
-                if bodies.sleep_timer[i] >= config.sleep_time {
-                    bodies.awake[i] = false;
-                    bodies.linvel[i] = Vec3::ZERO;
-                    bodies.angvel[i] = Vec3::ZERO;
-                }
-            } else {
-                bodies.sleep_timer[i] = 0.0;
-            }
-        }
+        self.island_pool = pool;
+        self.last_phase_us = (d_island, d_solve, t_sleep.elapsed().as_micros() as u64, 0);
     }
 }
 
