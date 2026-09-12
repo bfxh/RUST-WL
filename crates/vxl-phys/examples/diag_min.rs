@@ -23,11 +23,15 @@ fn main() {
     let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
     let xspacing: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(spacing);
     let baumgarte: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.2);
+    let shock: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let inner: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4);
 
     let mut cfg = PhysConfig {
         velocity_iterations: iters,
         threads,
         baumgarte,
+        shock_iterations: shock,
+        normal_inner: inner,
         ..PhysConfig::default()
     };
     cfg.friction = FrictionModel::Coulomb { mu };

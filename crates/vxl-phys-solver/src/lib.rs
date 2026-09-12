@@ -243,6 +243,7 @@ impl ImpulseSolver {
         let slop = config.linear_slop;
         let iters = config.velocity_iterations.max(1);
         let shock = config.shock_iterations;
+        let normal_inner = config.normal_inner.max(1);
         let threads = jobs.threads().max(1);
         let match_dist = self.match_dist;
         let t_island = std::time::Instant::now();
@@ -419,6 +420,7 @@ impl ImpulseSolver {
                             slop,
                             match_dist,
                             shock,
+                            normal_inner,
                         );
                     };
                     if g + 1 == g_count {
@@ -449,6 +451,7 @@ impl ImpulseSolver {
                 slop,
                 match_dist,
                 shock,
+                normal_inner,
             );
         }
 
@@ -722,13 +725,15 @@ fn build_constraint(
     });
 }
 
-/// 单约束一次顺序冲量迭代（法向 + 两切向 + 摩擦锥）。
+/// 单约束一次顺序冲量迭代（法向 × 内层扫掠 + 两切向 + 摩擦锥 + 偏置）。
 ///
-/// 抽为独立函数：主循环（正序）与堆叠 shock 附加迭代（反序）共用同一实现，
-/// 保证两条路径数值语义逐字一致。`rev` = 接触点逆序遍历（对称扫掠用：
-/// 4 点面接触是冗余约束（4 约束 / 3 自由度）+ 强转动耦合，单向 GS 在
-/// 16 次迭代内留下可观残差（重堆微抖实测 |v|≈0.03）；正/反交替后
-/// 收敛率 ≈ ρ²，残差降到阈值下）。
+/// 三通道分离：**法向内层 `inner` 次扫掠** → 切向（两轴 + 径向锥）→ 偏置。
+/// 法向是多点面接触的慢模所在（4 点冗余约束 + 强转动耦合，GS 单扫收敛慢：
+/// 重堆实测 16 次迭代残留 ≈15% 重力增量 → 微抖 |v|≈0.03 永不入睡、角点
+/// 接触下升级为沸腾；iters=64 才完全入睡）。内层 K 次法向扫掠把**歧管内**
+/// 收敛等价提到 ≈K×外层，而摩擦/偏置只跑一遍——代价只加法向通道
+/// （8B 规模法向占比小，实测见 docs/M1-PLAN.md）。
+/// `rev` = 逆序遍历（对称扫掠，配合外层正/反交替 ≈ ρ²）。
 #[inline]
 #[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
 fn solve_constraint(
@@ -740,68 +745,82 @@ fn solve_constraint(
     local_of: &[u32],
     bodies: &BodySet,
     rev: bool,
+    inner: u32,
 ) {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let normal = c.normal;
     let npts = c.points.len();
-    for k in 0..npts {
-        let idx = if rev { npts - 1 - k } else { k };
-        let p = &mut c.points[idx];
-        // —— 法向 ——
-        let va = group_vel(lv, av, local_of, ai, p.ra);
-        let vb = group_vel(lv, av, local_of, bi, p.rb);
-        let vn = (vb - va).dot(normal);
-        let lambda = p.nmass * (p.bias - vn);
-        let new_pn = (p.pn + lambda).max(0.0);
-        let dl = new_pn - p.pn;
-        p.pn = new_pn;
-        if dl != 0.0 {
-            let imp = normal * dl;
-            group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
-            group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
-        }
-        // —— 摩擦（两切向，逐轴求解 + 每轴后**径向锥投影**）——
-        // Box2D v3 / Jolt 同族：把累计切向冲量向量 (pt1, pt2) 投影到半径
-        // μ·pn 的圆盘（而不是逐轴盒形钳制 + 事后缩放）。旧实现两轴可各自
-        // 独立饱和到 ±μ·pn（角点处模长 √2·μ·pn）再被径向缩回——等效摩擦
-        // 上限随求解序在两轴间漂移，4 点接触 + 高 μ 下形成相干力矩：
-        // 2 列密堆实测 μ=0.5 缓慢倾覆/爬行（μ=0.05 稳定、μ=0 冻结）。
-        for key in 0..2usize {
-            let (t, tmass) = if key == 0 {
-                (p.t1, p.tmass1)
-            } else {
-                (p.t2, p.tmass2)
-            };
+
+    // —— 歧管内层扫掠（法向 + 摩擦两通道一起）——
+    // 慢模同时存在于法向（冗余 4 点 + 强转动耦合）与切向（锥耦合）：只加
+    // 法向时 45 盒档恢复、20×20 大堆仍沸腾（摩擦仍只有外层遍数）。内层对
+    // 两条通道一起加扫，歧管内收敛 ≈ K×外层（iters=64 全通道的等效在
+    // K=4 / 16 外层达成）。
+    for _ in 0..inner.max(1) {
+        for k in 0..npts {
+            let idx = if rev { npts - 1 - k } else { k };
+            let p = &mut c.points[idx];
+            // —— 法向 ——
             let va = group_vel(lv, av, local_of, ai, p.ra);
             let vb = group_vel(lv, av, local_of, bi, p.rb);
-            let vt = (vb - va).dot(t);
-            let lam = tmass * (-vt);
-            let (old1, old2) = (p.pt1, p.pt2);
-            let (mut a1, mut a2) = if key == 0 {
-                (old1 + lam, old2)
-            } else {
-                (old1, old2 + lam)
-            };
-            let max_f = p.friction * p.pn;
-            let f2 = a1 * a1 + a2 * a2;
-            if f2 > max_f * max_f && f2 > 1e-20 {
-                let s = max_f / f2.sqrt();
-                a1 *= s;
-                a2 *= s;
-            }
-            p.pt1 = a1;
-            p.pt2 = a2;
-            let d1 = a1 - old1;
-            let d2 = a2 - old2;
-            if d1 != 0.0 || d2 != 0.0 {
-                let imp = p.t1 * d1 + p.t2 * d2;
+            let vn = (vb - va).dot(normal);
+            let lambda = p.nmass * (p.bias - vn);
+            let new_pn = (p.pn + lambda).max(0.0);
+            let dl = new_pn - p.pn;
+            p.pn = new_pn;
+            if dl != 0.0 {
+                let imp = normal * dl;
                 group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
                 group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
             }
+            // —— 摩擦（两切向，逐轴求解 + 每轴后**径向锥投影**）——
+            // Box2D v3 / Jolt 同族：把累计切向冲量向量 (pt1, pt2) 投影到半径
+            // μ·pn 的圆盘（而不是逐轴盒形钳制 + 事后缩放）。旧实现两轴可各自
+            // 独立饱和到 ±μ·pn（角点处模长 √2·μ·pn）再被径向缩回——等效摩擦
+            // 上限随求解序在两轴间漂移，4 点接触 + 高 μ 下形成相干力矩：
+            // 2 列密堆实测 μ=0.5 缓慢倾覆/爬行（μ=0.05 稳定、μ=0 冻结）。
+            for key in 0..2usize {
+                let (t, tmass) = if key == 0 {
+                    (p.t1, p.tmass1)
+                } else {
+                    (p.t2, p.tmass2)
+                };
+                let va = group_vel(lv, av, local_of, ai, p.ra);
+                let vb = group_vel(lv, av, local_of, bi, p.rb);
+                let vt = (vb - va).dot(t);
+                let lam = tmass * (-vt);
+                let (old1, old2) = (p.pt1, p.pt2);
+                let (mut a1, mut a2) = if key == 0 {
+                    (old1 + lam, old2)
+                } else {
+                    (old1, old2 + lam)
+                };
+                let max_f = p.friction * p.pn;
+                let f2 = a1 * a1 + a2 * a2;
+                if f2 > max_f * max_f && f2 > 1e-20 {
+                    let s = max_f / f2.sqrt();
+                    a1 *= s;
+                    a2 *= s;
+                }
+                p.pt1 = a1;
+                p.pt2 = a2;
+                let d1 = a1 - old1;
+                let d2 = a2 - old2;
+                if d1 != 0.0 || d2 != 0.0 {
+                    let imp = p.t1 * d1 + p.t2 * d2;
+                    group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
+                    group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
+                }
+            }
         }
-        // —— 分裂冲量（位置修正独立通道；M1）——
-        // 目标分离速度 = bias_target；累积器 pbias ≥ 0、单向下界；
-        // 只写偏置速度 scratch（外环按 dt 位移写回位置），真实速度不受影响。
+    }
+
+    // —— 分裂冲量（位置修正独立通道；M1；每点一遍）——
+    // 目标分离速度 = bias_target；累积器 pbias ≥ 0、单向下界；
+    // 只写偏置速度 scratch（外环按 dt 位移写回位置），真实速度不受影响。
+    for k in 0..npts {
+        let idx = if rev { npts - 1 - k } else { k };
+        let p = &mut c.points[idx];
         if p.bias_target > 0.0 {
             let va = group_vel(blv, bav, local_of, ai, p.ra);
             let vb = group_vel(blv, bav, local_of, bi, p.rb);
@@ -841,6 +860,7 @@ fn solve_island_group(
     slop: f32,
     match_dist: f32,
     shock_iterations: u32,
+    normal_inner: u32,
 ) {
     for &ii in awake {
         let isl = &islands[ii];
@@ -880,11 +900,11 @@ fn solve_island_group(
         for it in 0..iters {
             if it % 2 == 0 {
                 for c in cbuf.iter_mut() {
-                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, false);
+                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, false, normal_inner);
                 }
             } else {
                 for c in cbuf.iter_mut().rev() {
-                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, true);
+                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, true, normal_inner);
                 }
             }
         }
@@ -894,7 +914,7 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                solve_constraint(c, lv, av, blv, bav, local_of, bodies, true);
+                solve_constraint(c, lv, av, blv, bav, local_of, bodies, true, normal_inner);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。

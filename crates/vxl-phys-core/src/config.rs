@@ -49,6 +49,13 @@ pub struct PhysConfig {
     pub substeps: u32,
     /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 16。
     pub velocity_iterations: u32,
+    /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
+    /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
+    /// 3 自由度）+ 强转动耦合，单向 GS 的慢模正在歧管内部——内层 K 遍把歧管内
+    /// 收敛等价提到 ≈K×外层。实测（45 盒最小沸腾档）：16 次外层残留 ≈15% 重力
+    /// 增量（微抖 |v|≈0.03 永不入睡，角点接触下升级沸腾），内层 4 遍后入睡。
+    /// 1 = 关闭（M0 行为）；默认 4。代价 ≈ 仅法向通道 ×K。
+    pub normal_inner: u32,
     /// 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
     /// 主迭代后再**反序**过一遍全部约束，把底层承载沿约束图反向传播一次——
     /// 深层堆叠（>16 层）收敛所需迭代数 ≈ 2×层数，反序一遍等效补多轮。
@@ -100,6 +107,7 @@ impl Default for PhysConfig {
             dt: 1.0 / 60.0,
             substeps: 1,
             velocity_iterations: 16,
+            normal_inner: 4,
             shock_iterations: 0,
             contact_skin: 0.01,
             gjk_tolerance: 1e-5,
