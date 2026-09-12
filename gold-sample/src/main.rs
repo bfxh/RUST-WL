@@ -265,4 +265,33 @@ fn main() {
         );
     }
     println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
+    // 嗡振画像：超阈分解（线性/角速分别）+ 最活跃体明细（含层高）。
+    let (mut only_lin, mut only_ang, mut both, mut clean) = (0, 0, 0, 0);
+    let mut top: Vec<(usize, f32, f32, f32)> = Vec::new();
+    for &i in &vids {
+        let v = vw.bodies.linvel[i].length();
+        let w = vw.bodies.angvel(i).length();
+        let (l, a) = (v >= 0.04, w >= 0.05);
+        match (l, a) {
+            (true, true) => both += 1,
+            (true, false) => only_lin += 1,
+            (false, true) => only_ang += 1,
+            (false, false) => clean += 1,
+        }
+        top.push((i, v, w, vw.bodies.position[i].y));
+    }
+    println!(
+        "== 阈值分解：仅线性超阈 {only_lin} | 仅角速超阈 {only_ang} | 双超 {both} | 阈值下 {clean}（共 {}）",
+        vids.len()
+    );
+    top.sort_by(|a, b| b.1.total_cmp(&a.1));
+    println!("== |v| 前 8（体, |v|, |ω|, y）：");
+    for &(i, v, w, y) in top.iter().take(8) {
+        println!("   #{i} |v| {v:.3} |w| {w:.3} y {y:.3}");
+    }
+    top.sort_by(|a, b| b.2.total_cmp(&a.2));
+    println!("== |ω| 前 8（体, |v|, |ω|, y）：");
+    for &(i, v, w, y) in top.iter().take(8) {
+        println!("   #{i} |v| {v:.3} |w| {w:.3} y {y:.3}");
+    }
 }
