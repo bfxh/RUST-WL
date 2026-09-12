@@ -1,0 +1,10 @@
+[package]
+name = "vxl-phys-solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 刚体求解：顺序冲量（TGS-Soft 同族）+ 并查集分岛 + 休眠 + CCD 接口"
+
+[dependencies]
+vxl-phys-core = { workspace = true }
+vxl-phys-narrow = { workspace = true }

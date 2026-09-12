@@ -1,0 +1,9 @@
+[package]
+name = "vxl-phys-field"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 力场注册表（重力/风/爆炸/吸引/排斥/涡流/自定义）"
+
+[dependencies]
+vxl-phys-core = { workspace = true }

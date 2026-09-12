@@ -1,0 +1,9 @@
+[package]
+name = "vxl-phys-replay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 录制/回放/确定性哈希"
+
+[dependencies]
+vxl-phys-core = { workspace = true }

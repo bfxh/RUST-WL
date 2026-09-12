@@ -1,0 +1,9 @@
+[package]
+name = "vxl-phys-broad"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 宽相：BVH + 网格哈希混合（M0：均匀空间哈希网格）"
+
+[dependencies]
+vxl-phys-core = { workspace = true }

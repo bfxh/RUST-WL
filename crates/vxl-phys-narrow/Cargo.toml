@@ -1,0 +1,9 @@
+[package]
+name = "vxl-phys-narrow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 窄相：SAT 凸-凸 + 参考面裁剪流形 + 球解析 + 高度场特化"
+
+[dependencies]
+vxl-phys-core = { workspace = true }

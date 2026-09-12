@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+# 依赖 DAG（PHYS-ENGINE-VXLPHYS-V1 §1，禁止环）：
+#   core <- broad / narrow / integrate / solver / field / replay
+#   narrow <- terrain <- vxl-phys(门面)
+members = [
+    "crates/vxl-phys-core",
+    "crates/vxl-phys-broad",
+    "crates/vxl-phys-narrow",
+    "crates/vxl-phys-solver",
+    "crates/vxl-phys-integrate",
+    "crates/vxl-phys-field",
+    "crates/vxl-phys-terrain",
+    "crates/vxl-phys-replay",
+    "crates/vxl-phys-soft",
+    "crates/vxl-phys-fluid",
+    "crates/vxl-phys-vehicle",
+    "crates/vxl-phys-vehicles-air",
+    "crates/vxl-phys-marine",
+    "crates/vxl-phys-mech",
+    "crates/vxl-phys-destruction",
+    "crates/vxl-phys-gpu",
+    "crates/vxl-phys-memfind",
+    "crates/vxl-phys-ffi",
+    "crates/vxl-phys",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["VoxelForge / RUST WL"]
+
+[workspace.dependencies]
+vxl-phys-core = { path = "crates/vxl-phys-core" }
+vxl-phys-broad = { path = "crates/vxl-phys-broad" }
+vxl-phys-narrow = { path = "crates/vxl-phys-narrow" }
+vxl-phys-solver = { path = "crates/vxl-phys-solver" }
+vxl-phys-integrate = { path = "crates/vxl-phys-integrate" }
+vxl-phys-field = { path = "crates/vxl-phys-field" }
+vxl-phys-terrain = { path = "crates/vxl-phys-terrain" }
+vxl-phys-replay = { path = "crates/vxl-phys-replay" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"

@@ -1,0 +1,25 @@
+[package]
+name = "vxl-phys"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 门面：World 组装（默认管线 core+broad+narrow+solver+integrate+island）"
+
+[dependencies]
+vxl-phys-core = { workspace = true }
+vxl-phys-broad = { workspace = true }
+vxl-phys-narrow = { workspace = true }
+vxl-phys-solver = { workspace = true }
+vxl-phys-integrate = { workspace = true }
+vxl-phys-field = { workspace = true }
+vxl-phys-terrain = { workspace = true }
+vxl-phys-replay = { workspace = true }
+
+[[example]]
+name = "m0_pyramid"
+
+[[example]]
+name = "m0_bench"
+
+[[example]]
+name = "determinism"
