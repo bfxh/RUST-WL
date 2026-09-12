@@ -47,6 +47,8 @@ struct PointConstraint {
     nmass: f32,
     tmass1: f32,
     tmass2: f32,
+    /// 切向 2×2 矩阵交叉项 k12（联立解用；见 `contact_mass_cross`）。
+    tcross: f32,
     /// M1 软接触（TGS-Soft 语义，与 Rapier 0.35 同构）：法向目标分离速度
     /// rhs = 去穿透速率（erp·depth，钳 ±max_corrective_velocity）− speculative
     /// 项（浅缝允许一个 tick 内闭合）+ 弹性目标（e·vn，e>0 时）。
@@ -179,6 +181,34 @@ fn contact_mass(
     } else {
         0.0
     }
+}
+
+/// 切向 2×2 有效质量矩阵的**交叉项** k12（Rapier `ContactConstraintTangentPart.r[2]`
+/// 同源）：k12 = J1ᵀ·M⁻¹·J2 = (im_a+im_b)·(d1·d2) + Σ (r×d1)ᵀ·I⁻¹·(r×d2)。
+/// 各向异性 K 下逐轴（对角）解会留正交残差并旋转能量——摩擦模式在大堆里
+/// 被泵成弹射（金样源码注释原文）；必须联立解。
+#[allow(clippy::too_many_arguments)] // 与 contact_mass 同参数集（热路径内联）
+fn contact_mass_cross(
+    im_a: f32,
+    im_b: f32,
+    ra: Vec3,
+    rb: Vec3,
+    d1: Vec3,
+    d2: Vec3,
+    bodies: &BodySet,
+    a: usize,
+    b: usize,
+) -> f32 {
+    let mut k = (im_a + im_b) * d1.dot(d2);
+    if im_a > 0.0 {
+        let w = bodies.apply_world_inv_inertia(a, ra.cross(d2));
+        k += ra.cross(d1).dot(w);
+    }
+    if im_b > 0.0 {
+        let w = bodies.apply_world_inv_inertia(b, rb.cross(d2));
+        k += rb.cross(d1).dot(w);
+    }
+    k
 }
 
 fn tangents(n: Vec3) -> (Vec3, Vec3) {
@@ -671,6 +701,18 @@ fn build_constraint(
             a,
             b,
         );
+        // 切向联立解的交叉项（对角逐轴解的残差泵能问题，见 contact_mass_cross）。
+        let tcross = contact_mass_cross(
+            bodies.inv_mass[a],
+            bodies.inv_mass[b],
+            ra,
+            rb,
+            t1,
+            t2,
+            bodies,
+            a,
+            b,
+        );
 
         // —— M1 软接触目标（TGS-Soft 语义，Rapier 0.35 同构）——
         // 弹性：预解相对法向速度。
@@ -745,6 +787,7 @@ fn build_constraint(
             nmass,
             tmass1,
             tmass2,
+            tcross,
             rhs,
             cfm,
             friction: mu,
@@ -805,43 +848,44 @@ fn solve_constraint(
                 group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
                 group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
             }
-            // —— 摩擦（两切向，逐轴求解 + 每轴后**径向锥投影**）——
-            // Box2D v3 / Jolt 同族：把累计切向冲量向量 (pt1, pt2) 投影到半径
-            // μ·pn 的圆盘（而不是逐轴盒形钳制 + 事后缩放）。旧实现两轴可各自
-            // 独立饱和到 ±μ·pn（角点处模长 √2·μ·pn）再被径向缩回——等效摩擦
-            // 上限随求解序在两轴间漂移，4 点接触 + 高 μ 下形成相干力矩：
-            // 2 列密堆实测 μ=0.5 缓慢倾覆/爬行（μ=0.05 稳定、μ=0 冻结）。
-            for key in 0..2usize {
-                let (t, tmass) = if key == 0 {
-                    (p.t1, p.tmass1)
-                } else {
-                    (p.t2, p.tmass2)
-                };
+            // —— 摩擦（**精确 2×2 联立切向解** + 径向锥投影）——
+            // Rapier `contact_constraint_element.rs` 同式（Δ = −K⁻¹·dvel 后
+            // cap_magnitude(μ·pn)）：K = 切向有效质量矩阵（含交叉项 k12）。
+            // 对角逐轴解在 K 各向异性时留正交残差、旋转能量——「把大堆的
+            // 摩擦模式泵成弹射/蠕动」（金样源码注释原文，即本引擎塔蠕动的根因）。
+            // k12=0 时退化为原逐轴解（逐式等价）。
+            {
                 let va = group_vel(lv, av, local_of, ai, p.ra);
                 let vb = group_vel(lv, av, local_of, bi, p.rb);
-                let vt = (vb - va).dot(t);
-                let lam = tmass * (-vt);
-                let (old1, old2) = (p.pt1, p.pt2);
-                let (mut a1, mut a2) = if key == 0 {
-                    (old1 + lam, old2)
-                } else {
-                    (old1, old2 + lam)
-                };
-                let max_f = p.friction * p.pn;
-                let f2 = a1 * a1 + a2 * a2;
-                if f2 > max_f * max_f && f2 > 1e-20 {
-                    let s = max_f / f2.sqrt();
-                    a1 *= s;
-                    a2 *= s;
-                }
-                p.pt1 = a1;
-                p.pt2 = a2;
-                let d1 = a1 - old1;
-                let d2 = a2 - old2;
-                if d1 != 0.0 || d2 != 0.0 {
-                    let imp = p.t1 * d1 + p.t2 * d2;
-                    group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
-                    group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
+                let dv = vb - va;
+                let vt1 = dv.dot(p.t1);
+                let vt2 = dv.dot(p.t2);
+                let k11 = if p.tmass1 > 0.0 { 1.0 / p.tmass1 } else { 0.0 };
+                let k22 = if p.tmass2 > 0.0 { 1.0 / p.tmass2 } else { 0.0 };
+                let k12 = p.tcross;
+                let det = k11 * k22 - k12 * k12;
+                if det > 1e-12 {
+                    let inv = 1.0 / det;
+                    let dv1 = (-vt1 * k22 + vt2 * k12) * inv;
+                    let dv2 = (-vt2 * k11 + vt1 * k12) * inv;
+                    let (old1, old2) = (p.pt1, p.pt2);
+                    let (mut a1, mut a2) = (old1 + dv1, old2 + dv2);
+                    let max_f = p.friction * p.pn;
+                    let f2 = a1 * a1 + a2 * a2;
+                    if f2 > max_f * max_f && f2 > 1e-20 {
+                        let s = max_f / f2.sqrt();
+                        a1 *= s;
+                        a2 *= s;
+                    }
+                    p.pt1 = a1;
+                    p.pt2 = a2;
+                    let d1 = a1 - old1;
+                    let d2 = a2 - old2;
+                    if d1 != 0.0 || d2 != 0.0 {
+                        let imp = p.t1 * d1 + p.t2 * d2;
+                        group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
+                        group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
+                    }
                 }
             }
         }
