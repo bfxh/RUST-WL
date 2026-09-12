@@ -1,0 +1,14 @@
+# 金样对拍包（T5）：独立于主 workspace（自带 [workspace]，CI 的 --workspace
+# 命令不会编译它；金样 job 独立，届时单列）。依赖 vxl-phys（本仓）+
+# rapier3d（常设对照金样，SPEC §金样约定）。
+[workspace]
+
+[package]
+name = "gold-sample"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+rapier3d = "0.35.3"
+vxl-phys = { path = "../crates/vxl-phys" }
