@@ -131,6 +131,30 @@ Rapier = 0.35.3 默认（TGS-Soft 4 迭代 + 软接触 + speculative 预测距�
 / Box2D v3 soft contact 语义），金样容差表作为验收基准（首档：col45 位置
 2.5cm 内、pile5/tower25 入睡时点差距入容差表）。
 
+### 进度更新（2026-09-13 第六段：软接触首版实验（未落地）+ Rapier 配方提取）
+
+**从 rapier 0.35.3 源码提取的精确配方**（`SpringCoefficients`，逐行对齐；
+`stash@{0}` 保存了我们的首版实现，可 pop 复用）：
+- `ω = 2πf`；`erp_inv_dt = ω/(dt·ω + 2ζ)`；`erp = dt·erp_inv_dt`；
+  `inv = 1/erp − 1`；`cfm_coeff = inv²/((1+inv)·4ζ²)`；`cfm = 1/(1+cfm_coeff)`；
+- 每点：`rhs_wo_bias = max(0,dist)/dt`（speculative 项）；`rhs_bias =
+  clamp(erp_inv_dt·dist, −3, 0)`；**穿透接触 cfm=1（硬投影）、speculative
+  接触 cfm<1（软）**；
+- 更新式：`λ ← cfm·(λ + m·(rhs − vn))`，钳 ≥ 0（与我们的重排逐式同构）；
+- 参数：动态对 30 Hz / ζ=10；含静态侧 60 Hz / ζ=10；`max_corrective_velocity`
+  3.0；**预测距离 0.02；接触回收（recycle）true、回收距离 0.05**。
+
+**首版实现实测（本轮未落地，如实记录）**：45 盒更贴金样（末态 max|Δpos|
+2.5cm → 1.4cm，我们开始像 Rapier 一样每层沉降）；**但 5 层堆回归沸腾**
+（|v| 6.2 持续到 t=600）且塔更糟（弹射 43 m/s 出世界 y −91）。**结论：
+单独换软接触公式不够——Rapier 的深堆稳定同时依赖「接触点回收」（跨帧
+稳定 ID + 大预测距离），即 T1 的「接触 ID 跨帧匹配」项。** 软接触改动已
+`git stash`（stash@{0}）等候与该件一起落地，不单独合入（避免净退步进主干）。
+
+**下一段施工顺序**：① 窄相接触特征 ID（clip 面/棱特征命名 + 跨帧 ID 匹配
+替代近邻匹配）+ 预测距离 0.02；② 按上述配方落地软接触（pop stash 复用）；
+③ 金样三场景（col45/pile5/tower25）作验收门。
+
 ### T1 求解器稳定性（万级堆叠稳定；对靶：压力堆从不入睡 + deep 7）
 - ~~分组切分 bug~~ ✅ 已修；~~分裂冲量（位置通道分离）~~ ✅ 已落地（8B −24%）；
   ~~歧管内层扫掠（normal_inner=4）~~ ✅ 已落地（5 层留缝完全入睡）；

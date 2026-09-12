@@ -54,10 +54,12 @@ fn spawn_positions(s: &Scene) -> Vec<Vec3> {
     out
 }
 
-fn build_vxl(s: &Scene, iters: u32) -> (World, Vec<usize>) {
+fn build_vxl(s: &Scene, iters: u32, skin: f32, inner: u32) -> (World, Vec<usize>) {
     let cfg = PhysConfig {
         velocity_iterations: iters,
         threads: 8,
+        contact_skin: skin,
+        normal_inner: inner.max(1),
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -203,9 +205,11 @@ fn main() {
     let scene_name = args.next().unwrap_or_else(|| "tower25".into());
     let ticks: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
     let vxl_iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(16);
+    let skin: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.01);
+    let inner: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4);
     let s = scene_of(&scene_name);
 
-    let (mut vw, vids) = build_vxl(&s, vxl_iters);
+    let (mut vw, vids) = build_vxl(&s, vxl_iters, skin, inner);
     let (mut rw, rhs) = build_rapier(&s);
     let refs = ref_indices(vids.len());
     println!(
