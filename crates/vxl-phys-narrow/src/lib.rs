@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use heightfield::HeightField;
 use polytope::ConvexPolytope;
-use vxl_phys_core::{Quat, Shape, Vec3, CYLINDER_SEGMENTS};
+use vxl_phys_core::{JobSystem, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
 
 /// 单个接触点：世界坐标 + 穿透深度（可为小的负值 = 预期接触，供 warm starting 续接）。
 #[derive(Clone, Copy, Debug)]
@@ -44,6 +44,7 @@ pub trait NarrowPhase {
         pairs: &[(u32, u32)],
         heightfields: &[HeightField],
         out: &mut Vec<Manifold>,
+        jobs: &dyn JobSystem,
     );
 }
 
@@ -83,6 +84,7 @@ impl WorldPoly {
 }
 
 /// 默认窄相（SAT + 解析球 + 高度场采样）。工作缓冲全程复用（无逐步分配）。
+#[derive(Clone)]
 pub struct DefaultNarrowPhase {
     skin: f32,
     /// 接触点空间去重最小间距（m）：2×skin，且 ≥ 1 cm。
@@ -537,8 +539,8 @@ impl DefaultNarrowPhase {
             try_point(&mut self.cand, center.x, center.z, h);
         }
         // 2) 所在格 + 邻域 3×3 网格节点。
-        let ix0 = ((center.x - hf.origin_x) / hf.cell).floor() as i64;
-        let iz0 = ((center.z - hf.origin_z) / hf.cell).floor() as i64;
+        let ix0 = ((center.x - hf.origin_x) / hf.spacing).floor() as i64;
+        let iz0 = ((center.z - hf.origin_z) / hf.spacing).floor() as i64;
         for dix in -1i64..=1 {
             for diz in -1i64..=1 {
                 let ix = ix0 + dix;
@@ -547,8 +549,8 @@ impl DefaultNarrowPhase {
                     continue;
                 }
                 let h = hf.height_ix(ix as u32, iz as u32);
-                let px = hf.origin_x + ix as f32 * hf.cell;
-                let pz = hf.origin_z + iz as f32 * hf.cell;
+                let px = hf.origin_x + ix as f32 * hf.spacing;
+                let pz = hf.origin_z + iz as f32 * hf.spacing;
                 try_point(&mut self.cand, px, pz, h);
             }
         }
@@ -606,155 +608,197 @@ impl NarrowPhase for DefaultNarrowPhase {
         pairs: &[(u32, u32)],
         heightfields: &[HeightField],
         out: &mut Vec<Manifold>,
+        jobs: &dyn JobSystem,
     ) {
         out.clear();
-        for &(a, b) in pairs {
-            let (sa, sb) = (&bodies.shape[a as usize], &bodies.shape[b as usize]);
-            let pa = bodies.position[a as usize];
-            let pb = bodies.position[b as usize];
-            let ra = bodies.rotation[a as usize];
-            let rb = bodies.rotation[b as usize];
-
-            // 高度场参与的对。
-            let hf_a = match sa {
-                Shape::HeightField(id) => Some(*id as usize),
-                _ => None,
-            };
-            let hf_b = match sb {
-                Shape::HeightField(id) => Some(*id as usize),
-                _ => None,
-            };
-            if hf_a.is_some() && hf_b.is_some() {
-                continue;
+        let threads = jobs.threads();
+        // 小规模串行（线程启动开销 > 收益）；并行 = 每块独立 clone（含自有
+        // scratch），结果按块序拼接 = pair 序（§5 确定性契约）。
+        if threads <= 1 || pairs.len() < 2048 {
+            for &(a, b) in pairs {
+                self.process_pair(a, b, bodies, heightfields, out);
             }
-            if hf_a.is_some() || hf_b.is_some() {
-                let (body_shape, bpos, brot, hf_is_a) = if hf_a.is_some() {
-                    (sb, pb, rb, true)
-                } else {
-                    (sa, pa, ra, false)
-                };
-                let hf = match heightfields.get(hf_a.or(hf_b).unwrap()) {
-                    Some(h) => h,
-                    None => continue,
-                };
-                let ok = match *body_shape {
-                    Shape::Sphere { radius } => self.sphere_heightfield(bpos, radius, hf),
-                    Shape::Box { .. } | Shape::Cylinder { .. } => {
-                        let idx = match self.poly_for(body_shape) {
-                            Some(i) => i,
-                            None => continue,
-                        };
-                        self.poly_heightfield(idx, bpos, brot, hf)
+            return;
+        }
+        let this = &*self;
+        let n_chunks = threads.min(pairs.len().div_ceil(2048));
+        let chunk = pairs.len().div_ceil(n_chunks);
+        let mut outs: Vec<Vec<Manifold>> = vec![Vec::new(); n_chunks];
+        vxl_phys_core::schedule::for_each_chunk_mut(
+            &mut outs,
+            threads,
+            2,
+            |start_slot, _len, slots| {
+                // slots[k] = outs[start_slot + k]（块内逐槽对应各自的 pair 区间）。
+                for (k, co) in slots.iter_mut().enumerate() {
+                    let oi = start_slot + k;
+                    let range = oi * chunk..((oi + 1) * chunk).min(pairs.len());
+                    let mut np = this.clone();
+                    for &(a, b) in &pairs[range] {
+                        np.process_pair(a, b, bodies, heightfields, co);
                     }
-                    Shape::HeightField(_) => continue,
-                };
-                if !ok {
-                    continue;
                 }
-                // 地形法线（取最深接触的采样法线）。
-                let deepest = self.cand[0];
-                let n_t = hf
-                    .sample(deepest.point.x, deepest.point.z)
-                    .map(|(_, n)| n)
-                    .unwrap_or(Vec3::Y);
-                // 流形法线 a→b：a=地形 → +n_t（推向 b）；b=地形 → -n_t。
-                let normal = if hf_is_a { n_t } else { -n_t };
+            },
+        );
+        for mut co in outs {
+            out.append(&mut co);
+        }
+    }
+}
+
+impl DefaultNarrowPhase {
+    fn process_pair(
+        &mut self,
+        a: u32,
+        b: u32,
+        bodies: &vxl_phys_core::BodySet,
+        heightfields: &[HeightField],
+        out: &mut Vec<Manifold>,
+    ) {
+        let (sa, sb) = (&bodies.shape[a as usize], &bodies.shape[b as usize]);
+        let pa = bodies.position[a as usize];
+        let pb = bodies.position[b as usize];
+        let ra = bodies.rot(a as usize);
+        let rb = bodies.rot(b as usize);
+
+        // 高度场参与的对。
+        let hf_a = match sa {
+            Shape::HeightField(id) => Some(*id as usize),
+            _ => None,
+        };
+        let hf_b = match sb {
+            Shape::HeightField(id) => Some(*id as usize),
+            _ => None,
+        };
+        if hf_a.is_some() && hf_b.is_some() {
+            return;
+        }
+        if hf_a.is_some() || hf_b.is_some() {
+            let (body_shape, bpos, brot, hf_is_a) = if hf_a.is_some() {
+                (sb, pb, rb, true)
+            } else {
+                (sa, pa, ra, false)
+            };
+            let hf = match heightfields.get(hf_a.or(hf_b).unwrap()) {
+                Some(h) => h,
+                None => return,
+            };
+            let ok = match *body_shape {
+                Shape::Sphere { radius } => self.sphere_heightfield(bpos, radius, hf),
+                Shape::Box { .. } | Shape::Cylinder { .. } => {
+                    let idx = match self.poly_for(body_shape) {
+                        Some(i) => i,
+                        None => return,
+                    };
+                    self.poly_heightfield(idx, bpos, brot, hf)
+                }
+                Shape::HeightField(_) => return,
+            };
+            if !ok {
+                return;
+            }
+            // 地形法线（取最深接触的采样法线）。
+            let deepest = self.cand[0];
+            let n_t = hf
+                .sample(deepest.point.x, deepest.point.z)
+                .map(|(_, n)| n)
+                .unwrap_or(Vec3::Y);
+            // 流形法线 a→b：a=地形 → +n_t（推向 b）；b=地形 → -n_t。
+            let normal = if hf_is_a { n_t } else { -n_t };
+            out.push(Manifold {
+                a,
+                b,
+                normal,
+                points: self.cand.clone(),
+            });
+            return;
+        }
+
+        // 非 heightfield 对。
+        match (*sa, *sb) {
+            (Shape::Sphere { radius: ra_ }, Shape::Sphere { radius: rb_ }) => {
+                let d = pb - pa;
+                let dist = d.length();
+                let rr = ra_ + rb_;
+                if dist >= rr || dist < 1e-9 {
+                    if dist < 1e-9 {
+                        out.push(Manifold {
+                            a,
+                            b,
+                            normal: Vec3::Y,
+                            points: vec![ContactPoint {
+                                point: pa,
+                                depth: rr,
+                            }],
+                        });
+                    }
+                    return;
+                }
+                let n = d * (1.0 / dist);
+                let point = pa + n * (ra_ - (rr - dist) * 0.5);
                 out.push(Manifold {
                     a,
                     b,
-                    normal,
-                    points: self.cand.clone(),
+                    normal: n,
+                    points: vec![ContactPoint {
+                        point,
+                        depth: rr - dist,
+                    }],
                 });
-                continue;
             }
-
-            // 非 heightfield 对。
-            match (*sa, *sb) {
-                (Shape::Sphere { radius: ra_ }, Shape::Sphere { radius: rb_ }) => {
-                    let d = pb - pa;
-                    let dist = d.length();
-                    let rr = ra_ + rb_;
-                    if dist >= rr || dist < 1e-9 {
-                        if dist < 1e-9 {
-                            out.push(Manifold {
-                                a,
-                                b,
-                                normal: Vec3::Y,
-                                points: vec![ContactPoint {
-                                    point: pa,
-                                    depth: rr,
-                                }],
-                            });
-                        }
-                        continue;
-                    }
-                    let n = d * (1.0 / dist);
-                    let point = pa + n * (ra_ - (rr - dist) * 0.5);
+            (Shape::Sphere { radius }, convex) => {
+                if let Some((n, depth, point)) = self.sphere_convex_ab(pa, radius, &convex, pb, rb)
+                {
                     out.push(Manifold {
                         a,
                         b,
                         normal: n,
-                        points: vec![ContactPoint {
-                            point,
-                            depth: rr - dist,
-                        }],
+                        points: vec![ContactPoint { point, depth }],
                     });
                 }
-                (Shape::Sphere { radius }, convex) => {
-                    if let Some((n, depth, point)) =
-                        self.sphere_convex_ab(pa, radius, &convex, pb, rb)
-                    {
+            }
+            (convex, Shape::Sphere { radius }) => {
+                // 球在 b：convex = a。用球-凸路径后翻转法线。
+                if let Some((n_ba, depth, point)) =
+                    self.sphere_convex_ab(pb, radius, &convex, pa, ra)
+                {
+                    out.push(Manifold {
+                        a,
+                        b,
+                        normal: -n_ba,
+                        points: vec![ContactPoint { point, depth }],
+                    });
+                }
+            }
+            (
+                Shape::Box { .. } | Shape::Cylinder { .. },
+                Shape::Box { .. } | Shape::Cylinder { .. },
+            ) => {
+                let ia = match self.poly_for(sa) {
+                    Some(i) => i,
+                    None => return,
+                };
+                let ib = match self.poly_for(sb) {
+                    Some(i) => i,
+                    None => return,
+                };
+                self.poly_a.fill(&self.polys[ia], pa, ra);
+                self.poly_b.fill(&self.polys[ib], pb, rb);
+                if let Some((sep, n, src)) = self.sat(pb - pa) {
+                    if sep > self.skin {
+                        return;
+                    }
+                    if self.clip(n, src) {
                         out.push(Manifold {
                             a,
                             b,
                             normal: n,
-                            points: vec![ContactPoint { point, depth }],
+                            points: self.cand.clone(),
                         });
                     }
                 }
-                (convex, Shape::Sphere { radius }) => {
-                    // 球在 b：convex = a。用球-凸路径后翻转法线。
-                    if let Some((n_ba, depth, point)) =
-                        self.sphere_convex_ab(pb, radius, &convex, pa, ra)
-                    {
-                        out.push(Manifold {
-                            a,
-                            b,
-                            normal: -n_ba,
-                            points: vec![ContactPoint { point, depth }],
-                        });
-                    }
-                }
-                (
-                    Shape::Box { .. } | Shape::Cylinder { .. },
-                    Shape::Box { .. } | Shape::Cylinder { .. },
-                ) => {
-                    let ia = match self.poly_for(sa) {
-                        Some(i) => i,
-                        None => continue,
-                    };
-                    let ib = match self.poly_for(sb) {
-                        Some(i) => i,
-                        None => continue,
-                    };
-                    self.poly_a.fill(&self.polys[ia], pa, ra);
-                    self.poly_b.fill(&self.polys[ib], pb, rb);
-                    if let Some((sep, n, src)) = self.sat(pb - pa) {
-                        if sep > self.skin {
-                            continue;
-                        }
-                        if self.clip(n, src) {
-                            out.push(Manifold {
-                                a,
-                                b,
-                                normal: n,
-                                points: self.cand.clone(),
-                            });
-                        }
-                    }
-                }
-                _ => {}
             }
+            _ => {}
         }
     }
 }
@@ -762,7 +806,7 @@ impl NarrowPhase for DefaultNarrowPhase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vxl_phys_core::BodySet;
+    use vxl_phys_core::{BodySet, SerialJobSystem};
 
     fn manifolds_for(b: &BodySet, hf: &[HeightField]) -> Vec<Manifold> {
         let mut np = DefaultNarrowPhase::new(0.01);
@@ -774,7 +818,7 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        np.collide(b, &pairs, hf, &mut out);
+        np.collide(b, &pairs, hf, &mut out, &SerialJobSystem);
         out
     }
 

@@ -1,19 +1,21 @@
 # RUST WL —— vxl_phys 自研 Rust 物理引擎
 
-> 依据：[`docs/PHYS-ENGINE-VXLPHYS-V1.md`](docs/PHYS-ENGINE-VXLPHYS-V1.md)
-> （PHYS-ENGINE-VXLPHYS-V1 规格书）。定位：**独立商业级 Rust 物理引擎**，
-> 纯 Rust、确定性优先、模块化 crate DAG；404 是它的第一个大型客户。
-> 仓库目录名「RUST WL」= **Rust 物理（WuLi）**。
+> 依据：[`docs/SPEC.md`](docs/SPEC.md)（引擎权威规格，V1.3）+ 上游总架构
+> `VoxelForge-V3/docs/PHYS-ENGINE-VXLPHYS-V2.md`（v2 权威，Rust 路线；施工分解见
+> `VoxelForge-V3/docs/SPEC-VXLPHYS-M0-V1.md`）；M0 实测记录见
+> [`docs/M0-GATES.md`](docs/M0-GATES.md)。
+> 定位：**独立商业级 Rust 物理引擎**，纯 Rust、确定性优先、模块化 crate DAG，
+> 与任何消费工程零关联；仓库目录名「RUST WL」= **Rust 物理（WuLi）**。
 
-## 状态：M0 MVE（进行中）
+## 状态：M0 骨架续建（T1–T4 已交付，待 CI 绿）
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
-| **M0 MVE** | 盒/圆柱/高度场 + 顺序冲量 + 岛 + 确定性哈希；1 万静态+1 千动态 ≥60Hz | ✅ 竖切可跑（见下） |
-| M1 刚体商业级 | §3 最低通过档 + §4.1-4.5/4.11-4.14 全档 + TGS-Soft + BVH + GJK/EPA + 并行 JobSystem | ⬜ |
-| M2 车辆+地形+破坏 | §4.9/4.10 | ⬜ |
-| M3 软体/布料/流体 CPU | §4.6-4.8 CPU 档 | ⬜ |
-| M4 GPU | §8 全部 | ⬜ |
+| **M0 MVE** | 盒/圆柱/高度场 + 顺序冲量 + 岛 + 确定性哈希；1 万静态+1 千动态 ≥60Hz | ✅ 竖切可跑 |
+| **M0 骨架续建（V2 §11）** | 相位 arena + hot/cold 32B（`core/mem.rs`）、xxh3-128 规范化哈希（10 轮断言）、m0_gates 门槛（p50 1.09ms）、CI 四门 + 三编译器矩阵 + 词汇禁令扫描 | ✅ 交付（记录：`docs/M0-GATES.md`） |
+| M1 刚体商业级 | V2 §3 顶尖化全量 + §4.1-4.5/4.11-4.14 + 约束图染色 + 金样 | ⬜ |
+| M2 键图 + 双 ABI | Agent/Port/Bond + C ABI + trait Shape 插件面 | ⬜ |
+| M3 坍塌 / M4 软体 / M5 流体 / M6 风+收口 | 见 V2 §11 | ⬜ |
 
 ## 结构（§1 crate DAG，禁止环）
 
@@ -49,15 +51,22 @@ crates/
 # 全量测试（含确定性/稳定性验收测试）
 cargo test --workspace --release
 
-# M0 演示：6 层金字塔 + 圆柱 + 球，10 秒，健康检查
-cargo run --release -p vxl-phys --example m0_pyramid
+# M0 出口门槛：1 万静态+1 千动态 ≥60Hz + 健康 + 双跑哈希 + arena 平稳（JSON 报告）
+cargo run --release -p vxl-phys --example m0_gates
 
-# M0 基准：1 万静态 + 1 千动态，门槛 ≥ 60 Hz
-cargo run --release -p vxl-phys --example m0_bench
-
-# 确定性验证：两次 600 tick 全程哈希比对（不一致 = 退出码 1）
+# 确定性验证：10 轮 × 600 tick 全等（不一致 = 退出码 1）
 cargo run --release -p vxl-phys --example determinism
+
+# 词汇禁令扫描（裁决 61）
+bash scripts/vocab_scan.sh .
+
+# 并发原语 loom 模型（可选本地跑；CI 四门之一）
+RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test -p vxl-phys-core --test loom_primitives
 ```
+
+四门禁（CI，`feat/m0-gates` 起）：miri（core 子集）/ loom / TSan / ASan + 三编译器矩阵
+（MSVC/GCC/Clang）+ aarch64 跨平台哈希比对；详见 `.github/workflows/ci.yml` 与
+`docs/M0-GATES.md`。
 
 ## 确定性承诺（§5）
 

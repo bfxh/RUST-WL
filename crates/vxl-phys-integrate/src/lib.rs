@@ -32,7 +32,7 @@ impl Integrator {
             bodies.linvel[i] += accel * dt;
 
             let ang_accel = bodies.apply_world_inv_inertia(i, bodies.torque[i]);
-            bodies.angvel[i] += ang_accel * dt;
+            bodies.set_angvel_raw(i, bodies.angvel(i) + ang_accel * dt);
 
             // 限速（确定性钳制，逐轴比较顺序固定）。
             let lv = bodies.linvel[i];
@@ -40,10 +40,10 @@ impl Integrator {
             if sp > max_linear {
                 bodies.linvel[i] = lv * (max_linear / sp);
             }
-            let wv = bodies.angvel[i];
+            let wv = bodies.angvel(i);
             let ws = wv.length();
             if ws > max_angular {
-                bodies.angvel[i] = wv * (max_angular / ws);
+                bodies.set_angvel_raw(i, wv * (max_angular / ws));
             }
 
             bodies.force[i] = Vec3::ZERO;
@@ -58,7 +58,8 @@ impl Integrator {
                 continue;
             }
             bodies.position[i] = bodies.position[i] + bodies.linvel[i] * dt;
-            bodies.rotation[i] = bodies.rotation[i].integrate_angular(bodies.angvel[i], dt);
+            let q = bodies.rot(i).integrate_angular(bodies.angvel(i), dt);
+            bodies.set_rot(i, q);
         }
     }
 }

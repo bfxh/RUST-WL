@@ -3,7 +3,9 @@ name = "vxl-phys-replay"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vxl_phys 录制/回放/确定性哈希"
+description = "vxl_phys 录制/回放/确定性哈希（xxh3-128 规范化）"
 
 [dependencies]
 vxl-phys-core = { workspace = true }
+# §5 确定性域唯一真值：xxh3-128（E0 生产级，§14.1 拖累账已过）。
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

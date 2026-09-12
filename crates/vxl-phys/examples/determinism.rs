@@ -1,9 +1,15 @@
-//! M0 确定性验证（§5）：同一构造两次 600 tick 全程运行，每 60 tick 哈希比对。
-//! 任何不一致 → 退出码 1（CI 阻断提交）。
+//! M0 确定性验证（§5）：**同一构造连续 10 轮** 各跑 600 tick，每 60 tick 记录
+//! xxh3-128 状态哈希；任意轮与基线轮不一致 → 退出码 1（CI 阻断提交）。
+//!
+//! 输出 `FINAL_HASH=0x<32 hex>` 行供 CI 三编译器/双架构矩阵提取比对。
 //!
 //! 运行：cargo run --release -p vxl-phys --example determinism
 
-use vxl_phys::{BodyType, HeightField, PhysConfig, Quat, Recorder, Shape, Vec3, World};
+use vxl_phys::{HeightField, PhysConfig, Quat, Recorder, Shape, Vec3, World};
+
+const ROUNDS: usize = 10;
+const TICKS: u64 = 600;
+const PERIOD: u64 = 60;
 
 fn build_and_run() -> (Recorder, u32) {
     let mut w = World::new(PhysConfig::default());
@@ -27,8 +33,8 @@ fn build_and_run() -> (Recorder, u32) {
         w.add_dynamic(shape, Vec3::new(x, y, z), Quat::IDENTITY, 1000.0);
         n += 1;
     }
-    let mut rec = Recorder::new(60);
-    for t in 1..=600 {
+    let mut rec = Recorder::new(PERIOD);
+    for t in 1..=TICKS {
         w.step();
         rec.observe(t, w.state_hash());
     }
@@ -36,20 +42,37 @@ fn build_and_run() -> (Recorder, u32) {
 }
 
 fn main() {
-    println!("RUST WL / vxl_phys 确定性验证：两次 600 tick 全程比对（每 60 tick 状态哈希）");
-    let (a, n) = build_and_run();
-    let (b, _) = build_and_run();
-    let ok = a.matches(&b);
-    println!("动态体 {n}，比对 {} 个哈希采样", a.hashes.len());
-    for ((t, ha), (_, hb)) in a.hashes.iter().zip(b.hashes.iter()) {
-        let mark = if ha == hb { "==" } else { "!!" };
-        println!("tick {t:4}: {ha:016x} {mark} {hb:016x}");
+    println!(
+        "vxl_phys 确定性验证：{ROUNDS} 轮 × {TICKS} tick（每 {PERIOD} tick xxh3-128 比对）| {} {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    );
+    let (baseline, n) = build_and_run();
+    println!("动态体 {n}，每轮哈希采样 {} 个", baseline.hashes.len());
+
+    let mut all_ok = true;
+    for round in 2..=ROUNDS {
+        let (rec, _) = build_and_run();
+        if rec.matches(&baseline) {
+            println!("第 {round:2} 轮：== 全等（{} 采样）", rec.hashes.len());
+            continue;
+        }
+        all_ok = false;
+        eprintln!("第 {round:2} 轮：❌ 与基线不一致");
+        for ((t, hb), (_, hr)) in baseline.hashes.iter().zip(rec.hashes.iter()) {
+            if hb != hr {
+                eprintln!("  tick {t:4}: 基线 {hb:032x} vs 本轮 {hr:032x}");
+            }
+        }
     }
-    if ok {
-        println!("✅ 确定性 PASS（bit 级一致）");
+
+    let (last_tick, last_hash) = *baseline.hashes.last().expect("至少一次采样");
+    println!("基线末态（tick {last_tick}）：{last_hash:032x}");
+    println!("FINAL_HASH=0x{last_hash:032x}");
+    if all_ok {
+        println!("✅ 确定性 PASS（{ROUNDS} 轮 bit 级一致）");
     } else {
         eprintln!("❌ 确定性 FAIL —— 阻断提交（§5）");
         std::process::exit(1);
     }
-    let _ = BodyType::Static;
 }

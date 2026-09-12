@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-# 依赖 DAG（PHYS-ENGINE-VXLPHYS-V1 §1，禁止环）：
+# 依赖 DAG（docs/SPEC.md §1，禁止环）：
 #   core <- broad / narrow / integrate / solver / field / replay
 #   narrow <- terrain <- vxl-phys(门面)
 members = [
@@ -29,7 +29,7 @@ members = [
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-authors = ["VoxelForge / RUST WL"]
+authors = ["RUST WL"]
 
 [workspace.dependencies]
 vxl-phys-core = { path = "crates/vxl-phys-core" }

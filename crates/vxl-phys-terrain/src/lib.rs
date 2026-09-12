@@ -1,6 +1,6 @@
 //! # vxl-phys-terrain
 //!
-//! 可破坏地形（§4.9）：高度场体素账本（与 404 现役挖掘账本同构）+ 柱状支撑图。
+//! 可破坏地形（§4.9）：高度场体素账本 + 柱状支撑图。
 //! M0：高度场集合管理 + 挖掘（dig）+ 包围盒输出；断裂/Voronoi 在 vxl-phys-destruction。
 
 #![forbid(unsafe_code)]

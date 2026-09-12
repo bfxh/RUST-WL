@@ -5,4 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "vxl_phys 核心：数学/内存/任务调度/配置（零外部重依赖）"
 
-[dependencies]
+# loom 仅在 `--cfg loom` 下参与构建（并发原语模型；见 tests/loom_primitives.rs）。
+# 常规构建不引入任何依赖——保持「零外部重依赖」。
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

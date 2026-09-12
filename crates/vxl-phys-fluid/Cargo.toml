@@ -3,6 +3,6 @@ name = "vxl-phys-fluid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vxl_phys 专项模块（骨架，见 PHYS-ENGINE-VXLPHYS-V1）"
+description = "vxl_phys 专项模块（骨架，见 docs/SPEC.md）"
 
 [dependencies]
