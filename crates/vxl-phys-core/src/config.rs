@@ -49,6 +49,11 @@ pub struct PhysConfig {
     pub substeps: u32,
     /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 16。
     pub velocity_iterations: u32,
+    /// 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
+    /// 主迭代后再**反序**过一遍全部约束，把底层承载沿约束图反向传播一次——
+    /// 深层堆叠（>16 层）收敛所需迭代数 ≈ 2×层数，反序一遍等效补多轮。
+    /// 0 = 关闭（默认，M0 数值行为不变）；建议 2~8（成本 ≈ shock/velocity 比例）。
+    pub shock_iterations: u32,
     /// §4.3 接触 speculative margin（skin）四档：0.02/0.01/0.005/0.002。
     pub contact_skin: f32,
     /// §4.3 GJK 收敛容差（M0 SAT 路径仅存档）。
@@ -95,6 +100,7 @@ impl Default for PhysConfig {
             dt: 1.0 / 60.0,
             substeps: 1,
             velocity_iterations: 16,
+            shock_iterations: 0,
             contact_skin: 0.01,
             gjk_tolerance: 1e-5,
             ccd_speed_threshold: f32::INFINITY,
