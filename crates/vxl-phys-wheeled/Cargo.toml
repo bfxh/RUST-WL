@@ -1,0 +1,8 @@
+[package]
+name = "vxl-phys-wheeled"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 地面行驶域（悬挂/轮胎/传动，骨架，见 docs/SPEC.md §4.10）"
+
+[dependencies]

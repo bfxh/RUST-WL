@@ -32,8 +32,8 @@ crates/
 ├─ vxl-phys             门面 World（默认管线组装）
 ├─ vxl-phys-soft        软体/布料 XPBD 参数骨架        [M3]
 ├─ vxl-phys-fluid       SPH/PBF/FLIP 参数骨架          [M3/M4]
-├─ vxl-phys-vehicle     射线悬挂+刷子轮胎参数骨架      [M2]
-├─ vxl-phys-vehicles-air 面元气动力骨架                [M2+]
+├─ vxl-phys-wheeled     地面行驶域骨架（悬挂/轮胎/传动） [M2]
+├─ vxl-phys-aero        气动域骨架（面元气动力）         [M2+]
 ├─ vxl-phys-marine      浮力采样/波浪骨架              [M2+]
 ├─ vxl-phys-mech        齿轮/皮带/活塞/马达骨架        [M2+]
 ├─ vxl-phys-destruction Voronoi 预断裂/运行时断裂骨架  [M2]

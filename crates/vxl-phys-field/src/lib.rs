@@ -31,7 +31,7 @@ impl ForceField for GravityField {
     }
 }
 
-/// 均匀风场（M0 演示用；面元气动力版在 vxl-phys-vehicles-air / 布料 §4.7）。
+/// 均匀风场（M0 演示用；面元气动力版在 vxl-phys-aero / 布料 §4.7）。
 #[derive(Clone, Copy, Debug)]
 pub struct WindField {
     pub velocity: Vec3,

@@ -73,10 +73,11 @@ bash scripts/vocab_scan.sh .
 3. **arena 接入面**：施工令提「每相（broad/narrow/solve）各自 arena」。M0 实际接入
    两个真实消费者：哈希规范化缓冲（每帧 alloc→reset）与 CCD 之外的热路径未动；
    宽/窄/求解三相的缓冲化与其 R1 重写同批（M1）——机制、计数与平稳性已在本相实证。
-4. **词汇禁令**：`vxl-` 前缀按施工令 §3 推荐解释豁免；`vxl-phys-vehicle` /
-   `vxl-phys-vehicles-air` 两个 crate 名（V1 §1 DAG）列入显式白名单，改名待裁
-   （全仓一次提交）；高度场网格步长字段已改名为 `spacing`（原名属禁令词）；
-   `std::cell` 为 Rust 标准库路径豁免。扫描脚本头部逐条列明白名单。
+4. **词汇禁令**：`vxl-` 前缀按施工令 §3 推荐解释豁免（引擎自身代号）；原两个
+   含禁令词的 crates 骨架已改名为 `vxl-phys-wheeled` / `vxl-phys-aero`
+   （用户裁决 2026-09-12：不留 crate 名豁免；改名提交见 git log），扫描器白名单
+   随之删除；高度场网格步长字段已改名为 `spacing`（原名属禁令词）；`std::cell`
+   为 Rust 标准库路径豁免。扫描脚本头部逐条列明白名单。
 
 ## 待用户动作
 
