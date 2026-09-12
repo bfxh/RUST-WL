@@ -207,11 +207,32 @@ e ∈ [0,1] 每材质对（组合律可配，默认 max），附**恢复速度�
 
 ## 6. 并发
 
-- 单一 JobSystem（工作窃取 + 无锁队列），CPU 与 GPU 提交共用；**禁止
-  Rayon 与自研池混用**。
+- 单一 JobSystem，CPU 与 GPU 提交共用；**禁止 Rayon 与自研池混用**。
 - 岛级并行求解 + 宽相/窄相分块并行；Unsafe 并发过 loom，全库过 miri 子集
   与 TSan；编译期以 Safe Rust 优先。
 - 正确性门：miri/loom/TSan 全绿为提交门（CI）。
+
+### 6.1 JobSystem 实现现状与架构结论（M1 实测，2026-09-12）
+
+- **现状**：`schedule::ScopedPool` = 作用域分块并行（`std::thread::scope`，
+  每并行区域建立 worker；`min_parallel` 门槛防小区域净亏），已接入宽相
+  AABB/查询、窄相、求解器岛组；与串行 bit 级一致
+  （`parallel_matches_serial_bitwise` 守门）。实测 spawn ≈ 90µs，每帧
+  ≤1.9ms 固定开销 @8 线程。
+- **架构结论（安全 Rust 下证伪）**：「worker 建立一次、各相共享 + lock-free
+  工作窃取队列 + 借用作业」在 `#![forbid(unsafe_code)]` 下**不可行**：
+  物理各相的任务闭包借用调用方状态且各相借用窗口不同（后相 `&mut` 与
+  前相共享借用冲突），任务无法按「步」统一装盒；已系统性实现并尝试
+  双生命周期（`'scope`/`'env`，rayon::scope 同族）+ crossbeam-deque
+  无锁窃取，编译期即被借用检查否决。
+- **达标路径（二选一，M2 决策点）**：
+  (a) 依本节「Unsafe 并发过 loom」条款，在独立调度 crate 内放宽
+      `forbid(unsafe_code)`：生命周期擦除（任务指针 + 'scope 卫兵）→
+      真·持久工作窃取池，配 loom 并发模型验证 + TSan；
+  (b) SPMD 重构：全管线各相改为「按 worker 分片 + 屏障」的固定循环
+      （零 unsafe，但各相 API 变为分片视图）。
+  选型判据：若后续引入 GPU 提交共用调度（§8），选 (a)；若坚持全库
+  Safe Rust，选 (b)。
 
 ## 7. SIMD / 汇编（三层，≥5% 收益律）
 
