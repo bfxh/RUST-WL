@@ -5,7 +5,7 @@
 
 use crate::math::Vec3;
 
-/// §4.15 预设（游戏侧命名引用）。
+/// §4.15 预设（消费方命名引用）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Preset {
     /// 街机：迭代 4 / 子步 1 / skin 0.02 / 库仑。
@@ -55,9 +55,14 @@ pub struct PhysConfig {
     pub gjk_tolerance: f32,
     /// §4.12 CCD 触发速度阈值（m/s）；`INFINITY` = 关。
     pub ccd_speed_threshold: f32,
-    /// §4.4 摩擦模型。
+    /// §4.12 CCD 尺寸比判据：单帧位移 / 最小半长 ≥ ratio 时启用（M1 与速度阈值
+    /// 两判据 + 「仅动体对静态/沉睡」共同构成选择性 CCD）。
+    pub ccd_extent_ratio: f32,
+    /// §4.12 CCD 单 tick 最大扫描段数（确定性上限）。
+    pub ccd_max_steps: u32,
+    /// §4.4 摩擦模型（默认材质；逐材质见 BodySet::materials）。
     pub friction: FrictionModel,
-    /// §4.5 恢复系数 e ∈ [0,1]（M0 全局；材质对在 M1）。
+    /// §4.5 恢复系数 e ∈ [0,1]（默认材质；材质对取 max）。
     pub restitution: f32,
     /// §4.5 恢复速度阈值：低于它的碰撞 e 视作 0（防微弹跳）。
     pub restitution_threshold: f32,
@@ -72,6 +77,9 @@ pub struct PhysConfig {
     pub sleep_linear: f32,
     pub sleep_angular: f32,
     pub sleep_time: f32,
+    /// §4.14 确定性模式：true = 禁一切重排/LOD 降档（sim 路径按索引有序归约，
+    /// 本仓全程如此）；false = 允许性能模式重排（并行/LOD 落地后生效）。
+    pub strict_determinism: bool,
     /// 重力（通过力场注册表注入，见 vxl-phys-field）。
     pub gravity: Vec3,
 }
@@ -85,6 +93,8 @@ impl Default for PhysConfig {
             contact_skin: 0.01,
             gjk_tolerance: 1e-5,
             ccd_speed_threshold: f32::INFINITY,
+            ccd_extent_ratio: 0.5,
+            ccd_max_steps: 64,
             friction: FrictionModel::Coulomb { mu: 0.5 },
             restitution: 0.0,
             restitution_threshold: 1.0,
@@ -95,6 +105,7 @@ impl Default for PhysConfig {
             sleep_linear: 0.04,
             sleep_angular: 0.05,
             sleep_time: 0.5,
+            strict_determinism: true,
             gravity: Vec3::new(0.0, -9.81, 0.0),
         }
     }

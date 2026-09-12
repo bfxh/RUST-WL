@@ -12,17 +12,17 @@
 
 #![forbid(unsafe_code)]
 
-pub use vxl_phys_broad::{Aabb, BroadPhase, GridBroadPhase};
+pub use vxl_phys_broad::{Aabb, BroadPhase, BvhBroadPhase, GridBroadPhase};
 pub use vxl_phys_core as core;
 pub use vxl_phys_core::{
-    BodyId, BodySet, BodyType, FrictionModel, PhysConfig, Preset, Quat, Shape, Vec3,
+    BodyId, BodySet, BodyType, FrictionModel, Material, PhysConfig, Preset, Quat, Shape, Vec3,
 };
 pub use vxl_phys_field::{FieldRegistry, ForceField, GravityField};
 pub use vxl_phys_integrate::Integrator;
 pub use vxl_phys_narrow::heightfield::HeightField;
 pub use vxl_phys_narrow::{ContactPoint, DefaultNarrowPhase, Manifold, NarrowPhase};
 pub use vxl_phys_replay::{Fnv1aHash, Recorder, StateHash};
-pub use vxl_phys_solver::ImpulseSolver;
+pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
 
 /// §3 稳定性健康报告（NaN/Inf 计数、静默穿透计数、抖动审计的输入）。
@@ -47,32 +47,44 @@ pub struct World {
     pub config: PhysConfig,
     pub bodies: BodySet,
     pub terrain: TerrainSet,
-    pub broad: GridBroadPhase,
+    /// 宽相（§2.3 主路径 = 增量 BVH；可用 `with_broadphase` 换网格等实现）。
+    pub broad: Box<dyn BroadPhase>,
     pub narrow: DefaultNarrowPhase,
     pub solver: ImpulseSolver,
     pub fields: FieldRegistry,
     pub tick: u64,
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<Manifold>,
+    ccd_manifolds: Vec<Manifold>,
     hf_bounds: Vec<Aabb>,
 }
 
 impl World {
     pub fn new(config: PhysConfig) -> Self {
+        let broad = Box::new(BvhBroadPhase::new(config.contact_skin));
+        Self::with_broadphase(config, broad)
+    }
+
+    /// 自定义宽相注入（依赖注入，§1；默认增量 BVH）。
+    pub fn with_broadphase(config: PhysConfig, broad: Box<dyn BroadPhase>) -> Self {
         let mut fields = FieldRegistry::new();
         fields.add(Box::new(GravityField { g: config.gravity }));
         let skin = config.contact_skin;
+        let mut bodies = BodySet::new();
+        // 配置里的摩擦/恢复 = 默认材质（槽 0）；逐材质用 add_material 覆盖。
+        bodies.materials[0] = Material::new(config.friction, config.restitution);
         Self {
-            broad: GridBroadPhase::new(2.0, skin),
+            broad,
             narrow: DefaultNarrowPhase::new(skin),
             solver: ImpulseSolver::new(skin),
             config,
-            bodies: BodySet::new(),
+            bodies,
             terrain: TerrainSet::new(),
             fields,
             tick: 0,
             pairs: Vec::new(),
             manifolds: Vec::new(),
+            ccd_manifolds: Vec::new(),
             hf_bounds: Vec::new(),
         }
     }
@@ -89,6 +101,11 @@ impl World {
         density: f32,
     ) -> BodyId {
         self.bodies.push_dynamic(shape, position, rotation, density)
+    }
+
+    /// 注册材质并返回 id（§4.4/§4.5）；`BodySet::set_material` 绑定到体。
+    pub fn add_material(&mut self, material: core::Material) -> core::MaterialId {
+        self.bodies.add_material(material)
     }
 
     /// 加入高度场：地形账本 + 静态 marker 体（宽相经 marker AABB 参与对生成）。
@@ -148,6 +165,82 @@ impl World {
             .solve(&mut self.bodies, &self.manifolds, &self.config, dt);
         // 6) 位置积分。
         Integrator::integrate_positions(&mut self.bodies, dt);
+        // 7) 选择性 CCD（§4.12）：对高速体回扫本子步位移，命中即钳位 + 清法向速度。
+        self.ccd_pass(dt);
+    }
+
+    /// 选择性 CCD（§4.12）：保守推进采样。
+    ///
+    /// 位置积分已把体推到 p1；这里从 p0 = p1 − v·dt 回扫到 p1，找到首个与
+    /// 静态/沉睡目标接触的采样段，把体钳位到上一安全采样点，并清零指向
+    /// 表面的法向速度（M1 非弹性停下）。动-动 CCD 在 M2 接入。
+    fn ccd_pass(&mut self, dt: f32) {
+        if !self.config.ccd_speed_threshold.is_finite() {
+            return;
+        }
+        let n = self.bodies.len();
+        let flagged: Vec<usize> = (0..n)
+            .filter(|&i| ccd::needs_ccd(&self.bodies, i, &self.config, dt))
+            .collect();
+        for &i in &flagged {
+            let v = self.bodies.linvel[i];
+            let steps = ccd::step_count(&self.bodies, i, &self.config, dt);
+            let sub = dt / steps as f32;
+            let p1 = self.bodies.position[i];
+            let p0 = p1 - v * dt;
+
+            // 扫掠 AABB → 候选（静态/沉睡体）+ 高度场。
+            let lo = p0.min(p1);
+            let hi = p0.max(p1);
+            let swept = Aabb {
+                min: lo - Vec3::splat(self.config.contact_skin),
+                max: hi + Vec3::splat(self.config.contact_skin),
+            };
+            let mut candidates: Vec<u32> = Vec::new();
+            self.broad.query_aabb(&swept, &mut candidates);
+            candidates.retain(|&j| {
+                let j = j as usize;
+                j != i && (!self.bodies.is_dynamic(j) || !self.bodies.awake[j])
+            });
+
+            let mut pairs: Vec<(u32, u32)> = Vec::with_capacity(candidates.len());
+            for &j in &candidates {
+                let (a, b) = if (j as usize) < i {
+                    (j, i as u32)
+                } else {
+                    (i as u32, j)
+                };
+                pairs.push((a, b));
+            }
+            // 高度场 marker 体本身是静态叶子，已在 candidates 内。
+            let mut hit: Option<(f32, Vec3)> = None;
+            for s in 1..=steps {
+                let t = sub * s as f32;
+                self.bodies.position[i] = p0 + v * t;
+                self.narrow.collide(
+                    &self.bodies,
+                    &pairs,
+                    self.terrain.slice(),
+                    &mut self.ccd_manifolds,
+                );
+                if let Some(m) = self.ccd_manifolds.first() {
+                    // 法线 a→b；换算成「推离表面、指向动体」的方向。
+                    let n_into_body = if m.a == i as u32 { -m.normal } else { m.normal };
+                    hit = Some((t, n_into_body));
+                    break;
+                }
+            }
+            if let Some((t_hit, n_into_body)) = hit {
+                let t_safe = (t_hit - sub).max(0.0);
+                self.bodies.position[i] = p0 + v * t_safe;
+                let vn = self.bodies.linvel[i].dot(n_into_body);
+                if vn < 0.0 {
+                    self.bodies.linvel[i] -= n_into_body * vn;
+                }
+            } else {
+                self.bodies.position[i] = p1;
+            }
+        }
     }
 
     /// §3 稳定性指标采集。
@@ -312,5 +405,100 @@ mod tests {
         }
         let y_after = w.bodies.position[b as usize].y;
         assert!(y_after < y_rest - 1.0, "rest {y_rest} → after {y_after}");
+    }
+
+    #[test]
+    fn material_pair_restitution_and_friction() {
+        // §4.4/§4.5：e 取材质对 max——球(e=0.9) 落到地面(e=0.0) → 反弹按 0.9。
+        let mut w = World::new(PhysConfig::default());
+        let ground_mat = w.add_material(Material::new(FrictionModel::Coulomb { mu: 0.5 }, 0.0));
+        let ball_mat = w.add_material(Material::new(FrictionModel::Coulomb { mu: 0.2 }, 0.9));
+        w.add_heightfield(HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0));
+        let b = w.add_dynamic(
+            Shape::Sphere { radius: 0.5 },
+            Vec3::new(0.0, 5.0, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        w.bodies.set_material(b as usize, ball_mat);
+        let _ = ground_mat;
+        let mut max_bounce = 0.0f32;
+        for _ in 0..1200 {
+            w.step();
+            max_bounce = max_bounce.max(w.bodies.linvel[b as usize].y);
+        }
+        // 0.9 × 9.9 m/s 落地速度 ≈ 8.9 m/s 首次反弹。
+        assert!(max_bounce > 4.0, "material pair bounce vy = {max_bounce}");
+        assert!(w.health().is_clean());
+    }
+
+    #[test]
+    fn ccd_stops_fast_sphere_at_thin_wall() {
+        // 薄墙 half_z=0.1；球 r=0.2 以 120 m/s（单帧位移 2m）射向墙体。
+        // 采样带（墙厚+球径=0.6m）< 位移 2m 且起点偏移 → 离散步进必然穿透。
+        let build = |ccd_on: bool| {
+            let mut w = World::new(PhysConfig {
+                ccd_speed_threshold: if ccd_on { 30.0 } else { f32::INFINITY },
+                max_linear_velocity: 200.0,
+                ..PhysConfig::default()
+            });
+            w.add_static(
+                Shape::Box {
+                    half: Vec3::new(5.0, 5.0, 0.1),
+                },
+                Vec3::ZERO,
+                Quat::IDENTITY,
+            );
+            let s = w.add_dynamic(
+                Shape::Sphere { radius: 0.2 },
+                Vec3::new(0.0, 0.0, -19.0),
+                Quat::IDENTITY,
+                1.0,
+            );
+            w.bodies.set_linvel(s as usize, Vec3::new(0.0, 0.0, 120.0));
+            (w, s)
+        };
+        // CCD 关：穿透（球越过墙面 z>0.3）。
+        let (mut w_off, s_off) = build(false);
+        for _ in 0..20 {
+            w_off.step();
+        }
+        let z_off = w_off.bodies.position[s_off as usize].z;
+        assert!(z_off > 1.0, "预期穿透，实际 z = {z_off}");
+        // CCD 开：钳位在墙前。
+        let (mut w_on, s_on) = build(true);
+        for _ in 0..20 {
+            w_on.step();
+        }
+        let z_on = w_on.bodies.position[s_on as usize].z;
+        assert!(
+            (-1.0..=0.9).contains(&z_on),
+            "CCD 应拦下球，实际 z = {z_on}"
+        );
+        let h = w_on.health();
+        assert!(h.is_clean(), "{h:?}");
+    }
+
+    #[test]
+    fn ccd_disabled_by_default_keeps_slow_scene_unchanged() {
+        // 默认阈值 INFINITY：确定性场景与 M0 行为一致（回归守门）。
+        let run = || {
+            let mut w = ground_world();
+            for k in 0..6 {
+                w.add_dynamic(
+                    Shape::Box {
+                        half: Vec3::splat(0.4),
+                    },
+                    Vec3::new(k as f32 * 1.1, 2.0 + k as f32 * 0.9, 0.0),
+                    Quat::IDENTITY,
+                    1.0,
+                );
+            }
+            for _ in 0..180 {
+                w.step();
+            }
+            w.state_hash()
+        };
+        assert_eq!(run(), run());
     }
 }

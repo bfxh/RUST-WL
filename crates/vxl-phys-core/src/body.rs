@@ -30,11 +30,16 @@ pub struct BodySet {
     pub torque: Vec<Vec3>,
     pub awake: Vec<bool>,
     pub sleep_timer: Vec<f32>,
+    /// 材质表（§4.4/§4.5）：槽 0 = 默认材质；体通过 `material[i]` 引用。
+    pub materials: Vec<crate::material::Material>,
+    pub material: Vec<crate::material::MaterialId>,
 }
 
 impl BodySet {
     pub fn new() -> Self {
-        Self::default()
+        let mut s = Self::default();
+        s.materials.push(crate::material::Material::default());
+        s
     }
 
     pub fn len(&self) -> usize {
@@ -48,6 +53,21 @@ impl BodySet {
     #[inline]
     pub fn is_dynamic(&self, i: usize) -> bool {
         self.inv_mass[i] > 0.0
+    }
+
+    /// 注册材质，返回材质 id。
+    pub fn add_material(
+        &mut self,
+        material: crate::material::Material,
+    ) -> crate::material::MaterialId {
+        let id = self.materials.len() as crate::material::MaterialId;
+        self.materials.push(material);
+        id
+    }
+
+    /// 设置体材质（默认 0）。
+    pub fn set_material(&mut self, i: usize, material: crate::material::MaterialId) {
+        self.material[i] = material;
     }
 
     pub fn push_static(&mut self, shape: Shape, position: Vec3, rotation: Quat) -> BodyId {
@@ -64,6 +84,7 @@ impl BodySet {
         self.torque.push(Vec3::ZERO);
         self.awake.push(true);
         self.sleep_timer.push(0.0);
+        self.material.push(0);
         id
     }
 
@@ -88,6 +109,7 @@ impl BodySet {
         self.torque.push(Vec3::ZERO);
         self.awake.push(true);
         self.sleep_timer.push(0.0);
+        self.material.push(0);
         id
     }
 

@@ -1,9 +1,8 @@
 # RUST WL —— vxl_phys 自研 Rust 物理引擎
 
-> 依据：[`docs/PHYS-ENGINE-VXLPHYS-V1.md`](docs/PHYS-ENGINE-VXLPHYS-V1.md)
-> （PHYS-ENGINE-VXLPHYS-V1 规格书）。定位：**独立商业级 Rust 物理引擎**，
-> 纯 Rust、确定性优先、模块化 crate DAG；404 是它的第一个大型客户。
-> 仓库目录名「RUST WL」= **Rust 物理（WuLi）**。
+> 依据：[`docs/SPEC.md`](docs/SPEC.md)（引擎唯一权威规格，V1.1，自包含）。
+> 定位：**独立商业级 Rust 物理引擎**，纯 Rust、确定性优先、模块化 crate DAG，
+> 与任何消费工程零关联；仓库目录名「RUST WL」= **Rust 物理（WuLi）**。
 
 ## 状态：M0 MVE（进行中）
 

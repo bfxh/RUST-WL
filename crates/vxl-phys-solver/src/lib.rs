@@ -6,9 +6,11 @@
 //!   本文件求解循环骨架与岛/休眠/缓存层保持不变。
 //! - 岛：并查集分岛；岛内约束按 (a, b, 点序) 固定排序（§4.14 确定性模式）。
 //! - 休眠（§4.11）：线性 0.04 / 角速 0.05 rad/s、计时 0.5 s，岛级判定。
-//! - CCD（§4.12/§2.7）：接口预留，M1 接入扫掠式。
+//! - CCD（§4.12/§2.7）：`ccd` 模块——选择性判据 + 保守推进扫描（M1）。
 
 #![forbid(unsafe_code)]
+
+pub mod ccd;
 
 use std::collections::HashMap;
 
@@ -131,13 +133,12 @@ impl ImpulseSolver {
         config: &PhysConfig,
         dt: f32,
     ) {
-        let mu = config.friction.effective_mu();
-        let e = config.restitution;
         let e_threshold = config.restitution_threshold;
         let bias_rate = config.baumgarte / dt;
         let slop = config.linear_slop;
 
         // 1) 构建约束（预计算质量项/bias/warm）。含沉睡体（休眠岛整体跳过解算）。
+        //    摩擦/恢复按材质对组合（§4.4/§4.5）。
         let mut constraints: Vec<ContactConstraint> = Vec::with_capacity(manifolds.len());
         for m in manifolds {
             let (a, b) = (m.a as usize, m.b as usize);
@@ -146,6 +147,19 @@ impl ImpulseSolver {
             if !da && !db {
                 continue;
             }
+            let mat_a = bodies
+                .material
+                .get(a)
+                .and_then(|&id| bodies.materials.get(id as usize))
+                .copied()
+                .unwrap_or_default();
+            let mat_b = bodies
+                .material
+                .get(b)
+                .and_then(|&id| bodies.materials.get(id as usize))
+                .copied()
+                .unwrap_or_default();
+            let (mu, e) = vxl_phys_core::Material::combine(&mat_a, &mat_b);
 
             let warm = self.warm_cache.get(&(m.a, m.b));
             let mut pts: Vec<PointConstraint> = Vec::with_capacity(m.points.len());
