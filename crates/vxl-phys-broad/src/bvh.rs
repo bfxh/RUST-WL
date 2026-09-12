@@ -294,6 +294,7 @@ impl DynamicBvh {
     ///   a.left ← child 的原右子树；a 其余子不动。
     /// - child 在 a 右槽 → 左旋：child.right 不动；child.left ← a；
     ///   a.right ← child 的原左子树；a 其余子不动。
+    ///
     /// 先按新结构重算 a 的高度/AABB，再算 child（child 高度依赖 a）。
     fn rotate_up(&mut self, a: u32, child: u32) {
         let child_was_left = self.nodes[a as usize].left == child;

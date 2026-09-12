@@ -10,7 +10,7 @@
 
 - 仓库 `bfxh/RUST-WL`（private，gh 已登录 bfxh）——**用户明确要求：不要删**。
 - 与 `D:\开发\VoxelForge-V3` **零关联**：文档/注释/Cargo 元数据/术语全部清除。
-  措辞映射：404 客户 → 消费方/集成方；游戏侧 → 集成方；旧规格书
+  措辞映射：宿主客户代号 → 消费方/集成方；游戏侧 → 集成方；旧规格书
   PHYS-ENGINE-VXLPHYS-V1 → `docs/SPEC.md`（V1.2 起）。
 - 纯 Rust、`#![forbid(unsafe_code)]`、严格 f32、确定性优先（§5）。
 - 规格 = `docs/SPEC.md`（现为 V1.2：身份门 P0 + 功能域切片 + 职责边界）。

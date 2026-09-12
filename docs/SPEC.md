@@ -54,7 +54,7 @@ vxl-phys/
 
 依赖注入：各模块依赖 `trait`（如 `BroadPhase`、`Solver`、`Integrator`、
 `ForceField`、`GpuBackend`），核心不 import 具体实现——自定义实现不改核心。
-Cargo features：`gpu` / `soft` / `fluid` / `vehicle` / … 默认最小
+Cargo features：`gpu` / `soft` / `fluid` / `vxl-phys-vehicle` / … 默认最小
 （core+broad+narrow+solver+integrate+island）。
 
 ## 2. 求解器本体（七子系统，技术选型定案）

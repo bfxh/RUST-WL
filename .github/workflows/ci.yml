@@ -1,30 +1,182 @@
-name: CI
+name: ci
+
+# M0 四门禁（V2 §5）：{测试 + clippy + fmt} × 三编译器矩阵、miri、loom、TSan、ASan；
+# 加确定性矩阵（三编译器 + aarch64 的跨平台哈希比对）与词汇禁令扫描。
+# 四门禁 = 提交门：任一红即阻断合入。
 
 on:
+  push:
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  # ---- 矩阵①：三编译器 × 全量测试/静态检查 ----
+  matrix:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - { os: windows-latest, label: "MSVC / x86_64", linker: "" }
+          - { os: ubuntu-latest, label: "GCC / x86_64", linker: "" }
+          - { os: ubuntu-latest, label: "Clang+LLD / x86_64", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Clang 工具链（clang 行）
+        if: contains(matrix.label, 'Clang')
+        run: sudo apt-get update && sudo apt-get install -y clang lld
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
         run: cargo test --workspace --release
-      - name: Determinism (release)
-        run: cargo run --release -p vxl-phys --example determinism
-      - name: M0 bench (informational)
-        run: cargo run --release -p vxl-phys --example m0_bench
+
+  # ---- 门①：miri（子集 = vxl-phys-core 单测；UB/别名/泄漏）----
+  miri:
+    name: miri (core 子集)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: miri test -p vxl-phys-core
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: cargo +nightly miri test -p vxl-phys-core --lib
+
+  # ---- 门②：loom（并发原语模型；见 crates/vxl-phys-core/tests/loom_primitives.rs）----
+  loom:
+    name: loom (并发原语)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: loom 模型测试
+        env:
+          RUSTFLAGS: --cfg loom
+          LOOM_MAX_PREEMPTIONS: 3
+        run: cargo test -p vxl-phys-core --test loom_primitives
+
+  # ---- 门③：TSan（数据竞争；跑并行契约测试）----
+  tsan:
+    name: TSan (并行路径)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: TSan 并行契约测试
+        env:
+          RUSTFLAGS: -Zsanitizer=thread
+          TSAN_OPTIONS: halt_on_error=1
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: cargo +nightly test --release -p vxl-phys --lib parallel
+
+  # ---- 门④：ASan（地址/越界/泄漏；core 单测 + 门槛场景短跑）----
+  asan:
+    name: ASan (core + 门槛短跑)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - name: ASan core 单测
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: cargo +nightly test --release -p vxl-phys-core --lib
+      - name: ASan 门槛场景（m0_gates 门槛 + 压力短程）
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          ASAN_OPTIONS: detect_leaks=1
+          CARGO_PROFILE_RELEASE_LTO: "false"
+        run: cargo +nightly run --release -p vxl-phys --example m0_gates
+
+  # ---- 确定性矩阵：三编译器 + aarch64 各跑门槛与 10 轮哈希，上传产物 ----
+  determinism:
+    name: 确定性 (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: "MSVC", linker: "" }
+          - { os: ubuntu-latest, label: "GCC", linker: "" }
+          - { os: ubuntu-latest, label: "Clang", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
+          - { os: ubuntu-24.04-arm, label: "GCC-aarch64", linker: "" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Clang 工具链（clang 行）
+        if: contains(matrix.label, 'Clang')
+        run: sudo apt-get update && sudo apt-get install -y clang lld
+      - name: m0_gates（门槛 + 压力 + 哈希）
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
+        run: cargo run --release -p vxl-phys --example m0_gates -- gates-${{ matrix.label }}.json
+      - name: determinism（10 轮全等）
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
+        run: cargo run --release -p vxl-phys --example determinism | tee determinism-${{ matrix.label }}.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gates-${{ matrix.label }}
+          path: |
+            gates-${{ matrix.label }}.json
+            determinism-${{ matrix.label }}.txt
+
+  # ---- 汇总：跨编译器/跨架构哈希必须全等（§5 跨平台位级一致）----
+  hash-compare:
+    name: 跨平台哈希比对
+    needs: determinism
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: arts }
+      - name: gate_scene.hash.final 全等断言
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, sys
+          hashes = {}
+          for p in sorted(pathlib.Path("arts").rglob("gates-*.json")):
+              d = json.loads(p.read_text(encoding="utf-8"))
+              hashes[p.name] = d["gate_scene"]["hash"]["final"]
+          base, ok = None, True
+          for name, h in hashes.items():
+              mark = ""
+              if base is None:
+                  base = h
+              elif h != base:
+                  ok, mark = False, "  <-- 不一致"
+              print(f"{name}: {h}{mark}")
+          if not hashes:
+              print("没有产物——determinism 矩阵未产出"); sys.exit(1)
+          print("✅ 跨平台哈希全等" if ok else "❌ 跨平台哈希不一致")
+          sys.exit(0 if ok else 1)
+          PY
+      - name: determinism FINAL_HASH 汇总
+        run: grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sort | uniq -c
+
+  # ---- 词汇禁令扫描（裁决 61；施工令 T6）----
+  vocab:
+    name: 词汇禁令扫描
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/vocab_scan.sh .

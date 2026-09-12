@@ -16,12 +16,15 @@
 //!   inline）避免小区域净亏。
 //! - 升级路径（M2/M3 二选一）：
 //!   (a) SPEC §6 允许「Unsafe 并发过 loom」——在独立调度 crate 内放宽
-//!       `forbid(unsafe_code)`、做生命周期擦除 + loom 验证，得真·持久池；
+//!   `forbid(unsafe_code)`、做生命周期擦除 + loom 验证，得真·持久池；
 //!   (b) SPMD 重构：管线各相改为「按 worker 分片 + 屏障」的固定循环
-//!       （零 unsafe，但引擎各相 API 变成分片视图）。
+//!   （零 unsafe，但引擎各相 API 变成分片视图）。
 //! - 确定性契约（§5）：`f(start,end)` 只写自己区间的槽位；跨块归并按索引
 //!   有序（`chunks_mut` 保序）；块内纯函数——结果与串行 bit 级一致
 //!   （`parallel_matches_serial_bitwise` 测试守门）。
+//! - 并发原语门（施工令 T4）：库内现无手写同步原语（唯一共享态 = 本文件
+//!   `fetch_add` 领取）。**触发条件**：任何手写原子/unsafe 队列/持久池进库，
+//!   必须同 PR 在 `tests/loom_primitives.rs` 补真实 loom 模型（CI `loom` job 门禁）。
 
 //!
 //! M1 实现 = **作用域分块并行**（`std::thread::scope`）：
@@ -138,7 +141,7 @@ where
             let do_spawn = i + 1 != total && spawned.get() + 1 < threads;
             if do_spawn {
                 spawned.set(spawned.get() + 1);
-                let (t, u) = (&*t, u);
+                let (t, u) = (t, u);
                 s.spawn(move || f(i, t, u));
             } else {
                 f(i, t, u);
