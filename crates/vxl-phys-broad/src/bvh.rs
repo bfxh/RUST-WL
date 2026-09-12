@@ -57,6 +57,15 @@ fn union_aabb(a: &Aabb, b: &Aabb) -> Aabb {
     }
 }
 
+/// AABB 中心在指定轴上的坐标（中位分裂的排序键之一）。
+fn center_axis(a: &Aabb, axis: u32) -> f32 {
+    match axis {
+        0 => (a.min.x + a.max.x) * 0.5,
+        1 => (a.min.y + a.max.y) * 0.5,
+        _ => (a.min.z + a.max.z) * 0.5,
+    }
+}
+
 #[inline]
 fn overlaps(a: &Aabb, b: &Aabb) -> bool {
     a.min.x <= b.max.x
@@ -339,6 +348,92 @@ impl DynamicBvh {
         self.nodes[child as usize].height = 1 + self.nodes[a as usize]
             .height
             .max(self.nodes[shorter as usize].height);
+    }
+
+    /// 全量重建（确定性中位数分裂，top-down）。`items` 须按体 id 升序
+    /// （0..n），返回每体的叶子节点索引（`move_proxy` 用）。
+    ///
+    /// 面积启发式对结构化插入序（网格行优先等）会链化（树高 ≈ n/2）；
+    /// 按最长轴中位分裂重建可得树高 ≈ log2(n)。分裂用
+    /// `select_nth_unstable_by`（O(n) 选择）+ (中心坐标, body id) 全序，
+    /// 结果与逐项顺序无关（§5 确定性）。
+    pub fn rebuild(&mut self, items: &[(u32, Aabb)]) -> Vec<u32> {
+        self.clear();
+        let mut leaf_of = vec![NULL; items.len()];
+        if items.is_empty() {
+            return leaf_of;
+        }
+        let mut work: Vec<(u32, Aabb)> = items.to_vec();
+        self.root = self.build_range(&mut work, &mut leaf_of);
+        self.validate();
+        leaf_of
+    }
+
+    fn build_range(&mut self, items: &mut [(u32, Aabb)], leaf_of: &mut [u32]) -> u32 {
+        debug_assert!(!items.is_empty());
+        if items.len() == 1 {
+            // 直接分配叶子（与 insert 同口径存 fat AABB，保持增量容差）；
+            // 重建绝不走 insert——insert 挂到 self.root 并旋转，会与
+            // top-down 手工接线互相破坏父指针。
+            let (body, aabb) = items[0];
+            let leaf = self.allocate();
+            self.nodes[leaf as usize] = BvhNode {
+                aabb: self.fat(&aabb),
+                left: NULL,
+                right: NULL,
+                parent: NULL,
+                body,
+                height: 0,
+            };
+            leaf_of[body as usize] = leaf;
+            return leaf;
+        }
+        // 包围盒 → 最长轴。
+        let mut bound = items[0].1;
+        for (_, a) in items.iter().skip(1) {
+            bound = union_aabb(&bound, a);
+        }
+        let ex = bound.max.x - bound.min.x;
+        let ey = bound.max.y - bound.min.y;
+        let ez = bound.max.z - bound.min.z;
+        let axis = if ex >= ey && ex >= ez {
+            0
+        } else if ey >= ez {
+            1
+        } else {
+            2
+        };
+        let mid = items.len() / 2;
+        // 全序：(轴中心, body id)；f32 全序用 total_cmp。
+        items.select_nth_unstable_by(mid, |a, b| {
+            let ca = center_axis(&a.1, axis);
+            let cb = center_axis(&b.1, axis);
+            ca.total_cmp(&cb).then(a.0.cmp(&b.0))
+        });
+        let (left_items, right_items) = items.split_at_mut(mid);
+        // 中位分裂后左右两侧的 body id 不连续：leaf_of 全量传入，按 body id 寻址。
+        let left = self.build_range(left_items, leaf_of);
+        let right = self.build_range(right_items, leaf_of);
+        // 汇合父节点。
+        let parent = self.allocate();
+        let aabb = union_aabb(
+            &self.nodes[left as usize].aabb,
+            &self.nodes[right as usize].aabb,
+        );
+        let height = 1 + self.nodes[left as usize]
+            .height
+            .max(self.nodes[right as usize].height);
+        self.nodes[parent as usize] = BvhNode {
+            aabb,
+            left,
+            right,
+            parent: NULL,
+            body: NULL,
+            height,
+        };
+        self.nodes[left as usize].parent = parent;
+        self.nodes[right as usize].parent = parent;
+        parent
     }
 
     /// 查询：返回 fat AABB 与给定 AABB 相交的所有叶子体 id（升序，去重）。

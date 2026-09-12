@@ -159,7 +159,35 @@ impl ImpulseSolver {
                 .and_then(|&id| bodies.materials.get(id as usize))
                 .copied()
                 .unwrap_or_default();
-            let (mu, e) = vxl_phys_core::Material::combine(&mat_a, &mat_b);
+            // §4.4：含 静+动（Stribeck）档时，μ 随预解相对切向速度在
+            // [μk, μs] 线化过渡（vt 取首个接触点，确定性）；纯库仑/各向异性
+            // 走几何平均组合。
+            let (mu, e) = {
+                let stribeck = matches!(
+                    mat_a.friction,
+                    vxl_phys_core::FrictionModel::StaticKinetic { .. }
+                ) || matches!(
+                    mat_b.friction,
+                    vxl_phys_core::FrictionModel::StaticKinetic { .. }
+                );
+                if stribeck {
+                    let cp = &m.points[0];
+                    let ra0 = cp.point - bodies.position[a];
+                    let rb0 = cp.point - bodies.position[b];
+                    let vrel = bodies.velocity_at(b, rb0) - bodies.velocity_at(a, ra0);
+                    let vt = (vrel - m.normal * vrel.dot(m.normal)).length();
+                    (
+                        vxl_phys_core::Material::combine_friction_stribeck(
+                            &mat_a.friction,
+                            &mat_b.friction,
+                            vt,
+                        ),
+                        mat_a.restitution.max(mat_b.restitution),
+                    )
+                } else {
+                    vxl_phys_core::Material::combine(&mat_a, &mat_b)
+                }
+            };
 
             let warm = self.warm_cache.get(&(m.a, m.b));
             let mut pts: Vec<PointConstraint> = Vec::with_capacity(m.points.len());

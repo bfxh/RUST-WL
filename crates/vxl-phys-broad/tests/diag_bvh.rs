@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use vxl_phys_broad::{BvhBroadPhase, BroadPhase};
+use vxl_phys_broad::{BroadPhase, BvhBroadPhase};
 use vxl_phys_core::{BodySet, Quat, Shape, Vec3};
 
 #[test]
@@ -12,7 +12,9 @@ fn diag_bvh_bench_shape() {
         let x = (k % 100) as f32 - 50.0;
         let z = (k / 100) as f32 - 50.0;
         b.push_static(
-            Shape::Box { half: Vec3::new(0.5, 0.5, 0.5) },
+            Shape::Box {
+                half: Vec3::new(0.5, 0.5, 0.5),
+            },
             Vec3::new(x, 0.5, z),
             Quat::IDENTITY,
         );
@@ -22,7 +24,9 @@ fn diag_bvh_bench_shape() {
         let z = ((k * 53) % 89) as f32 / 89.0 * 40.0 - 20.0;
         let y = 12.0 + ((k * 29) % 71) as f32 / 71.0 * 28.0;
         b.push_dynamic(
-            Shape::Box { half: Vec3::splat(0.4) },
+            Shape::Box {
+                half: Vec3::splat(0.4),
+            },
             Vec3::new(x, y, z),
             Quat::IDENTITY,
             1000.0,
@@ -31,11 +35,21 @@ fn diag_bvh_bench_shape() {
     let mut bp = BvhBroadPhase::new(0.01);
     let t0 = Instant::now();
     let p = bp.compute_pairs(&b, &[]).to_vec();
-    println!("首帧: {:?} pairs={} 树高={}", t0.elapsed(), p.len(), bp.tree_height());
+    println!(
+        "首帧: {:?} pairs={} 树高={}",
+        t0.elapsed(),
+        p.len(),
+        bp.tree_height()
+    );
     for f in 0..3 {
         let t0 = Instant::now();
         let p = bp.compute_pairs(&b, &[]).to_vec();
-        println!("静置帧{f}: {:?} pairs={} 树高={}", t0.elapsed(), p.len(), bp.tree_height());
+        println!(
+            "静置帧{f}: {:?} pairs={} 树高={}",
+            t0.elapsed(),
+            p.len(),
+            bp.tree_height()
+        );
     }
     for f in 0..5 {
         for i in 0..b.len() {

@@ -288,6 +288,11 @@ impl BvhBroadPhase {
             pairs: Vec::new(),
         }
     }
+
+    /// 树高（诊断/负载审计：健康树 ≈ 1.4·log2(n)）。
+    pub fn tree_height(&self) -> u32 {
+        self.tree.root_height()
+    }
 }
 
 impl BroadPhase for BvhBroadPhase {
@@ -306,12 +311,23 @@ impl BroadPhase for BvhBroadPhase {
             );
             self.aabbs.push(aabb);
         }
-        // 1) 增量代理更新（首帧 = 全量插入）。
-        for i in 0..n {
-            if (i as u32) < self.leaves.len() as u32 {
-                self.leaves[i] = self.tree.move_proxy(self.leaves[i], self.aabbs[i]);
-            } else {
-                self.leaves.push(self.tree.insert(i as u32, self.aabbs[i]));
+        // 1) 代理更新（首帧大场景 = 中位分裂全量重建；增量后链化超限再重建）。
+        //    面积启发式对网格行优先等结构化插入序会链化（树高 ≈ n/2），
+        //    阈值 = 3·log2(n) + 16（确定性纯函数，不依赖时序）。
+        let rebuild_due = n >= 32 && {
+            let limit = 3.0 * (n as f32).log2() + 16.0;
+            self.tree.root_height() as f32 > limit
+        };
+        if n >= 32 && (self.leaves.is_empty() || rebuild_due) {
+            let items: Vec<(u32, Aabb)> = (0..n).map(|i| (i as u32, self.aabbs[i])).collect();
+            self.leaves = self.tree.rebuild(&items);
+        } else {
+            for i in 0..n {
+                if (i as u32) < self.leaves.len() as u32 {
+                    self.leaves[i] = self.tree.move_proxy(self.leaves[i], self.aabbs[i]);
+                } else {
+                    self.leaves.push(self.tree.insert(i as u32, self.aabbs[i]));
+                }
             }
         }
         // 2) 动体查询（dyn-dyn 靠 j > i 去重；dyn-static 只由动体侧发起）。
