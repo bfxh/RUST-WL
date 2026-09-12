@@ -62,6 +62,9 @@ pub struct PhysConfig {
     /// 0 = 关闭（默认，M0 数值行为不变）；建议 2~8（成本 ≈ shock/velocity 比例）。
     pub shock_iterations: u32,
     /// §4.3 接触 speculative margin（skin）四档：0.02/0.01/0.005/0.002。
+    /// 默认 0.02（M1 金样对齐：= Rapier 预测距离 0.02——留缝密堆的侧向
+    /// speculative 接触从首帧即存在，2000 盒 5 层堆开局即稳、600 tick 全睡；
+    /// 0.01 需经 1200 tick 沸腾行程才入睡，实测见 docs/M1-PLAN.md）。
     pub contact_skin: f32,
     /// §4.3 GJK 收敛容差（M0 SAT 路径仅存档）。
     pub gjk_tolerance: f32,
@@ -109,7 +112,7 @@ impl Default for PhysConfig {
             velocity_iterations: 16,
             normal_inner: 4,
             shock_iterations: 0,
-            contact_skin: 0.01,
+            contact_skin: 0.02,
             gjk_tolerance: 1e-5,
             ccd_speed_threshold: f32::INFINITY,
             ccd_extent_ratio: 0.5,

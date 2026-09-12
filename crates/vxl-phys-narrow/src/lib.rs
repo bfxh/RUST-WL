@@ -25,6 +25,27 @@ use vxl_phys_core::{JobSystem, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
 pub struct ContactPoint {
     pub point: Vec3,
     pub depth: f32,
+    /// 接触特征 ID（跨帧稳定的点命名，M1 接触 ID）：warm starting 以 ID
+    /// 精确匹配替代近邻匹配——面-面接触的裁剪点集逐帧微动/翻面时，
+    /// 冲量缓存不丢（Rapier `contact_recycling` / Box2D `b2ContactFeature`
+    /// 同族）。位域：bit31 = 入射侧（1 = B），bit30 = 裁剪交点（棱×侧平面
+    /// 哈希）、否则为入射面顶点序号。0 = 无特征（回退近邻匹配）。
+    pub feature: u32,
+}
+
+/// 特征 ID 位域常量（见 `ContactPoint::feature`）。
+pub(crate) const FEAT_SIDE_B: u32 = 1 << 31;
+pub(crate) const FEAT_CLIPPED: u32 = 1 << 30;
+
+/// 裁剪交点特征 = 入射棱 (fa→fb) × 参考侧平面 k 的确定性混合（同三元组
+/// 重现同 ID）。碰撞概率对 4 点流形可忽略；miss 时求解器回退近邻匹配。
+#[inline]
+pub(crate) fn feat_intersect(fa: u32, fb: u32, k: usize) -> u32 {
+    FEAT_CLIPPED
+        | (fa.wrapping_mul(73_856_093)
+            ^ fb.wrapping_mul(19_349_663)
+            ^ (k as u32).wrapping_mul(83_492_791))
+            & !(FEAT_SIDE_B | FEAT_CLIPPED)
 }
 
 /// 接触流形。
@@ -94,8 +115,8 @@ pub struct DefaultNarrowPhase {
     poly_a: WorldPoly,
     poly_b: WorldPoly,
     axes: Vec<Vec3>,
-    clip_in: Vec<Vec3>,
-    clip_out: Vec<Vec3>,
+    clip_in: Vec<(Vec3, u32)>,
+    clip_out: Vec<(Vec3, u32)>,
     cand: Vec<ContactPoint>,
 }
 
@@ -366,8 +387,10 @@ impl DefaultNarrowPhase {
         };
 
         self.clip_in.clear();
+        let side_bit = if ref_is_a { FEAT_SIDE_B } else { 0 };
         for k in is_..ie {
-            self.clip_in.push(inc_poly.verts[k]);
+            self.clip_in
+                .push((inc_poly.verts[k], side_bit | (k as u32)));
         }
 
         // 参考面世界顶点。
@@ -406,16 +429,17 @@ impl DefaultNarrowPhase {
             self.clip_out.clear();
             let m = self.clip_in.len();
             for i in 0..m {
-                let va = self.clip_in[i];
-                let vb = self.clip_in[(i + 1) % m];
+                let (va, fa) = self.clip_in[i];
+                let (vb, fb) = self.clip_in[(i + 1) % m];
                 let da = (va - w0).dot(s);
                 let db = (vb - w0).dot(s);
                 if da <= 0.0 {
-                    self.clip_out.push(va);
+                    self.clip_out.push((va, fa));
                 }
                 if da * db < 0.0 {
                     let t = da / (da - db);
-                    self.clip_out.push(va + (vb - va) * t);
+                    self.clip_out
+                        .push((va + (vb - va) * t, feat_intersect(fa, fb, k)));
                 }
             }
             core::mem::swap(&mut self.clip_in, &mut self.clip_out);
@@ -430,12 +454,13 @@ impl DefaultNarrowPhase {
             p.verts[rs]
         };
         self.cand.clear();
-        for &v in &self.clip_in {
+        for &(v, feat) in &self.clip_in {
             let d = (v - p0).dot(n_ref);
             if d <= self.skin {
                 self.cand.push(ContactPoint {
                     point: v,
                     depth: -d,
+                    feature: feat,
                 });
             }
         }
@@ -531,6 +556,7 @@ impl DefaultNarrowPhase {
                 cand.push(ContactPoint {
                     point: Vec3::new(px, h, pz),
                     depth: h - sy,
+                    feature: 0,
                 });
             }
         };
@@ -570,13 +596,15 @@ impl DefaultNarrowPhase {
     ) -> bool {
         self.poly_a.fill(&self.polys[poly_idx], pos, rot);
         self.cand.clear();
-        for &v in &self.poly_a.verts {
+        for (idx, &v) in self.poly_a.verts.iter().enumerate() {
             if let Some((h, _)) = hf.sample(v.x, v.z) {
                 let depth = h - v.y;
                 if depth > -self.skin {
                     self.cand.push(ContactPoint {
                         point: Vec3::new(v.x, h, v.z),
                         depth,
+                        // 特征 = 盒顶点序号（跨帧稳定；盒侧不置侧位）。
+                        feature: idx as u32,
                     });
                 }
             }
@@ -729,6 +757,7 @@ impl DefaultNarrowPhase {
                             points: vec![ContactPoint {
                                 point: pa,
                                 depth: rr,
+                                feature: 0,
                             }],
                         });
                     }
@@ -743,6 +772,7 @@ impl DefaultNarrowPhase {
                     points: vec![ContactPoint {
                         point,
                         depth: rr - dist,
+                        feature: 0,
                     }],
                 });
             }
@@ -753,7 +783,11 @@ impl DefaultNarrowPhase {
                         a,
                         b,
                         normal: n,
-                        points: vec![ContactPoint { point, depth }],
+                        points: vec![ContactPoint {
+                            point,
+                            depth,
+                            feature: 0,
+                        }],
                     });
                 }
             }
@@ -766,7 +800,11 @@ impl DefaultNarrowPhase {
                         a,
                         b,
                         normal: -n_ba,
-                        points: vec![ContactPoint { point, depth }],
+                        points: vec![ContactPoint {
+                            point,
+                            depth,
+                            feature: 0,
+                        }],
                     });
                 }
             }

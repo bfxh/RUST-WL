@@ -26,6 +26,8 @@ struct WarmPoint {
     pn: f32,
     pt1: f32,
     pt2: f32,
+    /// 接触特征 ID（窄相命名，跨帧稳定；0 = 无特征）。
+    feature: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -59,6 +61,8 @@ struct PointConstraint {
     pn: f32,
     pt1: f32,
     pt2: f32,
+    /// 接触特征 ID（窄相来；warm 缓存回写用）。
+    feature: u32,
     warm: Option<WarmPoint>,
 }
 
@@ -677,21 +681,38 @@ fn build_constraint(
         let bias = bounce;
         let bias_target = (bias_rate * (cp.depth - slop).max(0.0)).min(0.5);
 
-        // warm starting 匹配。
+        // warm starting 匹配：① 特征 ID 精确匹配（跨帧稳定，接触点集逐帧
+        // 微动/裁剪翻面不丢冲量缓存——Rapier contact_recycling / Box2D
+        // b2ContactFeature 同族；带距离护栏防几何突变后的错配旧冲量）；
+        // ② 近邻回退（无特征或 ID 未命中）。
         let mut warm_pt: Option<WarmPoint> = None;
         if let Some(wm) = warmm {
             if wm.normal.dot(m.normal) > 0.95 {
-                if let Some(wp) = wm
-                    .points
-                    .iter()
-                    .filter(|wp| (wp.point - cp.point).length_squared() < match_dist * match_dist)
-                    .min_by(|x, y| {
-                        let dx = (x.point - cp.point).length_squared();
-                        let dy = (y.point - cp.point).length_squared();
-                        dx.total_cmp(&dy)
-                    })
-                {
-                    warm_pt = Some(*wp);
+                if cp.feature != 0 {
+                    warm_pt = wm
+                        .points
+                        .iter()
+                        .find(|wp| {
+                            wp.feature == cp.feature
+                                && (wp.point - cp.point).length_squared() < match_dist * match_dist
+                        })
+                        .copied();
+                }
+                if warm_pt.is_none() {
+                    if let Some(wp) = wm
+                        .points
+                        .iter()
+                        .filter(|wp| {
+                            (wp.point - cp.point).length_squared() < match_dist * match_dist
+                        })
+                        .min_by(|x, y| {
+                            let dx = (x.point - cp.point).length_squared();
+                            let dy = (y.point - cp.point).length_squared();
+                            dx.total_cmp(&dy)
+                        })
+                    {
+                        warm_pt = Some(*wp);
+                    }
                 }
             }
         }
@@ -711,6 +732,7 @@ fn build_constraint(
             pn: warm_pt.map(|w| w.pn).unwrap_or(0.0),
             pt1: warm_pt.map(|w| w.pt1).unwrap_or(0.0),
             pt2: warm_pt.map(|w| w.pt2).unwrap_or(0.0),
+            feature: cp.feature,
             warm: warm_pt,
         });
     }
@@ -927,6 +949,7 @@ fn solve_island_group(
                     pn: p.pn,
                     pt1: p.pt1,
                     pt2: p.pt2,
+                    feature: p.feature,
                 })
                 .collect();
             warm_out.push((
@@ -985,6 +1008,7 @@ mod tests {
                     points: vec![ContactPoint {
                         point: Vec3::new(0.0, y - 0.5, 0.0),
                         depth,
+                        feature: 0,
                     }],
                 };
                 solver.solve(&mut b, &[m], &cfg, dt, &SerialJobSystem);
