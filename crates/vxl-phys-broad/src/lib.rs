@@ -89,6 +89,10 @@ pub trait BroadPhase {
         jobs: &dyn JobSystem,
     ) -> &[(u32, u32)];
 
+    /// 步长告知（速度自适应边距用；每子步调用一次，dt ≤ 0 表示未知）。
+    /// 默认空实现（不需要该信息的宽相可直接忽略）。
+    fn set_step(&mut self, _dt: f32) {}
+
     /// 任意 AABB 命中查询（CCD 扫掠区域用，§4.12）；输出体 id 升序去重。
     /// 默认空实现（不需要该能力的宽相可直接忽略）。
     fn query_aabb(&mut self, _aabb: &Aabb, _out: &mut Vec<u32>) {}
@@ -290,6 +294,8 @@ impl BroadPhase for GridBroadPhase {
 pub struct BvhBroadPhase {
     tree: DynamicBvh,
     skin: f32,
+    /// 当前子步 dt（`set_step` 注入；速度自适应 fat 边距用）。
+    dt: f32,
     leaves: Vec<u32>,
     /// 精确 AABB（含 skin 膨胀），与树内 fat AABB 分离。
     aabbs: Vec<Aabb>,
@@ -303,11 +309,23 @@ impl BvhBroadPhase {
         Self {
             tree: DynamicBvh::new((skin * 2.0).max(0.02)),
             skin,
+            dt: 1.0 / 60.0,
             leaves: Vec::new(),
             aabbs: Vec::new(),
             pairs: Vec::new(),
             last_breakdown_us: (0, 0, 0, 0),
         }
+    }
+
+    /// 速度自适应 fat 边距（M1 宽相提速的核心开关之一）：
+    /// `base + |v_lin|·dt·1.5`，上钳 0.25m（防极速体把 fat 盒撑爆导致假对爆炸；
+    /// 实测 k=2.0/上限 0.5 时查询膨胀 > 树更新节省）。
+    /// 确定性：只由（速度, dt）决定；同一状态 → 同一边距 → 同一树形。
+    #[inline]
+    fn fat_margin_for(&self, v: Vec3) -> f32 {
+        let base = (self.skin * 2.0).max(0.02);
+        let speed = v.length();
+        (base + speed * self.dt * 1.5).min(0.25)
     }
 
     /// 树高（诊断/负载审计：健康树 ≈ 1.4·log2(n)）。
@@ -397,7 +415,11 @@ impl BroadPhase for BvhBroadPhase {
                 if (i as u32) >= self.leaves.len() as u32 {
                     self.leaves.push(self.tree.insert(i as u32, self.aabbs[i]));
                 } else if bodies.is_dynamic(i) && bodies.awake[i] {
-                    self.leaves[i] = self.tree.move_proxy(self.leaves[i], self.aabbs[i]);
+                    // M1：速度自适应边距——快速体在其 fat 盒内连续多帧零结构操作。
+                    let m = self.fat_margin_for(bodies.linvel[i]);
+                    self.leaves[i] = self
+                        .tree
+                        .move_proxy_scaled(self.leaves[i], self.aabbs[i], m);
                 }
             }
         }
@@ -471,6 +493,12 @@ impl BroadPhase for BvhBroadPhase {
 
     fn query_aabb(&mut self, aabb: &Aabb, out: &mut Vec<u32>) {
         self.tree.query(aabb, out);
+    }
+
+    fn set_step(&mut self, dt: f32) {
+        if dt > 0.0 && dt.is_finite() {
+            self.dt = dt;
+        }
     }
 
     fn breakdown_us(&self) -> (u64, u64, u64, u64) {

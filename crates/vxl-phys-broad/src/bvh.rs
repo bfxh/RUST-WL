@@ -130,7 +130,12 @@ impl DynamicBvh {
 
     #[inline]
     fn fat(&self, a: &Aabb) -> Aabb {
-        let m = Vec3::splat(self.fat_margin);
+        self.fat_with(a, self.fat_margin)
+    }
+
+    #[inline]
+    fn fat_with(&self, a: &Aabb, margin: f32) -> Aabb {
+        let m = Vec3::splat(margin);
         Aabb {
             min: a.min - m,
             max: a.max + m,
@@ -139,9 +144,14 @@ impl DynamicBvh {
 
     /// 插入叶子（体 id + 精确 AABB），返回叶子节点索引。
     pub fn insert(&mut self, body: u32, aabb: Aabb) -> u32 {
+        self.insert_fat(body, aabb, self.fat_margin)
+    }
+
+    /// 插入叶子，fat 边距显式给定（速度自适应边距用；见 `move_proxy_scaled`）。
+    pub fn insert_fat(&mut self, body: u32, aabb: Aabb, margin: f32) -> u32 {
         let leaf = self.allocate();
         self.nodes[leaf as usize] = BvhNode {
-            aabb: self.fat(&aabb),
+            aabb: self.fat_with(&aabb, margin),
             left: NULL,
             right: NULL,
             parent: NULL,
@@ -233,9 +243,19 @@ impl DynamicBvh {
         self.free_node(leaf);
     }
 
-    /// 移动代理：fat AABB 包含则保持增量（不动树），否则删除重插。
-    /// 返回（可能变化的）叶子节点索引。
+    /// 移动代理（固定边距版；见 `move_proxy_scaled`）。
     pub fn move_proxy(&mut self, leaf: u32, aabb: Aabb) -> u32 {
+        self.move_proxy_scaled(leaf, aabb, self.fat_margin)
+    }
+
+    /// 移动代理（速度自适应边距版）：叶子已存的 fat 盒包含新精确盒 → 零结构
+    /// 操作；否则 remove + 以 `margin` 重插。返回（可能变化的）叶子索引。
+    ///
+    /// 动机（M1 宽相提速）：固定 0.02 边距下，下落体每帧位移 > 边距 → 每帧
+    /// remove+insert（10 万体规模 = 每帧数万次结构操作，实测树更新 45~70ms）。
+    /// 边距随「本帧位移·k」放大后，快速体可在其 fat 盒内连续多帧不动树。
+    /// 确定性：margin 只由（速度, dt）决定，纯函数，时序无关。
+    pub fn move_proxy_scaled(&mut self, leaf: u32, aabb: Aabb, margin: f32) -> u32 {
         let fat = self.nodes[leaf as usize].aabb;
         let contains = aabb.min.x >= fat.min.x
             && aabb.min.y >= fat.min.y
@@ -248,7 +268,7 @@ impl DynamicBvh {
         }
         let body = self.nodes[leaf as usize].body;
         self.remove(leaf);
-        self.insert(body, aabb)
+        self.insert_fat(body, aabb, margin)
     }
 
     /// 祖先链 refit + 旋转平衡。

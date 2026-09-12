@@ -238,8 +238,9 @@ impl World {
         let maxa = self.config.max_angular_velocity;
         Integrator::integrate_velocities(&mut self.bodies, Vec3::ZERO, dt, maxl, maxa);
         self.timings.integrate_vel_us += t0.elapsed().as_micros() as u64;
-        // 3) 宽相。
+        // 3) 宽相（先注入步长：速度自适应 fat 边距用）。
         let t0 = std::time::Instant::now();
+        self.broad.set_step(dt);
         let pairs = self
             .broad
             .compute_pairs(&self.bodies, &self.hf_bounds, self.jobs.as_ref())
