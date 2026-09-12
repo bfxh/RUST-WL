@@ -13,7 +13,7 @@ pub mod bvh;
 
 use std::collections::HashMap;
 
-use vxl_phys_core::{BodySet, Quat, Shape, Vec3};
+use vxl_phys_core::{BodySet, JobSystem, Quat, Shape, Vec3};
 
 pub use bvh::DynamicBvh;
 
@@ -82,11 +82,26 @@ pub fn shape_aabb(shape: &Shape, pos: Vec3, rot: Quat, margin: f32, hf_bounds: &
 
 pub trait BroadPhase {
     /// 输出确定性有序对（a < b，字典序升序，去重）。
-    fn compute_pairs(&mut self, bodies: &BodySet, hf_bounds: &[Aabb]) -> &[(u32, u32)];
+    fn compute_pairs(
+        &mut self,
+        bodies: &BodySet,
+        hf_bounds: &[Aabb],
+        jobs: &dyn JobSystem,
+    ) -> &[(u32, u32)];
 
     /// 任意 AABB 命中查询（CCD 扫掠区域用，§4.12）；输出体 id 升序去重。
     /// 默认空实现（不需要该能力的宽相可直接忽略）。
     fn query_aabb(&mut self, _aabb: &Aabb, _out: &mut Vec<u32>) {}
+
+    /// 诊断：上一帧子阶段耗时（µs）=(AABB, 树更新, 查询, 排序)；默认全 0。
+    fn breakdown_us(&self) -> (u64, u64, u64, u64) {
+        (0, 0, 0, 0)
+    }
+
+    /// 诊断：树高（链路审计；默认 0 = 不适用）。
+    fn tree_height(&self) -> u32 {
+        0
+    }
 }
 
 type CellKey = (i32, i32, i32);
@@ -149,7 +164,12 @@ impl GridBroadPhase {
 }
 
 impl BroadPhase for GridBroadPhase {
-    fn compute_pairs(&mut self, bodies: &BodySet, hf_bounds: &[Aabb]) -> &[(u32, u32)] {
+    fn compute_pairs(
+        &mut self,
+        bodies: &BodySet,
+        hf_bounds: &[Aabb],
+        _jobs: &dyn JobSystem,
+    ) -> &[(u32, u32)] {
         self.cells_static.clear();
         self.cells_dynamic.clear();
         self.pairs.clear();
@@ -273,8 +293,9 @@ pub struct BvhBroadPhase {
     leaves: Vec<u32>,
     /// 精确 AABB（含 skin 膨胀），与树内 fat AABB 分离。
     aabbs: Vec<Aabb>,
-    query_buf: Vec<u32>,
     pairs: Vec<(u32, u32)>,
+    /// 诊断：上一帧各子阶段耗时（µs）：(AABB, 树更新/重建, 查询, 排序)。
+    pub last_breakdown_us: (u64, u64, u64, u64),
 }
 
 impl BvhBroadPhase {
@@ -284,8 +305,8 @@ impl BvhBroadPhase {
             skin,
             leaves: Vec::new(),
             aabbs: Vec::new(),
-            query_buf: Vec::new(),
             pairs: Vec::new(),
+            last_breakdown_us: (0, 0, 0, 0),
         }
     }
 
@@ -293,77 +314,178 @@ impl BvhBroadPhase {
     pub fn tree_height(&self) -> u32 {
         self.tree.root_height()
     }
+
+    /// 诊断：宽相存储的精确 AABB（可视化/验证用，§12.3 调试可视化钩子）。
+    pub fn stored_aabb(&self, i: usize) -> Option<Aabb> {
+        self.aabbs.get(i).copied()
+    }
 }
 
 impl BroadPhase for BvhBroadPhase {
-    fn compute_pairs(&mut self, bodies: &BodySet, hf_bounds: &[Aabb]) -> &[(u32, u32)] {
+    fn compute_pairs(
+        &mut self,
+        bodies: &BodySet,
+        hf_bounds: &[Aabb],
+        jobs: &dyn JobSystem,
+    ) -> &[(u32, u32)] {
+        let t_aabb = std::time::Instant::now();
         self.pairs.clear();
         let n = bodies.len();
-        self.aabbs.clear();
-        self.aabbs.reserve(n);
-        for i in 0..n {
-            let aabb = shape_aabb(
-                &bodies.shape[i],
-                bodies.position[i],
-                bodies.rotation[i],
-                self.skin,
-                hf_bounds,
-            );
-            self.aabbs.push(aabb);
+        // 注：绝不 clear——AABB 数组跨帧保留（睡眠/静态体沿用上帧值，
+        // 增量分支只重算清醒动体；clear 会把它们清成零 AABB）。
+        if self.aabbs.len() > n {
+            self.aabbs.truncate(n);
         }
-        // 1) 代理更新（首帧大场景 = 中位分裂全量重建；增量后链化超限再重建）。
-        //    面积启发式对网格行优先等结构化插入序会链化（树高 ≈ n/2），
-        //    阈值 = 3·log2(n) + 16（确定性纯函数，不依赖时序）。
+        self.aabbs.resize(
+            n,
+            Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            },
+        );
+        let threads = jobs.threads();
+        // 全量分支：首次（叶子未建）/ 体数变化（新体）/ 树链化超限需重建。
+        // 注意：AABB 全量重算与「是否重建树」解耦——小场景（n < 32 不重建）
+        // 也必须至少全量算一次 AABB，否则静态体 / 睡眠体会带着零 AABB 进树。
+        // 非全量分支 = 增量：只处理「清醒动体」（睡眠体与静态体位置不变，
+        // AABB 与树内代理均无需更新——稳态零树操作，M1 规模档的成败手）。
         let rebuild_due = n >= 32 && {
             let limit = 3.0 * (n as f32).log2() + 16.0;
             self.tree.root_height() as f32 > limit
         };
+        let full = self.leaves.len() != n || rebuild_due;
+        // 0) AABB 计算：纯函数按下标写槽位（§6 并行契约）。分块并行且
+        //    spawn 数受控（for_each_chunk_mut：≤ threads−1，禁止线程爆炸）。
+        //    门槛 32768：单体内 AABB ≈ 30ns，低于此并行开销（≈0.6ms 启动）不划算。
+        {
+            let aabbs = &mut self.aabbs;
+            let skin = self.skin;
+            let bodies_ref: &BodySet = bodies;
+            let hfs: &[Aabb] = hf_bounds;
+            vxl_phys_core::schedule::for_each_chunk_mut(
+                aabbs,
+                threads,
+                32768,
+                |start, _len, slot| {
+                    for (k, s) in slot.iter_mut().enumerate() {
+                        let i = start + k;
+                        if !full && (!bodies_ref.is_dynamic(i) || !bodies_ref.awake[i]) {
+                            continue; // 睡眠/静态：位置未变，沿用上帧 AABB。
+                        }
+                        *s = shape_aabb(
+                            &bodies_ref.shape[i],
+                            bodies_ref.position[i],
+                            bodies_ref.rotation[i],
+                            skin,
+                            hfs,
+                        );
+                    }
+                },
+            );
+        }
+        let d_aabb = t_aabb.elapsed().as_micros() as u64;
+        let t_tree = std::time::Instant::now();
+        // 1) 代理更新（需要重建：中位分裂全量重建；否则增量只动清醒体）。
+        //    面积启发式对结构化插入序（网格行优先）会链化，
+        //    阈值 = 3·log2(n) + 16（确定性纯函数，不依赖时序）。
+        //    树变异按体索引升序串行（结构操作不可并行）。
         if n >= 32 && (self.leaves.is_empty() || rebuild_due) {
             let items: Vec<(u32, Aabb)> = (0..n).map(|i| (i as u32, self.aabbs[i])).collect();
             self.leaves = self.tree.rebuild(&items);
         } else {
             for i in 0..n {
-                if (i as u32) < self.leaves.len() as u32 {
-                    self.leaves[i] = self.tree.move_proxy(self.leaves[i], self.aabbs[i]);
-                } else {
+                if (i as u32) >= self.leaves.len() as u32 {
                     self.leaves.push(self.tree.insert(i as u32, self.aabbs[i]));
+                } else if bodies.is_dynamic(i) && bodies.awake[i] {
+                    self.leaves[i] = self.tree.move_proxy(self.leaves[i], self.aabbs[i]);
                 }
             }
         }
-        // 2) 动体查询（dyn-dyn 靠 j > i 去重；dyn-static 只由动体侧发起）。
-        for i in 0..n {
-            if !bodies.is_dynamic(i) {
-                continue;
-            }
-            self.tree.query(&self.aabbs[i], &mut self.query_buf);
-            for &j in &self.query_buf {
-                let j = j as usize;
-                if j == i || (bodies.is_dynamic(j) && j <= i) {
-                    continue;
-                }
-                if self.aabbs[i].overlaps(&self.aabbs[j]) {
-                    let (a, b) = if i < j {
-                        (i as u32, j as u32)
-                    } else {
-                        (j as u32, i as u32)
-                    };
-                    self.pairs.push((a, b));
-                }
+        let d_tree = t_tree.elapsed().as_micros() as u64;
+        let t_query = std::time::Instant::now();
+        // 2) 清醒动体查询（dyn-dyn 靠 j > i 去重；dyn-static 只由动体侧发起）。
+        //    睡眠体不查询：沉睡体不产生新接触；被唤醒/被撞由对方（清醒体）
+        //    的查询反向命中（睡眠叶仍在树内），唤醒语义不变。
+        //    树查询只读 → 分块并行（spawn 受控）；每块本地缓冲按块序拼接后
+        //    统一排序去重（排序保序 → 与串行 bit 级一致，§5/§6 契约）。
+        let dyns: Vec<u32> = (0..n as u32)
+            .filter(|&i| {
+                let i = i as usize;
+                bodies.is_dynamic(i) && bodies.awake[i]
+            })
+            .collect();
+        {
+            let this = &*self;
+            let dyns_ref: &[u32] = &dyns;
+            let bodies_ref: &BodySet = bodies;
+            let n_chunks = if threads > 1 && dyns.len() >= 4096 {
+                dyns.len().div_ceil(dyns.len().div_ceil(threads))
+            } else {
+                1
+            };
+            let mut outs: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_chunks];
+            let chunk_len = dyns.len().div_ceil(n_chunks);
+            vxl_phys_core::schedule::for_each_chunk_mut(
+                &mut outs,
+                threads,
+                2,
+                |start_slot, _len, slots| {
+                    // slots[k] = outs[start_slot + k]（块内逐槽对应各自的体区间）。
+                    for (k, co) in slots.iter_mut().enumerate() {
+                        let oi = start_slot + k;
+                        let start = oi * chunk_len;
+                        let end = ((oi + 1) * chunk_len).min(dyns_ref.len());
+                        let mut qbuf: Vec<u32> = Vec::new();
+                        for &i in &dyns_ref[start..end] {
+                            this.tree.query(&this.aabbs[i as usize], &mut qbuf);
+                            for &j in &qbuf {
+                                let j = j as usize;
+                                if j == i as usize || (bodies_ref.is_dynamic(j) && j <= i as usize)
+                                {
+                                    continue;
+                                }
+                                if this.aabbs[i as usize].overlaps(&this.aabbs[j]) {
+                                    let (a, b) = if (i as usize) < j {
+                                        (i, j as u32)
+                                    } else {
+                                        (j as u32, i)
+                                    };
+                                    co.push((a, b));
+                                }
+                            }
+                        }
+                    }
+                },
+            );
+            for mut co in outs {
+                self.pairs.append(&mut co);
             }
         }
+        let d_query = t_query.elapsed().as_micros() as u64;
+        let t_sort = std::time::Instant::now();
         self.pairs.sort_unstable();
         self.pairs.dedup();
+        self.last_breakdown_us = (d_aabb, d_tree, d_query, t_sort.elapsed().as_micros() as u64);
         &self.pairs
     }
 
     fn query_aabb(&mut self, aabb: &Aabb, out: &mut Vec<u32>) {
         self.tree.query(aabb, out);
     }
+
+    fn breakdown_us(&self) -> (u64, u64, u64, u64) {
+        self.last_breakdown_us
+    }
+
+    fn tree_height(&self) -> u32 {
+        self.tree.root_height()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vxl_phys_core::SerialJobSystem;
 
     fn world() -> BodySet {
         BodySet::new()
@@ -413,8 +535,8 @@ mod tests {
                     b.position[i].y -= frame as f32 * 0.09;
                 }
             }
-            let p_grid = grid.compute_pairs(&b, &[]).to_vec();
-            let p_bvh = bvh.compute_pairs(&b, &[]).to_vec();
+            let p_grid = grid.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+            let p_bvh = bvh.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
             assert_eq!(p_grid, p_bvh, "frame {frame}");
             let _ = &mut b;
         }
@@ -447,7 +569,7 @@ mod tests {
             1.0,
         );
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        let pairs = bp.compute_pairs(&b, &[]);
+        let pairs = bp.compute_pairs(&b, &[], &SerialJobSystem);
         assert_eq!(pairs, &[(d.min(g), d.max(g))]);
         assert!(pairs.iter().all(|&p| p.1 != far && p.0 != far));
     }
@@ -470,7 +592,7 @@ mod tests {
             Quat::IDENTITY,
         );
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        assert!(bp.compute_pairs(&b, &[]).is_empty());
+        assert!(bp.compute_pairs(&b, &[], &SerialJobSystem).is_empty());
     }
 
     #[test]
@@ -487,8 +609,8 @@ mod tests {
             );
         }
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        let p1 = bp.compute_pairs(&b, &[]).to_vec();
-        let p2 = bp.compute_pairs(&b, &[]).to_vec();
+        let p1 = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+        let p2 = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
         assert_eq!(p1, p2);
     }
 }

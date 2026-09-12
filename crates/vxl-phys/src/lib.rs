@@ -15,7 +15,8 @@
 pub use vxl_phys_broad::{Aabb, BroadPhase, BvhBroadPhase, GridBroadPhase};
 pub use vxl_phys_core as core;
 pub use vxl_phys_core::{
-    BodyId, BodySet, BodyType, FrictionModel, Material, PhysConfig, Preset, Quat, Shape, Vec3,
+    BodyId, BodySet, BodyType, FrictionModel, JobSystem, Material, PhysConfig, Preset, Quat,
+    ScopedPool, SerialJobSystem, Shape, Vec3,
 };
 pub use vxl_phys_field::{FieldRegistry, ForceField, GravityField};
 pub use vxl_phys_integrate::Integrator;
@@ -42,6 +43,31 @@ impl HealthReport {
     }
 }
 
+/// 分相耗时计数（§11 性能计数器：每帧物理 ms 按阶段拆分）。
+/// 累计微秒，跨 `step` 累加，`reset_timings()` 归零。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhaseTimings {
+    pub fields_us: u64,
+    pub integrate_vel_us: u64,
+    pub broadphase_us: u64,
+    pub narrowphase_us: u64,
+    pub solve_us: u64,
+    pub integrate_pos_us: u64,
+    pub ccd_us: u64,
+}
+
+impl PhaseTimings {
+    pub fn total_us(&self) -> u64 {
+        self.fields_us
+            + self.integrate_vel_us
+            + self.broadphase_us
+            + self.narrowphase_us
+            + self.solve_us
+            + self.integrate_pos_us
+            + self.ccd_us
+    }
+}
+
 /// 物理世界（固定步长契约：调用方以 `config.dt` 的整数倍节拍调用 `step`）。
 pub struct World {
     pub config: PhysConfig,
@@ -52,11 +78,14 @@ pub struct World {
     pub narrow: DefaultNarrowPhase,
     pub solver: ImpulseSolver,
     pub fields: FieldRegistry,
+    /// 任务调度（§6 依赖注入：SerialJobSystem / ScopedPool / 自定义实现）。
+    pub jobs: Box<dyn JobSystem>,
     pub tick: u64,
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<Manifold>,
     ccd_manifolds: Vec<Manifold>,
     hf_bounds: Vec<Aabb>,
+    timings: PhaseTimings,
 }
 
 impl World {
@@ -73,6 +102,12 @@ impl World {
         let mut bodies = BodySet::new();
         // 配置里的摩擦/恢复 = 默认材质（槽 0）；逐材质用 add_material 覆盖。
         bodies.materials[0] = Material::new(config.friction, config.restitution);
+        // §6 调度注入：threads ≤ 1 → 串行（默认，回归对照基准）。
+        let jobs: Box<dyn JobSystem> = if config.threads > 1 {
+            Box::new(ScopedPool::new(config.threads))
+        } else {
+            Box::new(SerialJobSystem)
+        };
         Self {
             broad,
             narrow: DefaultNarrowPhase::new(skin),
@@ -81,12 +116,23 @@ impl World {
             bodies,
             terrain: TerrainSet::new(),
             fields,
+            jobs,
             tick: 0,
             pairs: Vec::new(),
             manifolds: Vec::new(),
             ccd_manifolds: Vec::new(),
             hf_bounds: Vec::new(),
+            timings: PhaseTimings::default(),
         }
+    }
+
+    /// 累计分相耗时（自上次 `reset_timings` 起）。
+    pub fn timings(&self) -> PhaseTimings {
+        self.timings
+    }
+
+    pub fn reset_timings(&mut self) {
+        self.timings = PhaseTimings::default();
     }
 
     pub fn add_static(&mut self, shape: Shape, position: Vec3, rotation: Quat) -> BodyId {
@@ -142,31 +188,51 @@ impl World {
 
     fn substep(&mut self, dt: f32) {
         // 1) 力场（重力在 World::new 注入注册表）。
+        let t0 = std::time::Instant::now();
         self.fields.apply(&mut self.bodies);
+        self.timings.fields_us += t0.elapsed().as_micros() as u64;
         // 2) 速度积分。
+        let t0 = std::time::Instant::now();
         let maxl = self.config.max_linear_velocity;
         let maxa = self.config.max_angular_velocity;
         Integrator::integrate_velocities(&mut self.bodies, Vec3::ZERO, dt, maxl, maxa);
+        self.timings.integrate_vel_us += t0.elapsed().as_micros() as u64;
         // 3) 宽相。
+        let t0 = std::time::Instant::now();
         let pairs = self
             .broad
-            .compute_pairs(&self.bodies, &self.hf_bounds)
+            .compute_pairs(&self.bodies, &self.hf_bounds, self.jobs.as_ref())
             .to_vec();
+        self.timings.broadphase_us += t0.elapsed().as_micros() as u64;
         // 4) 窄相。
+        let t0 = std::time::Instant::now();
         self.narrow.collide(
             &self.bodies,
             &pairs,
             self.terrain.slice(),
             &mut self.manifolds,
+            self.jobs.as_ref(),
         );
+        self.timings.narrowphase_us += t0.elapsed().as_micros() as u64;
         self.pairs = pairs;
         // 5) 求解 + 岛级休眠（唤醒语义在岛内：外部唤醒/新接触自动传播全岛）。
-        self.solver
-            .solve(&mut self.bodies, &self.manifolds, &self.config, dt);
+        let t0 = std::time::Instant::now();
+        self.solver.solve(
+            &mut self.bodies,
+            &self.manifolds,
+            &self.config,
+            dt,
+            self.jobs.as_ref(),
+        );
+        self.timings.solve_us += t0.elapsed().as_micros() as u64;
         // 6) 位置积分。
+        let t0 = std::time::Instant::now();
         Integrator::integrate_positions(&mut self.bodies, dt);
+        self.timings.integrate_pos_us += t0.elapsed().as_micros() as u64;
         // 7) 选择性 CCD（§4.12）：对高速体回扫本子步位移，命中即钳位 + 清法向速度。
+        let t0 = std::time::Instant::now();
         self.ccd_pass(dt);
+        self.timings.ccd_us += t0.elapsed().as_micros() as u64;
     }
 
     /// 选择性 CCD（§4.12）：保守推进采样。
@@ -222,6 +288,7 @@ impl World {
                     &pairs,
                     self.terrain.slice(),
                     &mut self.ccd_manifolds,
+                    self.jobs.as_ref(),
                 );
                 if let Some(m) = self.ccd_manifolds.first() {
                     // 法线 a→b；换算成「推离表面、指向动体」的方向。
@@ -325,6 +392,51 @@ mod tests {
             w.state_hash()
         };
         assert_eq!(run(), run());
+    }
+
+    /// §5/§6 并行契约：并行（threads=8）与串行（threads=1）结果 bit 级一致。
+    /// 场景需超过各相并行门槛（>4096 体）才能真正走到并行路径。
+    #[test]
+    fn parallel_matches_serial_bitwise() {
+        let run = |threads: usize| {
+            let cfg = PhysConfig {
+                threads,
+                ..PhysConfig::default()
+            };
+            let mut w = World::new(cfg);
+            w.add_heightfield(HeightField::flat(-40.0, -40.0, 81, 81, 1.0, 0.0));
+            for k in 0..4200usize {
+                let x = (k % 70) as f32 - 35.0;
+                let z = (k / 70) as f32 - 30.0;
+                w.add_static(
+                    Shape::Box {
+                        half: Vec3::new(0.5, 0.5, 0.5),
+                    },
+                    Vec3::new(x, 0.5, z),
+                    Quat::IDENTITY,
+                );
+            }
+            for k in 0..900 {
+                let x = ((k * 37) % 97) as f32 / 97.0 * 30.0 - 15.0;
+                let z = ((k * 53) % 89) as f32 / 89.0 * 30.0 - 15.0;
+                let y = 4.0 + ((k * 29) % 71) as f32 / 71.0 * 10.0;
+                w.add_dynamic(
+                    Shape::Box {
+                        half: Vec3::splat(0.4),
+                    },
+                    Vec3::new(x, y, z),
+                    Quat::IDENTITY,
+                    1000.0,
+                );
+            }
+            for _ in 0..150 {
+                w.step();
+            }
+            w.state_hash()
+        };
+        let serial = run(1);
+        let parallel = run(8);
+        assert_eq!(serial, parallel, "并行与串行状态哈希必须一致（§5）");
     }
 
     #[test]

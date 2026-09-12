@@ -288,21 +288,17 @@ impl DynamicBvh {
     }
 
     /// 把 child（左右中较深的一支）旋转到 a 之上（b2DynamicTree::Balance 同族）。
+    ///
+    /// 标准旋转（子树身份不得互换）：
+    /// - child 在 a 左槽 → 右旋：child.left 不动；child.right ← a；
+    ///   a.left ← child 的原右子树；a 其余子不动。
+    /// - child 在 a 右槽 → 左旋：child.right 不动；child.left ← a；
+    ///   a.right ← child 的原左子树；a 其余子不动。
+    /// 先按新结构重算 a 的高度/AABB，再算 child（child 高度依赖 a）。
     fn rotate_up(&mut self, a: u32, child: u32) {
         let child_was_left = self.nodes[a as usize].left == child;
-        let other = if child_was_left {
-            self.nodes[a as usize].right
-        } else {
-            self.nodes[a as usize].left
-        };
         let f = self.nodes[child as usize].left;
         let g = self.nodes[child as usize].right;
-        // child 的较高子树让位给 a（占据 a 腾出的槽位），较低子树留在 child 另一侧。
-        let (taller, shorter) = if self.nodes[f as usize].height > self.nodes[g as usize].height {
-            (f, g)
-        } else {
-            (g, f)
-        };
 
         // child 取代 a 的位置。
         self.nodes[child as usize].parent = self.nodes[a as usize].parent;
@@ -319,35 +315,34 @@ impl DynamicBvh {
         }
 
         if child_was_left {
-            // a 落到 child 的右槽；a.left ← 较高子树；child.left ← 较低子树；a.right = other 不变。
+            // 右旋：g（child 原右子树）让位给 a.left；child.left = f 不动。
             self.nodes[child as usize].right = a;
-            self.nodes[child as usize].left = shorter;
-            self.nodes[shorter as usize].parent = child;
-            self.nodes[a as usize].left = taller;
-            self.nodes[taller as usize].parent = a;
+            self.nodes[a as usize].left = g;
+            self.nodes[g as usize].parent = a;
         } else {
-            // a 落到 child 的左槽；a.right ← 较高子树；child.right ← 较低子树；a.left = other 不变。
+            // 左旋：f（child 原左子树）让位给 a.right；child.right = g 不动。
             self.nodes[child as usize].left = a;
-            self.nodes[child as usize].right = shorter;
-            self.nodes[shorter as usize].parent = child;
-            self.nodes[a as usize].right = taller;
-            self.nodes[taller as usize].parent = a;
+            self.nodes[a as usize].right = f;
+            self.nodes[f as usize].parent = a;
         }
 
-        self.nodes[a as usize].aabb = union_aabb(
-            &self.nodes[other as usize].aabb,
-            &self.nodes[taller as usize].aabb,
-        );
-        self.nodes[a as usize].height = 1 + self.nodes[other as usize]
+        // a 高度/AABB（其两个子位已确定）。
+        let (al, ar) = (self.nodes[a as usize].left, self.nodes[a as usize].right);
+        self.nodes[a as usize].aabb =
+            union_aabb(&self.nodes[al as usize].aabb, &self.nodes[ar as usize].aabb);
+        self.nodes[a as usize].height = 1 + self.nodes[al as usize]
             .height
-            .max(self.nodes[taller as usize].height);
-        self.nodes[child as usize].aabb = union_aabb(
-            &self.nodes[a as usize].aabb,
-            &self.nodes[shorter as usize].aabb,
+            .max(self.nodes[ar as usize].height);
+        // child 高度/AABB（含刚更新的 a）。
+        let (cl, cr) = (
+            self.nodes[child as usize].left,
+            self.nodes[child as usize].right,
         );
-        self.nodes[child as usize].height = 1 + self.nodes[a as usize]
+        self.nodes[child as usize].aabb =
+            union_aabb(&self.nodes[cl as usize].aabb, &self.nodes[cr as usize].aabb);
+        self.nodes[child as usize].height = 1 + self.nodes[cl as usize]
             .height
-            .max(self.nodes[shorter as usize].height);
+            .max(self.nodes[cr as usize].height);
     }
 
     /// 全量重建（确定性中位数分裂，top-down）。`items` 须按体 id 升序

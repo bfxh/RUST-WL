@@ -79,7 +79,12 @@ pub struct PhysConfig {
     pub sleep_time: f32,
     /// §4.14 确定性模式：true = 禁一切重排/LOD 降档（sim 路径按索引有序归约，
     /// 本仓全程如此）；false = 允许性能模式重排（并行/LOD 落地后生效）。
+    /// 注：并行各相按「离散槽位 + 有序归并」契约执行，与串行 bit 级一致，
+    /// 严格模式下同样允许（不属于被禁的浮点重排，§4.14）。
     pub strict_determinism: bool,
+    /// §6/§4.7 worker 线程数（含主线程）；1 = 串行（默认，回归对照基准）。
+    /// 并行实现 = 作用域分块（schedule::ScopedPool），结果与串行 bit 级一致。
+    pub threads: usize,
     /// 重力（通过力场注册表注入，见 vxl-phys-field）。
     pub gravity: Vec3,
 }
@@ -106,6 +111,7 @@ impl Default for PhysConfig {
             sleep_angular: 0.05,
             sleep_time: 0.5,
             strict_determinism: true,
+            threads: 1,
             gravity: Vec3::new(0.0, -9.81, 0.0),
         }
     }

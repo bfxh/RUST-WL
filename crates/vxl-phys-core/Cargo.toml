@@ -4,5 +4,3 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "vxl_phys 核心：数学/内存/任务调度/配置（零外部重依赖）"
-
-[dependencies]

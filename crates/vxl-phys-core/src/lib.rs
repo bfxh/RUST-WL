@@ -24,5 +24,5 @@ pub use config::{FrictionModel, PhysConfig, Preset};
 pub use mass::{mass_props, MassProps};
 pub use material::{Material, MaterialId};
 pub use math::{Mat3, Quat, Vec3};
-pub use schedule::{JobSystem, SerialJobSystem};
+pub use schedule::{run_mut_sections, JobSystem, ScopedPool, SerialJobSystem};
 pub use shape::{HeightFieldId, Shape, CYLINDER_SEGMENTS};
