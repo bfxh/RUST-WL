@@ -725,8 +725,12 @@ fn build_constraint(
 /// 单约束一次顺序冲量迭代（法向 + 两切向 + 摩擦锥）。
 ///
 /// 抽为独立函数：主循环（正序）与堆叠 shock 附加迭代（反序）共用同一实现，
-/// 保证两条路径数值语义逐字一致。
+/// 保证两条路径数值语义逐字一致。`rev` = 接触点逆序遍历（对称扫掠用：
+/// 4 点面接触是冗余约束（4 约束 / 3 自由度）+ 强转动耦合，单向 GS 在
+/// 16 次迭代内留下可观残差（重堆微抖实测 |v|≈0.03）；正/反交替后
+/// 收敛率 ≈ ρ²，残差降到阈值下）。
 #[inline]
+#[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
 fn solve_constraint(
     c: &mut ContactConstraint,
     lv: &mut [Vec3],
@@ -735,10 +739,14 @@ fn solve_constraint(
     bav: &mut [Vec3],
     local_of: &[u32],
     bodies: &BodySet,
+    rev: bool,
 ) {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let normal = c.normal;
-    for p in c.points.iter_mut() {
+    let npts = c.points.len();
+    for k in 0..npts {
+        let idx = if rev { npts - 1 - k } else { k };
+        let p = &mut c.points[idx];
         // —— 法向 ——
         let va = group_vel(lv, av, local_of, ai, p.ra);
         let vb = group_vel(lv, av, local_of, bi, p.rb);
@@ -752,45 +760,44 @@ fn solve_constraint(
             group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
             group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
         }
-        // —— 摩擦（两切向 + 锥 radial clamp）——
-        for (t, tmass, key) in [(p.t1, p.tmass1, 0usize), (p.t2, p.tmass2, 1usize)] {
+        // —— 摩擦（两切向，逐轴求解 + 每轴后**径向锥投影**）——
+        // Box2D v3 / Jolt 同族：把累计切向冲量向量 (pt1, pt2) 投影到半径
+        // μ·pn 的圆盘（而不是逐轴盒形钳制 + 事后缩放）。旧实现两轴可各自
+        // 独立饱和到 ±μ·pn（角点处模长 √2·μ·pn）再被径向缩回——等效摩擦
+        // 上限随求解序在两轴间漂移，4 点接触 + 高 μ 下形成相干力矩：
+        // 2 列密堆实测 μ=0.5 缓慢倾覆/爬行（μ=0.05 稳定、μ=0 冻结）。
+        for key in 0..2usize {
+            let (t, tmass) = if key == 0 {
+                (p.t1, p.tmass1)
+            } else {
+                (p.t2, p.tmass2)
+            };
             let va = group_vel(lv, av, local_of, ai, p.ra);
             let vb = group_vel(lv, av, local_of, bi, p.rb);
             let vt = (vb - va).dot(t);
             let lam = tmass * (-vt);
-            let (acc, dl) = match key {
-                0 => {
-                    let nv = (p.pt1 + lam).clamp(-p.friction * p.pn, p.friction * p.pn);
-                    let d = nv - p.pt1;
-                    p.pt1 = nv;
-                    (p.pt1, d)
-                }
-                _ => {
-                    let nv = (p.pt2 + lam).clamp(-p.friction * p.pn, p.friction * p.pn);
-                    let d = nv - p.pt2;
-                    p.pt2 = nv;
-                    (p.pt2, d)
-                }
+            let (old1, old2) = (p.pt1, p.pt2);
+            let (mut a1, mut a2) = if key == 0 {
+                (old1 + lam, old2)
+            } else {
+                (old1, old2 + lam)
             };
-            let _ = acc;
-            if dl != 0.0 {
-                let imp = t * dl;
+            let max_f = p.friction * p.pn;
+            let f2 = a1 * a1 + a2 * a2;
+            if f2 > max_f * max_f && f2 > 1e-20 {
+                let s = max_f / f2.sqrt();
+                a1 *= s;
+                a2 *= s;
+            }
+            p.pt1 = a1;
+            p.pt2 = a2;
+            let d1 = a1 - old1;
+            let d2 = a2 - old2;
+            if d1 != 0.0 || d2 != 0.0 {
+                let imp = p.t1 * d1 + p.t2 * d2;
                 group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
                 group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
             }
-        }
-        // 摩擦锥（radial）：|pt_vec| ≤ μ·pn。
-        let max_f = p.friction * p.pn;
-        let f2 = p.pt1 * p.pt1 + p.pt2 * p.pt2;
-        if f2 > max_f * max_f && f2 > 1e-20 {
-            let s = max_f / f2.sqrt();
-            let d1 = p.pt1 * s - p.pt1;
-            let d2 = p.pt2 * s - p.pt2;
-            p.pt1 *= s;
-            p.pt2 *= s;
-            let imp = p.t1 * d1 + p.t2 * d2;
-            group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
-            group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
         }
         // —— 分裂冲量（位置修正独立通道；M1）——
         // 目标分离速度 = bias_target；累积器 pbias ≥ 0、单向下界；
@@ -866,9 +873,19 @@ fn solve_island_group(
             }
         }
         // 顺序冲量迭代（岛内顺序 = 流形序 = 约束构建序，§4.14）。
-        for _ in 0..iters {
-            for c in cbuf.iter_mut() {
-                solve_constraint(c, lv, av, blv, bav, local_of, bodies);
+        // 对称扫掠：偶数迭代正序、奇数迭代反序（约束序 + 接触点序同时反转）——
+        // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留 ≈15%
+        // 重力增量（重堆实测微抖 |v|≈0.03 永不入睡）；正/反交替后收敛率
+        // ≈ ρ²，静置残差降到睡眠阈下。确定性：方向仅由迭代序决定。
+        for it in 0..iters {
+            if it % 2 == 0 {
+                for c in cbuf.iter_mut() {
+                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, false);
+                }
+            } else {
+                for c in cbuf.iter_mut().rev() {
+                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, true);
+                }
             }
         }
         // 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
@@ -877,7 +894,7 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                solve_constraint(c, lv, av, blv, bav, local_of, bodies);
+                solve_constraint(c, lv, av, blv, bav, local_of, bodies, true);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
