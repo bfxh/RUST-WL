@@ -39,6 +39,27 @@ bash scripts/vocab_scan.sh .
 - 判定：**属 M1 顶尖化靶场**（8B 万级档 ≤16.6ms 是 M1 出口；R1 清单的量化 BVH/pair 批/
   warm GJK/染色并行/SIMD 正对准这三块）。M0 门禁不设此项，如实记录基线。
 
+## CI 实测（首轮 run 34689679069，2026-09-12）
+
+绿：loom / miri / ASan / 词汇扫描 / 三编译器矩阵（MSVC、GCC、Clang+LLD）/ 三编译器
+确定性产物 / aarch64 交叉编译 + QEMU 实跑。
+
+**跨平台位级一致（M0 出口「哈希 10 轮跨平台一致」）**：
+- 三编译器 gate 场景末态哈希全等：`0xc0dfc6f4bb0382c2c47a1eab66c575bb`（MSVC = GCC = Clang）
+- determinism FINAL_HASH 四平台全等：`0xbec85715f2cdd9e64ae1d5f2bb7fbc2f`
+  （x86_64 MSVC/GCC/Clang + aarch64/QEMU——跨架构位级一致实证）
+
+首轮两处红及修复（均已提交）：
+1. TSan：`-Zsanitizer` 要求 std 同构建（rustc 报 `xxhash_rust`/`compiler_builtins`
+   ABI 混合）→ 加 `-Zbuild-std --target x86_64-unknown-linux-gnu`；
+2. hash-compare：MSVC 产物 CRLF 致 `sort|uniq` 误判（数值本已全等）→ `tr -d '\r'`。
+
+本机（Windows）可跑的本地实测：
+- `cargo +nightly-x86_64-pc-windows-gnu miri test -p vxl-phys-core --lib`：
+  **22 通过 0 失败**（`-Zmiri-strict-provenance`，27s）
+- `RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 cargo test -p vxl-phys-core --test loom_primitives`：通过（2.6s）
+- TSan/ASan 为 Linux 宿主专属（Windows 无消毒器运行时）→ 以 CI 为准。
+
 ## 与施工令的偏差（如实）
 
 1. **门槛场景口径**：施工令 T3 原文写「20×20×25 万盒堆叠 p50 ≤16.6ms」——实测该场景
