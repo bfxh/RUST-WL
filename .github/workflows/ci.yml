@@ -84,7 +84,9 @@ jobs:
           RUSTFLAGS: -Zsanitizer=thread
           TSAN_OPTIONS: halt_on_error=1
           CARGO_PROFILE_RELEASE_LTO: "false"
-        run: cargo +nightly test --release -p vxl-phys --lib parallel
+        run: |
+          cargo +nightly test --release -Zbuild-std \
+            --target x86_64-unknown-linux-gnu -p vxl-phys --lib parallel
 
   # ---- 门④：ASan（地址/越界/泄漏；core 单测 + 门槛场景短跑）----
   asan:
@@ -198,8 +200,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "== 各平台 FINAL_HASH =="
-          grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sort | uniq -c
-          n=$(grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sed 's/.*FINAL_HASH=//' | sort -u | wc -l)
+          grep -h "FINAL_HASH=" arts/*/determinism-*.txt | tr -d '\r' | sort | uniq -c
+          n=$(grep -h "FINAL_HASH=" arts/*/determinism-*.txt | tr -d '\r' | sed 's/.*FINAL_HASH=//' | sort -u | wc -l)
           echo "唯一哈希数 = $n（应为 1；>1 即跨平台不一致）"
           test "$n" -eq 1
 
