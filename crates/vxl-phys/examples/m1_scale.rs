@@ -1,11 +1,11 @@
 //! M1 规模场景（§3 最低通过档）：10 万动态 + 10 万静态，CPU headless。
 //! 出口门槛：≥ 30 FPS（每 tick < 33.3 ms）。
-//! 运行：cargo run --release -p vxl-phys --example m1_scale -- [threads] [static] [dynamic] [ticks]
-//! 默认：threads=8, 静态 102400（320×320 瓦片）, 动态 100000, 300 tick。
+//! 运行：cargo run --release -p vxl-phys --example m1_scale -- [threads] [static] [dynamic] [ticks] [iters]
+//! 默认：threads=8, 静态 102400（320×320 瓦片）, 动态 100000, 300 tick, 迭代 16。
 
 use std::time::Instant;
 
-use vxl_phys::{HeightField, PhysConfig, Quat, Shape, Vec3, World};
+use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -13,14 +13,16 @@ fn main() {
     let n_static: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(102_400);
     let n_dynamic: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(100_000);
     let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(300);
+    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(16);
 
     let cfg = PhysConfig {
         threads,
+        velocity_iterations: iters,
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
-    // 地板高度场（320×320 m，1 m 格）。
-    w.add_heightfield(HeightField::flat(-160.0, -160.0, 321, 321, 1.0, 0.0));
+    // 注：地面 = 静态瓦片（不含高度场——双层地面会让每个盒子多算一次
+    // 无接触的高度场对，规模档里是 10 万次/帧的白算）。
 
     let side = (n_static as f64).sqrt() as usize;
     for k in 0..n_static {
