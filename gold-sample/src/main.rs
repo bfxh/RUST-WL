@@ -54,12 +54,23 @@ fn spawn_positions(s: &Scene) -> Vec<Vec3> {
     out
 }
 
-fn build_vxl(s: &Scene, iters: u32, skin: f32, inner: u32) -> (World, Vec<usize>) {
+fn build_vxl(
+    s: &Scene,
+    iters: u32,
+    skin: f32,
+    inner: u32,
+    maxcorr: f32,
+    freq: f32,
+    substeps: u32,
+) -> (World, Vec<usize>) {
     let cfg = PhysConfig {
         velocity_iterations: iters,
         threads: 8,
         contact_skin: skin,
         normal_inner: inner.max(1),
+        max_corrective_velocity: maxcorr,
+        contact_freq_hz: freq,
+        substeps: substeps.max(1),
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -207,9 +218,12 @@ fn main() {
     let vxl_iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(16);
     let skin: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.01);
     let inner: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let maxcorr: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3.0);
+    let freq: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30.0);
+    let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let s = scene_of(&scene_name);
 
-    let (mut vw, vids) = build_vxl(&s, vxl_iters, skin, inner);
+    let (mut vw, vids) = build_vxl(&s, vxl_iters, skin, inner, maxcorr, freq, substeps);
     let (mut rw, rhs) = build_rapier(&s);
     let refs = ref_indices(vids.len());
     println!(

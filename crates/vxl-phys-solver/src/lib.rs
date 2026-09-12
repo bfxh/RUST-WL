@@ -38,7 +38,7 @@ struct WarmManifold {
 
 use vxl_phys_core::Vec3;
 
-/// 单接触点约束（预计算质量项与 bias）。
+/// 单接触点约束（预计算质量项与软接触目标/正则化）。
 struct PointConstraint {
     ra: Vec3,
     rb: Vec3,
@@ -47,16 +47,16 @@ struct PointConstraint {
     nmass: f32,
     tmass1: f32,
     tmass2: f32,
-    /// 速度目标（弹性）：约束要求新 vn ≥ bias。
-    /// **不再含 Baumgarte 位置偏置**（M1：位置修正走分裂冲量独立通道，
-    /// 见 `bias_target`/`pbias`——旧路径把分离速度泵进真实速度，重堆
-    /// （25 层 / 10 000 体）实测渐进失稳：|v|max 3.2 → 78 m/s）。
-    bias: f32,
-    /// 分裂冲量通道：位置修正速度目标 = rate·max(0, depth−slop)（上钳），
-    /// 由独立「偏置速度」scratch 累积，只写回位置，不触碰真实速度。
-    bias_target: f32,
-    /// 分裂冲量累积器（通道独立于 `pn`）。
-    pbias: f32,
+    /// M1 软接触（TGS-Soft 语义，与 Rapier 0.35 同构）：法向目标分离速度
+    /// rhs = 去穿透速率（erp·depth，钳 ±max_corrective_velocity）− speculative
+    /// 项（浅缝允许一个 tick 内闭合）+ 弹性目标（e·vn，e>0 时）。
+    /// 旧「硬约束 + 分裂冲量独立通道」方案已被本形态取代（金样定标见
+    /// docs/M1-PLAN.md 第五段：软接触是深堆稳定的结构性关键）。
+    rhs: f32,
+    /// 正则化因子（CFM）：穿透接触 cfm=1（硬投影，保证支撑刚性）；
+    /// speculative（depth<0）接触 cfm<1（等效柔度 ω/ζ，Rapier 默认
+    /// 30 Hz 动/60 Hz 静态、ζ=10）——限制迭代增益、深堆不依赖跨层链收敛。
+    cfm: f32,
     friction: f32,
     pn: f32,
     pt1: f32,
@@ -64,6 +64,53 @@ struct PointConstraint {
     /// 接触特征 ID（窄相来；warm 缓存回写用）。
     feature: u32,
     warm: Option<WarmPoint>,
+}
+
+/// 软接触求解参数（每步预计算；由 `PhysConfig` 的 ω/ζ 档导出，Rapier 同构）。
+struct SolverParams {
+    slop: f32,
+    inv_dt: f32,
+    /// erp 偏置速率（1/s）：动态对 / 静态侧（更硬，防挤压穿过）。
+    erp_inv_dt_dyn: f32,
+    erp_inv_dt_static: f32,
+    /// CFM 正则化因子：动态对 / 静态侧。
+    cfm_dyn: f32,
+    cfm_static: f32,
+    max_corr: f32,
+}
+
+impl SolverParams {
+    /// ω = 2πf；erp_inv_dt = ω/(dt·ω + 2ζ)；erp = dt·erp_inv_dt；
+    /// cfm_coeff = inv²/((1+inv)·4ζ²)（inv = 1/erp − 1）；cfm = 1/(1+cfm_coeff)。
+    /// 公式逐行对齐 Rapier `SpringCoefficients::{erp_inv_dt, cfm_coeff, cfm_factor}`。
+    fn from_config(cfg: &PhysConfig, dt: f32) -> Self {
+        fn erp_cfm(freq_hz: f32, zeta: f32, dt: f32) -> (f32, f32) {
+            let omega = core::f32::consts::TAU * freq_hz;
+            let two = 2.0 * zeta;
+            let erp_inv_dt = omega / (dt * omega + two);
+            let erp = dt * erp_inv_dt;
+            let (erp_inv_dt, cfm) = if erp != 0.0 {
+                let inv = 1.0 / erp - 1.0;
+                let cfm_coeff = inv * inv / ((1.0 + inv) * 4.0 * zeta * zeta);
+                (erp_inv_dt, 1.0 / (1.0 + cfm_coeff))
+            } else {
+                (erp_inv_dt, 1.0)
+            };
+            (erp_inv_dt, cfm)
+        }
+        let (erp_inv_dt_dyn, cfm_dyn) = erp_cfm(cfg.contact_freq_hz, cfg.contact_damping_ratio, dt);
+        let (erp_inv_dt_static, cfm_static) =
+            erp_cfm(cfg.static_contact_freq_hz, cfg.contact_damping_ratio, dt);
+        Self {
+            slop: cfg.linear_slop,
+            inv_dt: 1.0 / dt,
+            erp_inv_dt_dyn,
+            erp_inv_dt_static,
+            cfm_dyn,
+            cfm_static,
+            max_corr: cfg.max_corrective_velocity,
+        }
+    }
 }
 
 /// 单流形约束。
@@ -89,11 +136,6 @@ pub struct ImpulseSolver {
     warm_outs: Vec<Vec<((u32, u32), WarmManifold)>>,
     group_lv: Vec<Vec<Vec3>>,
     group_av: Vec<Vec<Vec3>>,
-    /// 分裂冲量偏置速度 scratch（每体，与 group_lv/av 同布局）。
-    group_blv: Vec<Vec<Vec3>>,
-    group_bav: Vec<Vec<Vec3>>,
-    /// 组内局部索引 → 全局体 id（偏置位移写回位置用）。
-    group_bodies: Vec<Vec<u32>>,
     /// 体 → 组内局部索引（u32::MAX = 静态/不在清醒岛）。
     local_of: Vec<u32>,
     /// 诊断：上一帧内部阶段耗时（µs）=(岛构建, 约束构建+迭代, 休眠/其他, 保留)。
@@ -220,9 +262,6 @@ impl ImpulseSolver {
             warm_outs: Vec::new(),
             group_lv: Vec::new(),
             group_av: Vec::new(),
-            group_blv: Vec::new(),
-            group_bav: Vec::new(),
-            group_bodies: Vec::new(),
             local_of: Vec::new(),
             last_phase_us: (0, 0, 0, 0),
             parent: Vec::new(),
@@ -243,11 +282,10 @@ impl ImpulseSolver {
         jobs: &dyn JobSystem,
     ) {
         let e_threshold = config.restitution_threshold;
-        let bias_rate = config.baumgarte / dt;
-        let slop = config.linear_slop;
         let iters = config.velocity_iterations.max(1);
         let shock = config.shock_iterations;
         let normal_inner = config.normal_inner.max(1);
+        let sp = SolverParams::from_config(config, dt);
         let threads = jobs.threads().max(1);
         let match_dist = self.match_dist;
         let t_island = std::time::Instant::now();
@@ -342,18 +380,12 @@ impl ImpulseSolver {
         let mut warm_outs = std::mem::take(&mut self.warm_outs);
         let mut group_lv = std::mem::take(&mut self.group_lv);
         let mut group_av = std::mem::take(&mut self.group_av);
-        let mut group_blv = std::mem::take(&mut self.group_blv);
-        let mut group_bav = std::mem::take(&mut self.group_bav);
-        let mut group_bodies = std::mem::take(&mut self.group_bodies);
         let mut local_of = std::mem::take(&mut self.local_of);
 
         build_bufs.resize_with(g_count, Vec::new);
         warm_outs.resize_with(g_count, Vec::new);
         group_lv.resize_with(g_count, Vec::new);
         group_av.resize_with(g_count, Vec::new);
-        group_blv.resize_with(g_count, Vec::new);
-        group_bav.resize_with(g_count, Vec::new);
-        group_bodies.resize_with(g_count, Vec::new);
         local_of.clear();
         local_of.resize(n, u32::MAX);
         let mut groups: Vec<(usize, usize)> = Vec::with_capacity(g_count);
@@ -365,9 +397,6 @@ impl ImpulseSolver {
             warm_outs[g].clear();
             group_lv[g].clear();
             group_av[g].clear();
-            group_blv[g].clear();
-            group_bav[g].clear();
-            group_bodies[g].clear();
             let s0 = g * awake.len() / g_count;
             let e0 = (g + 1) * awake.len() / g_count;
             groups.push((s0, e0));
@@ -377,9 +406,6 @@ impl ImpulseSolver {
                     local_of[i] = group_lv[g].len() as u32;
                     group_lv[g].push(bodies.linvel[i]);
                     group_av[g].push(bodies.angvel(i));
-                    group_blv[g].push(Vec3::ZERO);
-                    group_bav[g].push(Vec3::ZERO);
-                    group_bodies[g].push(i as u32);
                 }
             }
         }
@@ -393,14 +419,13 @@ impl ImpulseSolver {
             let islands_ref: &[Island] = islands;
             let warm_ref: &HashMap<(u32, u32), WarmManifold> = &warm;
             let local_ref: &[u32] = &local_of;
+            let sp_ref: &SolverParams = &sp;
             std::thread::scope(|s| {
                 // iter_mut 逐容器取出元素可变借用（按 g 索引整体借用会跨迭代重叠）。
-                for (g, ((((lv, av), (blv, bav)), (cbuf, wout)), _)) in group_lv
+                for (g, ((lv, av), (cbuf, wout))) in group_lv
                     .iter_mut()
                     .zip(group_av.iter_mut())
-                    .zip(group_blv.iter_mut().zip(group_bav.iter_mut()))
                     .zip(build_bufs.iter_mut().zip(warm_outs.iter_mut()))
-                    .zip(group_bodies.iter())
                     .enumerate()
                 {
                     let (s0, e0) = groups[g];
@@ -414,17 +439,14 @@ impl ImpulseSolver {
                             local_ref,
                             lv,
                             av,
-                            blv,
-                            bav,
                             cbuf,
                             wout,
                             iters,
                             e_threshold,
-                            bias_rate,
-                            slop,
                             match_dist,
                             shock,
                             normal_inner,
+                            sp_ref,
                         );
                     };
                     if g + 1 == g_count {
@@ -445,17 +467,14 @@ impl ImpulseSolver {
                 &local_of,
                 &mut group_lv[0],
                 &mut group_av[0],
-                &mut group_blv[0],
-                &mut group_bav[0],
                 &mut build_bufs[0],
                 &mut warm_outs[0],
                 iters,
                 e_threshold,
-                bias_rate,
-                slop,
                 match_dist,
                 shock,
                 normal_inner,
+                &sp,
             );
         }
 
@@ -472,21 +491,8 @@ impl ImpulseSolver {
             }
         }
 
-        // 分裂冲量位移写回（M1）：偏置速度 · dt → 位置（平移通道）。
-        // 只动位置、不进真实速度——重堆不再被位置修正泵能。
-        // 顺序 = 组序 × 组内局部序（gather 序）→ 与线程数无关的确定性写入。
-        for g in 0..g_count {
-            for (k, &bi) in group_bodies[g].iter().enumerate() {
-                let i = bi as usize;
-                if !bodies.is_dynamic(i) {
-                    continue;
-                }
-                let d = group_blv[g][k] * dt;
-                if d != Vec3::ZERO {
-                    bodies.position[i] += d;
-                }
-            }
-        }
+        // （M1 软接触形态起，位置修正走 erp 偏置速度进速度通道 + CFM 正则化，
+        //  独立「分裂冲量偏置通道 + 位移写回」已退役——见 SolverParams。）
 
         // warm 合并（组序 = 岛序；键唯一）+ 剪枝失效键。
         // 剪枝规则：流形已消失的**双清醒**对才删——睡眠体不移动，其接触
@@ -514,9 +520,6 @@ impl ImpulseSolver {
         self.warm_outs = warm_outs;
         self.group_lv = group_lv;
         self.group_av = group_av;
-        self.group_blv = group_blv;
-        self.group_bav = group_bav;
-        self.group_bodies = group_bodies;
         self.local_of = local_of;
 
         let d_solve = t_solve.elapsed().as_micros() as u64;
@@ -585,8 +588,7 @@ fn build_constraint(
     warm: &HashMap<(u32, u32), WarmManifold>,
     match_dist: f32,
     e_threshold: f32,
-    bias_rate: f32,
-    slop: f32,
+    sp: &SolverParams,
 ) {
     let (a, b) = (m.a as usize, m.b as usize);
     let da = bodies.is_dynamic(a);
@@ -670,16 +672,34 @@ fn build_constraint(
             b,
         );
 
+        // —— M1 软接触目标（TGS-Soft 语义，Rapier 0.35 同构）——
         // 弹性：预解相对法向速度。
         let va = bodies.velocity_at(a, ra);
         let vb = bodies.velocity_at(b, rb);
         let vn = (vb - va).dot(m.normal);
         let bounce = if vn < -e_threshold { -e * vn } else { 0.0 };
-        // M1 分裂冲量：速度通道只承载弹性目标；位置修正（Baumgarte 语义）
-        // 转入独立偏置通道 `bias_target`（rate·(depth−slop)，上钳 0.5 m/s），
-        // 由 pbias 累积、只写回位置——重堆不再被泵能。
-        let bias = bounce;
-        let bias_target = (bias_rate * (cp.depth - slop).max(0.0)).min(0.5);
+        // speculative：浅缝（depth<0）允许一个 tick 内闭合剩余间隙（不再提前悬停）；
+        // 去穿透：erp·(depth−slop)，钳 max_corrective_velocity（穿透→分离速度目标）。
+        let sep = -cp.depth;
+        let spec = sep.max(0.0) * sp.inv_dt;
+        let is_static_pair = bodies.inv_mass[a] == 0.0 || bodies.inv_mass[b] == 0.0;
+        let erp_inv_dt = if is_static_pair {
+            sp.erp_inv_dt_static
+        } else {
+            sp.erp_inv_dt_dyn
+        };
+        let pen = (cp.depth - sp.slop).max(0.0);
+        let bias = (erp_inv_dt * pen).min(sp.max_corr);
+        let rhs = bias - spec + bounce;
+        // 正则化：穿透接触 cfm=1（硬投影，支撑刚性）；speculative 接触 cfm<1
+        // （等效柔度 ω/ζ，限制迭代增益，深堆不依赖跨层链收敛——金样定标结论）。
+        let cfm = if cp.depth >= 0.0 {
+            1.0
+        } else if is_static_pair {
+            sp.cfm_static
+        } else {
+            sp.cfm_dyn
+        };
 
         // warm starting 匹配：① 特征 ID 精确匹配（跨帧稳定，接触点集逐帧
         // 微动/裁剪翻面不丢冲量缓存——Rapier contact_recycling / Box2D
@@ -725,9 +745,8 @@ fn build_constraint(
             nmass,
             tmass1,
             tmass2,
-            bias,
-            bias_target,
-            pbias: 0.0,
+            rhs,
+            cfm,
             friction: mu,
             pn: warm_pt.map(|w| w.pn).unwrap_or(0.0),
             pt1: warm_pt.map(|w| w.pt1).unwrap_or(0.0),
@@ -749,21 +768,17 @@ fn build_constraint(
 
 /// 单约束一次顺序冲量迭代（法向 × 内层扫掠 + 两切向 + 摩擦锥 + 偏置）。
 ///
-/// 三通道分离：**法向内层 `inner` 次扫掠** → 切向（两轴 + 径向锥）→ 偏置。
-/// 法向是多点面接触的慢模所在（4 点冗余约束 + 强转动耦合，GS 单扫收敛慢：
-/// 重堆实测 16 次迭代残留 ≈15% 重力增量 → 微抖 |v|≈0.03 永不入睡、角点
-/// 接触下升级为沸腾；iters=64 才完全入睡）。内层 K 次法向扫掠把**歧管内**
-/// 收敛等价提到 ≈K×外层，而摩擦/偏置只跑一遍——代价只加法向通道
-/// （8B 规模法向占比小，实测见 docs/M1-PLAN.md）。
-/// `rev` = 逆序遍历（对称扫掠，配合外层正/反交替 ≈ ρ²）。
+/// 两通道：**歧管内层 `inner` 次扫掠（法向 + 摩擦一起）**。法向/切向慢模
+/// 都在歧管内部（4 点冗余约束 + 强转动耦合 + 锥耦合）；内层 K 遍把歧管内
+/// 收敛提到 ≈K×外层（代价只加歧管局部工作量）。法向为 M1 软接触更新式
+/// （正则化 cfm + 目标 rhs，见 `SolverParams`）。`rev` = 逆序遍历
+/// （对称扫掠，配合外层正/反交替 ≈ ρ²）。
 #[inline]
 #[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
 fn solve_constraint(
     c: &mut ContactConstraint,
     lv: &mut [Vec3],
     av: &mut [Vec3],
-    blv: &mut [Vec3],
-    bav: &mut [Vec3],
     local_of: &[u32],
     bodies: &BodySet,
     rev: bool,
@@ -774,20 +789,15 @@ fn solve_constraint(
     let npts = c.points.len();
 
     // —— 歧管内层扫掠（法向 + 摩擦两通道一起）——
-    // 慢模同时存在于法向（冗余 4 点 + 强转动耦合）与切向（锥耦合）：只加
-    // 法向时 45 盒档恢复、20×20 大堆仍沸腾（摩擦仍只有外层遍数）。内层对
-    // 两条通道一起加扫，歧管内收敛 ≈ K×外层（iters=64 全通道的等效在
-    // K=4 / 16 外层达成）。
     for _ in 0..inner.max(1) {
         for k in 0..npts {
             let idx = if rev { npts - 1 - k } else { k };
             let p = &mut c.points[idx];
-            // —— 法向 ——
+            // —— 法向（M1 软接触）：λ ← cfm·(λ + m·(rhs − vn))，钳 ≥ 0 ——
             let va = group_vel(lv, av, local_of, ai, p.ra);
             let vb = group_vel(lv, av, local_of, bi, p.rb);
             let vn = (vb - va).dot(normal);
-            let lambda = p.nmass * (p.bias - vn);
-            let new_pn = (p.pn + lambda).max(0.0);
+            let new_pn = (p.cfm * (p.pn + p.nmass * (p.rhs - vn))).max(0.0);
             let dl = new_pn - p.pn;
             p.pn = new_pn;
             if dl != 0.0 {
@@ -836,28 +846,6 @@ fn solve_constraint(
             }
         }
     }
-
-    // —— 分裂冲量（位置修正独立通道；M1；每点一遍）——
-    // 目标分离速度 = bias_target；累积器 pbias ≥ 0、单向下界；
-    // 只写偏置速度 scratch（外环按 dt 位移写回位置），真实速度不受影响。
-    for k in 0..npts {
-        let idx = if rev { npts - 1 - k } else { k };
-        let p = &mut c.points[idx];
-        if p.bias_target > 0.0 {
-            let va = group_vel(blv, bav, local_of, ai, p.ra);
-            let vb = group_vel(blv, bav, local_of, bi, p.rb);
-            let vn = (vb - va).dot(normal);
-            let lambda = p.nmass * (p.bias_target - vn);
-            let new_pb = (p.pbias + lambda).max(0.0);
-            let dl = new_pb - p.pbias;
-            p.pbias = new_pb;
-            if dl != 0.0 {
-                let imp = normal * dl;
-                group_apply(blv, bav, local_of, ai, p.ra, imp, true, bodies);
-                group_apply(blv, bav, local_of, bi, p.rb, imp, false, bodies);
-            }
-        }
-    }
 }
 
 /// 解算一组清醒岛（组内岛串行；岛间体集合不相交）。速度读写走组内 scratch
@@ -872,17 +860,14 @@ fn solve_island_group(
     local_of: &[u32],
     lv: &mut [Vec3],
     av: &mut [Vec3],
-    blv: &mut [Vec3],
-    bav: &mut [Vec3],
     cbuf: &mut Vec<ContactConstraint>,
     warm_out: &mut Vec<((u32, u32), WarmManifold)>,
     iters: u32,
     e_threshold: f32,
-    bias_rate: f32,
-    slop: f32,
     match_dist: f32,
     shock_iterations: u32,
     normal_inner: u32,
+    sp: &SolverParams,
 ) {
     for &ii in awake {
         let isl = &islands[ii];
@@ -896,8 +881,7 @@ fn solve_island_group(
                 warm,
                 match_dist,
                 e_threshold,
-                bias_rate,
-                slop,
+                sp,
             );
         }
         // warm starting 预施加（每约束一次）。
@@ -916,17 +900,17 @@ fn solve_island_group(
         }
         // 顺序冲量迭代（岛内顺序 = 流形序 = 约束构建序，§4.14）。
         // 对称扫掠：偶数迭代正序、奇数迭代反序（约束序 + 接触点序同时反转）——
-        // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留 ≈15%
-        // 重力增量（重堆实测微抖 |v|≈0.03 永不入睡）；正/反交替后收敛率
-        // ≈ ρ²，静置残差降到睡眠阈下。确定性：方向仅由迭代序决定。
+        // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留可观
+        // （重堆实测微抖永不入睡）；正/反交替后收敛率 ≈ ρ²。
+        // 确定性：方向仅由迭代序决定。
         for it in 0..iters {
             if it % 2 == 0 {
                 for c in cbuf.iter_mut() {
-                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, false, normal_inner);
+                    solve_constraint(c, lv, av, local_of, bodies, false, normal_inner);
                 }
             } else {
                 for c in cbuf.iter_mut().rev() {
-                    solve_constraint(c, lv, av, blv, bav, local_of, bodies, true, normal_inner);
+                    solve_constraint(c, lv, av, local_of, bodies, true, normal_inner);
                 }
             }
         }
@@ -936,7 +920,7 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                solve_constraint(c, lv, av, blv, bav, local_of, bodies, true, normal_inner);
+                solve_constraint(c, lv, av, local_of, bodies, true, normal_inner);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
