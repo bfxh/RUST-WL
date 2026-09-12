@@ -108,7 +108,7 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo +nightly run --release -p vxl-phys --example m0_gates
 
-  # ---- 确定性矩阵：三编译器 + aarch64 各跑门槛与 10 轮哈希，上传产物 ----
+  # ---- 确定性矩阵：三编译器各跑门槛与 10 轮哈希，上传产物 ----
   determinism:
     name: 确定性 (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -119,7 +119,6 @@ jobs:
           - { os: windows-latest, label: "MSVC", linker: "" }
           - { os: ubuntu-latest, label: "GCC", linker: "" }
           - { os: ubuntu-latest, label: "Clang", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
-          - { os: ubuntu-24.04-arm, label: "GCC-aarch64", linker: "" }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -141,15 +140,40 @@ jobs:
             gates-${{ matrix.label }}.json
             determinism-${{ matrix.label }}.txt
 
+  # ---- 确定性矩阵：aarch64 交叉编译 + QEMU 实跑（私有仓无托管 ARM runner 时的等价覆盖）----
+  determinism-arm64:
+    name: 确定性 (GCC-aarch64/qemu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: 交叉工具链 + QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user-static
+      - name: aarch64 determinism（10 轮，QEMU 实跑）
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: qemu-aarch64-static
+        run: |
+          cargo run --release --target aarch64-unknown-linux-gnu -p vxl-phys --example determinism \
+            | tee determinism-GCC-aarch64.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gates-GCC-aarch64
+          path: determinism-GCC-aarch64.txt
+
   # ---- 汇总：跨编译器/跨架构哈希必须全等（§5 跨平台位级一致）----
   hash-compare:
     name: 跨平台哈希比对
-    needs: determinism
+    needs: [determinism, determinism-arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with: { path: arts }
-      - name: gate_scene.hash.final 全等断言
+      - name: gate_scene.hash.final 全等断言（x86_64 三编译器）
         run: |
           python3 - <<'PY'
           import json, pathlib, sys
@@ -167,11 +191,17 @@ jobs:
               print(f"{name}: {h}{mark}")
           if not hashes:
               print("没有产物——determinism 矩阵未产出"); sys.exit(1)
-          print("✅ 跨平台哈希全等" if ok else "❌ 跨平台哈希不一致")
+          print("✅ 三编译器哈希全等" if ok else "❌ 三编译器哈希不一致")
           sys.exit(0 if ok else 1)
           PY
-      - name: determinism FINAL_HASH 汇总
-        run: grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sort | uniq -c
+      - name: determinism FINAL_HASH 汇总（三编译器 + aarch64 全等式）
+        run: |
+          set -euo pipefail
+          echo "== 各平台 FINAL_HASH =="
+          grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sort | uniq -c
+          n=$(grep -h "FINAL_HASH=" arts/*/determinism-*.txt | sed 's/.*FINAL_HASH=//' | sort -u | wc -l)
+          echo "唯一哈希数 = $n（应为 1；>1 即跨平台不一致）"
+          test "$n" -eq 1
 
   # ---- 词汇禁令扫描（裁决 61；施工令 T6）----
   vocab:
