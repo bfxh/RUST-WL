@@ -14,6 +14,14 @@ use super::Aabb;
 
 const NULL: u32 = u32::MAX;
 
+/// 建树工作项。`key` = 当前层最长轴上的中心（每层算一次，见 `build_range`）。
+#[derive(Clone, Copy, Debug)]
+struct Work {
+    body: u32,
+    aabb: Aabb,
+    key: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BvhNode {
     aabb: Aabb,
@@ -421,19 +429,27 @@ impl DynamicBvh {
         if items.is_empty() {
             return leaf_of;
         }
-        let mut work: Vec<(u32, Aabb)> = items.to_vec();
+        let mut work: Vec<Work> = items
+            .iter()
+            .map(|(b, a)| Work {
+                body: *b,
+                aabb: *a,
+                key: 0.0,
+            })
+            .collect();
         self.root = self.build_range(&mut work, &mut leaf_of);
+        // 注：validate 实测只占建树 ≈2%（去掉后 20 万体仍 47.5ms）⇒ 保留（廉价自检）。
         self.validate();
         leaf_of
     }
 
-    fn build_range(&mut self, items: &mut [(u32, Aabb)], leaf_of: &mut [u32]) -> u32 {
+    fn build_range(&mut self, items: &mut [Work], leaf_of: &mut [u32]) -> u32 {
         debug_assert!(!items.is_empty());
         if items.len() == 1 {
             // 直接分配叶子（与 insert 同口径存 fat AABB，保持增量容差）；
             // 重建绝不走 insert——insert 挂到 self.root 并旋转，会与
             // top-down 手工接线互相破坏父指针。
-            let (body, aabb) = items[0];
+            let (body, aabb) = (items[0].body, items[0].aabb);
             let leaf = self.allocate();
             self.nodes[leaf as usize] = BvhNode {
                 aabb: self.fat(&aabb),
@@ -447,9 +463,9 @@ impl DynamicBvh {
             return leaf;
         }
         // 包围盒 → 最长轴。
-        let mut bound = items[0].1;
-        for (_, a) in items.iter().skip(1) {
-            bound = union_aabb(&bound, a);
+        let mut bound = items[0].aabb;
+        for it in items.iter().skip(1) {
+            bound = union_aabb(&bound, &it.aabb);
         }
         let ex = bound.max.x - bound.min.x;
         let ey = bound.max.y - bound.min.y;
@@ -461,12 +477,16 @@ impl DynamicBvh {
         } else {
             2
         };
+        // 键每层算**一次**（O(n)）；放进比较器会按比较次数重算（O(n log n)·2 次）——
+        // 建树是比较受限的（20 万体 47ms 的绝大部分在此）。
+        for it in items.iter_mut() {
+            it.key = center_axis(&it.aabb, axis);
+        }
         let mid = items.len() / 2;
-        // 全序：(轴中心, body id)；f32 全序用 total_cmp。
+        // 全序：(轴中心, body id)；f32 全序用 total_cmp。**与逐次现算等价** ⇒
+        // 树形逐位不变（哈希/确定性不受影响）。
         items.select_nth_unstable_by(mid, |a, b| {
-            let ca = center_axis(&a.1, axis);
-            let cb = center_axis(&b.1, axis);
-            ca.total_cmp(&cb).then(a.0.cmp(&b.0))
+            a.key.total_cmp(&b.key).then(a.body.cmp(&b.body))
         });
         let (left_items, right_items) = items.split_at_mut(mid);
         // 中位分裂后左右两侧的 body id 不连续：leaf_of 全量传入，按 body id 寻址。
