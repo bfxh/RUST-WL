@@ -163,6 +163,17 @@ fn box_axes(rot: Quat) -> [Vec3; 3] {
     ]
 }
 
+/// 姿态指纹（盒对轴缓存的键）：4×f32 位模式左旋混合——比 3 次四元数旋转廉价得多，
+/// 且键含体号 ⇒ 不同体不会互撞；同体同姿态必然同值 ⇒ **逐位透明**。
+#[inline]
+fn rot_fp(rot: Quat) -> u64 {
+    let mut h = rot.x.to_bits() as u64;
+    h = h.rotate_left(13) ^ rot.y.to_bits() as u64;
+    h = h.rotate_left(13) ^ rot.z.to_bits() as u64;
+    h = h.rotate_left(13) ^ rot.w.to_bits() as u64;
+    h
+}
+
 /// 面法线：轴分量带符号（±v 逐位精确，`rotate(-v) == -rotate(v)` 在
 /// 双叉积形式下成立）。
 #[inline]
@@ -247,6 +258,11 @@ pub struct DefaultNarrowPhase {
     /// 与预筛共用；置位时 SAT/clip 走免填充路径，其余形状为 None。
     box_axes_a: Option<[Vec3; 3]>,
     box_axes_b: Option<[Vec3; 3]>,
+    /// 体轴缓存（T3）：键 = (体号, 姿态指纹)。盒对路径原先**每对**都重算两体的
+    /// 3 次旋转（同体在 (a,b) 序下连续出现，与 `cached_a/cached_b` 同机制）
+    /// ⇒ 纯函数、命中即同值 ⇒ **逐位透明**。两槽分别给对的两个侧别。
+    cached_ax_a: (u32, u64, [Vec3; 3]),
+    cached_ax_b: (u32, u64, [Vec3; 3]),
     /// 裁剪顶点 scratch（参考面顶点）：通用与专用路径共用同一裁剪实现，
     /// 避免两份易漂移的裁剪代码。
     ref_v: Vec<Vec3>,
@@ -384,6 +400,8 @@ impl DefaultNarrowPhase {
             box_b: None,
             box_axes_a: None,
             box_axes_b: None,
+            cached_ax_a: (u32::MAX, u64::MAX, [Vec3::ZERO; 3]),
+            cached_ax_b: (u32::MAX, u64::MAX, [Vec3::ZERO; 3]),
             ref_v: Vec::new(),
             out_hint: 256,
         }
@@ -935,6 +953,8 @@ impl NarrowPhase for DefaultNarrowPhase {
         // 世界多面体填充缓存跨帧失效（体在帧间移动；键只含体号+形状）。
         self.cached_a = (u32::MAX, u64::MAX);
         self.cached_b = (u32::MAX, u64::MAX);
+        self.cached_ax_a = (u32::MAX, u64::MAX, [Vec3::ZERO; 3]);
+        self.cached_ax_b = (u32::MAX, u64::MAX, [Vec3::ZERO; 3]);
         let threads = jobs.threads();
         // 小规模串行（线程启动开销 > 收益）；并行 = 每块独立 clone（含自有
         // scratch），结果按块序拼接 = pair 序（§5 确定性契约）。
@@ -1129,8 +1149,23 @@ impl DefaultNarrowPhase {
                 // 预筛不拒的对必然要再做一遍同样的 15 轴测试 ⇒ 对真接触对是纯重复。
                 self.box_a = Some((ha, pa));
                 self.box_b = Some((hb, pb));
-                self.box_axes_a = Some(box_axes(ra));
-                self.box_axes_b = Some(box_axes(rb));
+                // 体轴缓存（T3）：同体连续出现 ⇒ 每体每帧只算一次 3 次旋转。
+                let fp_a = rot_fp(ra);
+                self.box_axes_a = Some(if self.cached_ax_a.0 == a && self.cached_ax_a.1 == fp_a {
+                    self.cached_ax_a.2
+                } else {
+                    let ax = box_axes(ra);
+                    self.cached_ax_a = (a, fp_a, ax);
+                    ax
+                });
+                let fp_b = rot_fp(rb);
+                self.box_axes_b = Some(if self.cached_ax_b.0 == b && self.cached_ax_b.1 == fp_b {
+                    self.cached_ax_b.2
+                } else {
+                    let ax = box_axes(rb);
+                    self.cached_ax_b = (b, fp_b, ax);
+                    ax
+                });
                 if let Some((sep, n, src)) = self.sat(pb - pa) {
                     if sep > self.skin {
                         return;
