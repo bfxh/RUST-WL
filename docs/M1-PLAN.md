@@ -604,6 +604,28 @@ Rapier 的剩余机制（contact clustering / staged island solver 完整语义�
 （本场景 `b` 侧每对变化，需换数据结构）、pair 批处理、`select_contacts` 的
 排序/去重、SAT 轴表裁剪（当前 21 轴全测）。
 
+**第十九段续（同日）：退役分离预筛——峰再降至 31.56ms**
+
+量测驱动的前提复核：预筛 `obb_separated` 的 15 轴（3+3 面 + 9 棱叉积）是 SAT
+21 轴的**子集**（面轴差一个符号，而分离度取 `|·|` ⇒ 同解），且预筛只做「拒绝」
+而不产生状态；预筛不拒的对必然要再做一遍同样的 15 轴测试 ⇒ **对真接触对是纯重复
+工作**。删除调用后实测（8B 场景，同窗口 159 tick）：
+
+| 指标（窄相每 tick） | 有预筛 | 无预筛 | 变化 |
+|---|---|---|---|
+| 均值 | 10.48ms | **9.32ms** | −11% |
+| p95 | 31.23ms | **28.06ms** | −10% |
+| 峰值 | 34.70ms | **31.56ms** | −9% |
+
+**行为不变性（逐位实证）**：`m0_gates` 哈希 `0xfd70f215d5b49fa6508d35a83b3efccc`
+**不变**（健康栏亦逐项相同），`determinism` `FINAL_HASH=0x7684f708c53801fab8de026bdfdb58bd`
+**不变**（10 轮一致）——与「预筛拒绝 ⊆ SAT 拒绝」的推理一致：删除它不改变任何判定。
+函数与其 ε 带专项测试一并退役（该保证现已由 SAT 自身承载）；盒对专用路径的
+「不漏接触」仍由 `box_dedicated_matches_generic_full_chain` 守门。
+
+**累计（相对第十八段基线）**：峰值 49.91 → **31.56ms（−37%）**、均值 14.34 →
+**9.32ms（−35%）**；距 ≤25ms 验收仍差 6.6ms（结构级改动待做）。
+
 **行为与门禁**
 
 - `m0_gates`：**PASS**（双跑一致）。哈希 `0xed53282d4816a77c0d16827241fae4c4
@@ -623,8 +645,8 @@ Rapier 的剩余机制（contact clustering / staged island solver 完整语义�
   逐位相同**、点位置差 ≤1e-5。敏感性已验：把 `+X` 面的顶点环绕序打乱即红。
 - 门禁全绿：fmt / clippy `-D warnings` / 强化档 clippy / 40 测试目标 /
   `rustdoc -D warnings` / 纪律扫描 / 词汇扫描 / typos / actionlint。
-- **静态层实效即时例证**：新加的 typos 门在本轮抓出了我自己写的变量名
-  `ded`（建议 `dead`）——已改名 `dedicated`；`clippy::needless_range_loop`
+- **静态层实效即时例证**：新加的 typos 门在本轮抓出了我自己写的三字母变量名
+  （typos 建议改为 `dead`）——已改名 `dedicated`；`clippy::needless_range_loop`
   与 `bool_assert_comparison` 同样在提交前被强化档拦下。
 
 ### T4 求解并行（大岛）
