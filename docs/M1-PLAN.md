@@ -1163,4 +1163,13 @@ b 追 a 的材料点 ⇒ 无符号 bug）。**唯一有净收益的**是 ⑦ 对
    ① 约束数据 SoA 化（本次扫描已给出靶子：**每点·迭代 ≈138ns = 2.6 ops/cycle**）
    ② 再按岛批量 4 lane 推进（岛间独立 ⇒ 逐位不变，跨平台哈希门不需要放宽）。
    这与 T2 尾的「数据布局/局部性」是同一笔投入，不建议分两轮做。
+5. **已验证「①单独做没用」（2026-09-14，已回退）**：把「每约束一个
+   `Vec<PointConstraint>`」扁平化成「组内一个点数组 + 约束带区间」
+   （`ConstraintBatch { constraints, points }`，接口按 `pt_start/pt_len` 取切片）——
+   **逐位透明**（`m0_gates` `0xfd70f215…` 不变、41 项测试全绿、workspace 编译 0 警告）
+   但**实测无收益**：解算 均 216.6 → **215.8ms（−0.4%，噪声）**、峰 502.9 → 506.9。
+   ⇒ 原因：约束点本就连续且 cbuf 跨帧复用（没有逐帧分配可省）⇒ **扁平化只有与
+   ②的 SIMD 同批做才有意义**（本仓纪律：无收益不引入 ⇒ 已回退）。改动配方记档：
+   `ConstraintBatch{constraints, points}` + `pt_start/pt_len` + 求解循环用
+   `let ConstraintBatch { constraints, points } = cbuf;` 解构避开借用冲突。
 
