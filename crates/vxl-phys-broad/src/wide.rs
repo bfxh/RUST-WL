@@ -304,13 +304,13 @@ impl WideBvh {
             let mut slot = [0u32; WIDE];
             let mut count = 0u8;
             let mut aabb: Option<Aabb> = None;
-            for k in 0..n {
-                if old[k] == body {
+            for b0 in old.iter().take(n) {
+                if *b0 == body {
                     continue;
                 }
-                slot[count as usize] = old[k];
+                slot[count as usize] = *b0;
                 count += 1;
-                let b = self.body_box[old[k] as usize];
+                let b = self.body_box[*b0 as usize];
                 aabb = Some(match aabb {
                     None => b,
                     Some(acc) => union(&acc, &b),
@@ -338,8 +338,8 @@ impl WideBvh {
         let mut slot = [0u32; WIDE];
         let mut count = 0u8;
         let mut aabb: Option<Aabb> = None;
-        for k in 0..pc {
-            let c = old[k];
+        for c in old.iter().take(pc) {
+            let c = *c;
             if c == leaf {
                 continue;
             }
@@ -371,8 +371,8 @@ impl WideBvh {
             return;
         }
         let mut height = 0u32;
-        for k in 0..count as usize {
-            height = height.max(self.nodes[slot[k] as usize].height);
+        for c in slot.iter().take(count as usize) {
+            height = height.max(self.nodes[*c as usize].height);
         }
         let node = &mut self.nodes[p];
         node.slot = slot;
@@ -677,11 +677,11 @@ mod tests {
         let (leaf, changed) = t.move_proxy(leaf, items[0].1, 0.02);
         assert!(changed, "带边距的首次移动应扩张叶盒");
         // 同参数第二次：叶盒已含 target ⇒ 零结构操作。
-        let (_, again) = t.move_proxy(leaf, items[0].1, 0.02);
+        let (_leaf2, again) = t.move_proxy(leaf, items[0].1, 0.02);
         assert!(!again, "叶盒已含 target 时应免结构操作");
         let far = aabb(100.0, 100.0, 5.0);
         t.set_body_box(0, far);
-        let (leaf, changed2) = t.move_proxy(leaf, far, 0.02);
+        let (_leaf_far, changed2) = t.move_proxy(leaf, far, 0.02);
         assert!(changed2, "远移必须报告变化");
         t.validate();
         let mut got = Vec::new();
