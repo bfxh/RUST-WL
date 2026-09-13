@@ -234,9 +234,19 @@ fn main() {
         vids.len()
     );
     println!("tick | 引擎 | |v|max | KE(J) | 入睡 | 最深 | y 带");
+    // SPEC §3 稳定性判据实测：「休眠体被重复唤醒 < 1 次/秒/体」——统计每体的
+    // asleep→awake 反转次数（本跑 ticks tick ⇒ 合规线 = ticks/60 次/体）。
+    let mut prev_awake: Vec<bool> = vids.iter().map(|&i| vw.bodies.awake[i]).collect();
+    let mut flips: Vec<u32> = vec![0; vids.len()];
     for t in 1..=ticks {
         vw.step();
         rw.step();
+        for (k, &i) in vids.iter().enumerate() {
+            if !prev_awake[k] && vw.bodies.awake[i] {
+                flips[k] += 1;
+            }
+            prev_awake[k] = vw.bodies.awake[i];
+        }
         if t % 50 == 0 || t == ticks {
             let a = summary_vxl(&vw, &vids);
             let b = summary_rapier(&rw, &rhs);
@@ -249,6 +259,22 @@ fn main() {
                 b.vmax, b.ke, b.sleeping, b.deep, b.ymin, b.ymax
             );
         }
+    }
+    {
+        let worst = flips.iter().copied().max().unwrap_or(0);
+        let flippers = flips.iter().filter(|&&f| f > 0).count();
+        println!(
+            "== 重复唤醒（SPEC §3 判据：< 1 次/秒/体；本跑 {ticks} tick ≈ {:.1}s ⇒ 合规线 {:.1} 次）：\
+             最差体 {worst} 次 | 有过唤醒的体 {flippers}/{} | {}",
+            ticks as f64 / 60.0,
+            ticks as f64 / 60.0,
+            vids.len(),
+            if (worst as f64) < ticks as f64 / 60.0 {
+                "✅ 合规"
+            } else {
+                "❌ 超线"
+            }
+        );
     }
     // 末态参照体位姿对照（发散是预期：双求解器数值路径不同；看量级）。
     let mut max_d = 0.0f32;
