@@ -57,6 +57,24 @@ const DRIFT_BIAS_SCALE: f32 = 1.0;
 /// （0.34→0.26 变 0.22→0.29）——M1 验收主体是塔，取无死区。
 const DRIFT_DEADZONE: f32 = 0.0;
 
+/// 回退匹配的**接触状态门**（米）：只有本帧裁剪深度 > 此阈值的回退匹配才允许
+/// 暖启动——**分离/预期接触（depth ≤ 0）拒配**（按新接触处理，暖冲量清零、
+/// 锚点重烘焙）。依据：错配锚点的暖冲量会过驱动「间歇角点接触」（125 体族的
+/// 触发画像 = 留缝角点间歇接触，见 OPEN-PROBLEMS P1）；而塔的承重腿是持续
+/// 正深度接触、不受影响。**非距离判别式**（距离类门已实测分不开有害/必需匹配）。
+const FB_DEPTH_MIN: f32 = 0.0;
+
+/// 回退匹配的**深度跳变门**（米）：`|本帧裁剪深度 − 锚点烘焙深度|` 超限 ⇒ 拒配。
+/// 这是 OPEN-PROBLEMS P1 候选①的正确形式——**注意别写成「有效深度 vs 裁剪深度」**：
+/// 锚点随体刚性移动时 `depth0 + sep·n ≡ cp.depth` 恒成立（实测差 ≤1e-6），
+/// 那样写等于不设门（本轮踩过）。直接量 `cp.depth − depth0` 有真信号：插桩实测
+/// 「刚触地型」匹配 = 锚点在分离态烘焙（d0 = −3.7mm）后被拿到触地帧用
+/// （d = +0.2mm）⇒ 跳变 3.9mm、且携带加载相冲量。**阈值扫描（125 体复现 dE 峰值）**：
+/// 1mm → 63.8、0.5mm → 27.8、**0.25mm → 18.2（取此档，验收线 ≤20）**、0.1mm → 17.7
+/// （更紧开始逼近「全拒」；全拒 = 16.2 但塔崩）。物理含义：dd ≈ v·dt ⇒ 只对
+/// 「深度变化快于 ~1.5 cm/s」的接触拒配，与睡眠阈（4 cm/s）同量级。
+const FB_DEPTH_JUMP: f32 = 0.00025;
+
 #[derive(Clone, Debug)]
 struct WarmManifold {
     normal: Vec3,
@@ -745,7 +763,20 @@ fn build_constraint(
                     // 只认「确实还是同一个材料点」的候选；拒配 ⇒ 按新接触处理、不暖启动。
                     let fb = match_dist * 0.25;
                     warm_pt = (0..warm_n)
-                        .filter(|&k| (warm_world[k] - cp.point).length_squared() < fb * fb)
+                        .filter(|&k| {
+                            // 接触状态门（非距离信号）：分离/预期接触不继承
+                            // 上一帧的暖冲量（错配冲量过驱动间歇角点接触）。
+                            if cp.depth <= FB_DEPTH_MIN {
+                                return false;
+                            }
+                            if (warm_world[k] - cp.point).length_squared() >= fb * fb {
+                                return false;
+                            }
+                            // 深度跳变门（非距离信号）：|本帧裁剪深度 − 锚点烘焙深度|
+                            // 超限 ⇒ 拒配。见 FB_DEPTH_JUMP 注（含「恒等式陷阱」教训）。
+                            let w = wm.points[k];
+                            (cp.depth - w.depth0).abs() <= FB_DEPTH_JUMP
+                        })
                         .min_by(|&x, &y| {
                             (warm_world[x] - cp.point)
                                 .length_squared()

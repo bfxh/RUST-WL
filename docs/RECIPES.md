@@ -17,14 +17,15 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 
 注意：**输出重定向 + 显式 `$?`**（管道会吞退出码，fb51911 事故）；日志文件先看尾部。
 
-## 行为门（四哈希）
+## 行为门（三命令四哈希）
 
-| 场景 | 命令 | 基线哈希（2026-09-14） |
+| 场景 | 命令 | 基线（2026-09-14，ADR 0007 落地后） |
 |---|---|---|
-| m0_gates | `cargo run --release -p vxl-phys --example m0_gates` | `0x443778a63faff2c0498a231f4311cbfe`（ADR 0003 落地后；旧 `0xfd70f215…`） |
-| stress | `cargo run --release -p vxl-phys --example stress_8b` | `0x696a25bc1f30a56ab9b2068f8d841f83` |
-| determinism | `cargo run --release -p vxl-phys --example determinism_check` | `0x7684f708c53801fab8de026bdfdb58bd` |
-| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands -- 4000` | 串行/并行逐位一致即可（扩展 ≥3×） |
+| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0xbdf0cee6370c2e3e2ee7834571168ef9`、末态活跃 0、PASS；压力 `0x2cc8c488a99b047b592060e9d9b42387`（report-only）。旧值：`0x443778a6…` / `0x067ed531…`（ADR 0003 档） |
+| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x8142fe05a6bb3f62eaff00f05d3f76e4`（10 轮逐位一致）。旧值 `0x7684f708…` |
+| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.80×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+
+哈希按行为变化更新是**预期流程**（ADR 0004）：落地记录里必须显式写出新旧值与原因。
 
 金样（另用独立 target 目录，避免污染主缓存）：
 `CARGO_TARGET_DIR=C:/vxl-wl-target-gold cargo run --release -p gold-sample -- <scene> 600 16 0.01 4 3.0 30 4`
