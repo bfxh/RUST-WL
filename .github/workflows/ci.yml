@@ -280,12 +280,20 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.linker }}
         run: cargo run --release -p vxl-phys --example determinism | tee determinism-${{ matrix.label }}.txt
+      # T6 8A 碰撞行：**报告层，不阻断**——计时随 runner 而异（验收以本机数字为准），
+      # 故退出码只记录不拦门；JSON 报告进产物（含 env / p50 / p95 / 首帧建树分项）。
+      - name: 8A 碰撞行（报告，不阻断）
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
+        run: cargo run --release -p vxl-phys --example m1_collision_row -- row-${{ matrix.label }}.json
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gates-${{ matrix.label }}
           path: |
             gates-${{ matrix.label }}.json
             determinism-${{ matrix.label }}.txt
+            row-${{ matrix.label }}.json
 
   # ==================== 确定性矩阵：aarch64 交叉编译 + QEMU 实跑（私有仓无托管 ARM runner 时的等价覆盖） ====================
   determinism-arm64:
