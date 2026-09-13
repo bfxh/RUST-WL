@@ -77,7 +77,7 @@ pub struct PhysConfig {
     pub ccd_max_steps: u32,
     /// §4.4 摩擦模型（默认材质；逐材质见 BodySet::materials）。
     pub friction: FrictionModel,
-    /// §4.5 恢复系数 e ∈ [0,1]（默认材质；材质对取 max）。
+    /// §4.5 恢复系数 e ∈ `[0,1]`（默认材质；材质对取 max）。
     pub restitution: f32,
     /// §4.5 恢复速度阈值：低于它的碰撞 e 视作 0（防微弹跳）。
     pub restitution_threshold: f32,

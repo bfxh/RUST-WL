@@ -466,6 +466,70 @@ Rapier 的剩余机制（contact clustering / staged island solver 完整语义�
    故本段结论为「本地门禁全绿 + 三块新钉板」，**不宣称 CI 四门已过**。
 6. **修复落地**：宽相翻转修复 + 三块钉板已提交（见提交说明）。
 
+### 进度更新（2026-09-13 第十七段：CI 门禁分层——静态层 + 汇总门 + 安全基线）
+
+动机：用户令「学习其他仓库的工作流程，静态等都加上去」。核对 `bfxh/ark`（TS，
+19KB ci.yml + 分文件工作流）、`bfxh/unified-rx-mcp`、`bfxh/arch-optimize`
+（mypy/ruff/tests 分文件）三仓后抽取可复用模式，落到本仓（Rust 引擎）语境。
+
+1. **新增静态层**（三个 job，零编译的文本层合并在一个 job 内省开销）：
+   - `static-text`：typos（拼写；`_typos.toml` 只豁免确有语义的术语——
+     `pn`（法向冲量）/`toi`（time of impact）/`LOD`/惯性分量 `iy`/`Iy`/网格下标
+     `iz`/`ba`，逐条写物理含义）→ actionlint（工作流语法）→ zizmor（工作流安全
+     审计）→ `scripts/discipline_scan.sh` → `scripts/vocab_scan.sh`；
+   - `static-deps`：cargo-deny（`deny.toml`：公告、**只列实际出现的许可**
+     MIT/Apache-2.0/BSL-1.0、通配禁止、未知源禁止）+ cargo-machete（未使用依赖）；
+   - `static-code`：`RUSTDOCFLAGS=-D warnings cargo doc --workspace --no-deps`
+     + 强化档 clippy（`-D warnings` 之上追加 `todo`/`unimplemented`/`dbg_macro`/
+     `mem_forget`/`undocumented_unsafe_blocks`/`let_underscore_must_use`）。
+2. **纪律扫描（自研静态门，`scripts/discipline_scan.sh`）**——把书面纪律变成可执行
+   断言：① 每个 `crates/*/src/lib.rs` 必须带 `#![forbid(unsafe_code)]`；② 引擎源码
+   零真 `unsafe`；③ 引擎源码**零 f64**（§5 严格 f32）；④ 零 `core::arch`/`std::simd`
+   内建（§7 主路径标量语义）；⑤ 构建配置零 `fast-math`/`target-cpu=native`
+   （禁重排 + 可复现构建）。扫描面 = `crates/*/src/**`（examples/tests 不在内，
+   计时与统计用 f64 是允许的）。**敏感性已验**：注入一个含 `f64` 的探针文件，
+   ③ 立即命中；删除后恢复全绿。
+3. **汇总门 `gates-summary`**（借 ark 的 `all-checks-passed` 模式）：`needs` 全部
+   前置门 + `if: always()` + `contains(needs.*.result, 'failure'|'cancelled'|'skipped')`
+   → 红。理由：Free 私有仓**无「必需检查」功能**（API 实测 403），单状态汇总即
+   事实上的分支门；`if: always()` 是承重的——缺它则前置门失败会让汇总被 SKIP，
+   而 GitHub 把 skipped 的必需检查视作通过。
+4. **安全基线（zizmor 审计驱动，审计前 36 项 → 现 0 项）**：
+   - `permissions: contents: read`（workflow 级最小权限，原缺 → 10 项 excessive-permissions）；
+   - 全部 `actions/checkout` 加 `persist-credentials: false`（凭据不落盘 → 8 项 artipacked）；
+   - 第三方 action **按 commit SHA 固定**（18 项 unpinned-uses）：checkout v4 →
+     `11d5960a…`、upload-artifact v4 → `ea165f8d…`、download-artifact v4 → `d3f86a10…`、
+     taiki-e/install-action v2 → `3f74d7c1…`、Swatinem/rust-cache v2 → `6323deb1…`；
+     唯一保留滚动 ref = `dtolnay/rust-toolchain@stable|nightly`（该 action 的 ref
+     即「工具链名」语义，无固定 SHA 等价物），行内 `# zizmor: ignore[unpinned-uses]` 注明。
+5. **成本控制续**（承接第十五段的分钟计费治理）：编译类 job 统一挂 rust-cache
+   （Cargo.lock 键控）；`CARGO_TARGET_DIR: target` 显式固定（本机 `.cargo/config.toml`
+   的 `C:/vxl-wl-target` 不入仓，见 `.gitignore`）。
+6. **顺带修掉的真缺陷**（均为本轮静态工具首次引入后即命中）：
+   - `rustdoc -D warnings` 抓出 2 处 **broken intra-doc links**：
+     `polytope.rs` 的 `verts[face_start[i]..]` 与 `config.rs` 的 `e ∈ [0,1]`
+     被当作链接语法 → 加反引号转义；
+   - `cargo deny` 抓出 workspace path 依赖缺版本约束导致**无法解析**
+     （`bug[unresolved-workspace-dependency]`）→ `[workspace.dependencies]` 改为
+     `{ version = "0.1.0", path = … }` 双写（Cargo.lock 逐位不变，已验）；
+   - `cargo deny` 抓出 `xxhash-rust` 为 `BSL-1.0`（原白名单未列）→ 显式加入并注明。
+7. **仓沪治理**：`dependabot.yml`（cargo 周更 / actions 月更，分组 + 限 2 并发，
+   降低 CI 分钟消耗；含 **cooldown 7 天**——新版本先冷却再提案，压供应链攻击
+   暴露窗口，此为 zizmor `dependabot-cooldown` 审计项发现的缺口）、
+   `pull_request_template.md`（自检清单 + **确定性影响**栏：强制回答哈希是否变化
+   及新旧全量 u128）、`ISSUE_TEMPLATE/{bug,task}.md` + `config.yml`（沿用 ark 的
+   「一句话 + `<details>` 折叠」体例，并加入本仓特有的复现命令/哈希栏）。
+8. **本地复验（本轮新增门全部先在本地跑绿才入 CI）**：typos 0 命中、actionlint 0、
+   zizmor 0 发现（离线与**在线**两种模式各跑一遍；9 ignored / 13 suppressed 均为
+   行内豁免与非默认审计）、`cargo deny check` 四项全 ok、`cargo machete` 无未使用
+   依赖、`rustdoc -D warnings` 通过、强化档 clippy exit 0、纪律扫描通过（31 源码
+   文件，且注入探针可被抓）、全量测试 40 目标全绿、fmt/clippy/词汇扫描通过。
+   **行为透明复核**（因本轮动了 `Cargo.toml` 与两处 doc 注释）：`m0_gates` 哈希
+   仍为 `0xed53282d4816a77c0d16827241fae4c4`（双跑一致）、`determinism`
+   `FINAL_HASH=0x1d867a7ed9a2334df21203270e2403f1`（10 轮全等）——**逐位不变**。
+9. **未覆盖项（如实）**：新静态层各工具在 CI 上的**首跑结论仍待 CI 可用**
+   （账单拦门未解，见 §需用户）；本轮结论仅为「本地全绿 + 配置已入仓」。
+
 ### T4 求解并行（大岛）
 - 现实约束：核心 `#![forbid(unsafe_code)]`——**大岛内并行需 unsafe 分域**，属
   V2 §5 的 M4+ 自定义池条款，M1 不做（与 Rapier 同级：岛级并行 + 小岛批）；

@@ -1,0 +1,42 @@
+# Dependabot：依赖与 action 的自动升级提案（仓沪治理）。
+#
+# 成本纪律：私有仓 Actions 按分钟计费，dependabot 每个 PR 都会触发一轮 CI——
+# 故采取「低频 + 分组 + 限并发」三约束：
+#   - 分组：同一生态的补丁/次要更新合成一个 PR（一轮 CI 覆盖多条升级）；
+#   - 限并发：open-pull-requests-limit 压到 2，避免 PR 堆积同时烧管线；
+#   - 频率：cargo 每周、actions 每月（actions 变更频率低且安全影响直接）。
+#
+# 引擎依赖面本身极小（仅 xxhash-rust）——本文件的主要价值在 github-actions
+# 一侧：action 版本升级会带来安全修复（与 zizmor 审计互补）。
+
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    # cooldown：新发布版本先冷却 7 天再提案（供应链攻击的暴露窗口多在发布后
+    # 数小时到数天内被发现；zizmor 审计项 dependabot-cooldown）。
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      actions-all:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

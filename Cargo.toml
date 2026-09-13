@@ -32,14 +32,16 @@ license = "MIT OR Apache-2.0"
 authors = ["RUST WL"]
 
 [workspace.dependencies]
-vxl-phys-core = { path = "crates/vxl-phys-core" }
-vxl-phys-broad = { path = "crates/vxl-phys-broad" }
-vxl-phys-narrow = { path = "crates/vxl-phys-narrow" }
-vxl-phys-solver = { path = "crates/vxl-phys-solver" }
-vxl-phys-integrate = { path = "crates/vxl-phys-integrate" }
-vxl-phys-field = { path = "crates/vxl-phys-field" }
-vxl-phys-terrain = { path = "crates/vxl-phys-terrain" }
-vxl-phys-replay = { path = "crates/vxl-phys-replay" }
+# 版本与 path 同时给出：path 供本地 workspace 解析，version 供「若将来发布」
+# 与静态审计工具（cargo-deny 需可解析的版本约束）使用。
+vxl-phys-core = { version = "0.1.0", path = "crates/vxl-phys-core" }
+vxl-phys-broad = { version = "0.1.0", path = "crates/vxl-phys-broad" }
+vxl-phys-narrow = { version = "0.1.0", path = "crates/vxl-phys-narrow" }
+vxl-phys-solver = { version = "0.1.0", path = "crates/vxl-phys-solver" }
+vxl-phys-integrate = { version = "0.1.0", path = "crates/vxl-phys-integrate" }
+vxl-phys-field = { version = "0.1.0", path = "crates/vxl-phys-field" }
+vxl-phys-terrain = { version = "0.1.0", path = "crates/vxl-phys-terrain" }
+vxl-phys-replay = { version = "0.1.0", path = "crates/vxl-phys-replay" }
 
 [profile.release]
 lto = "thin"

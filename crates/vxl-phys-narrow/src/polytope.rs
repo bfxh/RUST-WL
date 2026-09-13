@@ -9,7 +9,7 @@ use vxl_phys_core::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub struct ConvexPolytope {
-    /// 展开顶点：面 i 的顶点 = verts[face_start[i]..face_start[i+1]]。
+    /// 展开顶点：面 i 的顶点 = `verts[face_start[i]..face_start[i+1]]`。
     pub verts: Vec<Vec3>,
     pub face_normal: Vec<Vec3>,
     pub face_start: Vec<u32>,
