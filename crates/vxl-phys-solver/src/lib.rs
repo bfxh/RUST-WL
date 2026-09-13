@@ -737,10 +737,15 @@ fn build_constraint(
                         .map(|k| wm.points[k]);
                 }
                 if warm_pt.is_none() {
+                    // **回退分支单独收紧接受半径**（上一轮实测结论的直接产物）：
+                    // 回退（特征未命中）按 4×skin ≈4cm 接受时会把**错配锚点**也认下来
+                    // ⇒ 帧间「漂移」= 两点真实错位 ⇒ 暖启动冲量过驱动速度
+                    // ⇒ 堆族永不入睡（实测：整个关掉回退使 col45 45/45、
+                    // pile5 1985/2000 全睡且位置更准，但塔崩）。⇒ 收到 **1×skin**：
+                    // 只认「确实还是同一个材料点」的候选；拒配 ⇒ 按新接触处理、不暖启动。
+                    let fb = match_dist * 0.25;
                     warm_pt = (0..warm_n)
-                        .filter(|&k| {
-                            (warm_world[k] - cp.point).length_squared() < match_dist * match_dist
-                        })
+                        .filter(|&k| (warm_world[k] - cp.point).length_squared() < fb * fb)
                         .min_by(|&x, &y| {
                             (warm_world[x] - cp.point)
                                 .length_squared()
