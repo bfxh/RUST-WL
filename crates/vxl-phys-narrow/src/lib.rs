@@ -250,6 +250,9 @@ pub struct DefaultNarrowPhase {
     /// 裁剪顶点 scratch（参考面顶点）：通用与专用路径共用同一裁剪实现，
     /// 避免两份易漂移的裁剪代码。
     ref_v: Vec<Vec3>,
+    /// 上一帧产出的流形数（下一帧并行块输出缓冲的容量提示）。纯性能提示：
+    /// 不参与任何判定，故与确定性无关。
+    out_hint: usize,
 }
 
 fn poly_key(s: &Shape) -> u64 {
@@ -382,6 +385,7 @@ impl DefaultNarrowPhase {
             box_axes_a: None,
             box_axes_b: None,
             ref_v: Vec::new(),
+            out_hint: 256,
         }
     }
 
@@ -943,7 +947,14 @@ impl NarrowPhase for DefaultNarrowPhase {
         let this = &*self;
         let n_chunks = threads.min(pairs.len().div_ceil(2048));
         let chunk = pairs.len().div_ceil(n_chunks);
-        let mut outs: Vec<Vec<Manifold>> = vec![Vec::new(); n_chunks];
+        // 输出缓冲预分配（T3 结构项②的第一片）：8B 场景实测对/流形 ≈ 15:1，
+        // 旧实现每块从空 Vec 逐次增长（每块 ~8 次重分配 + memcpy），且最终
+        // 拼接要把全部流形再搬一遍。按下界预留容量即免掉这一段。
+        let out_hint = self.out_hint.max(16);
+        let mut outs: Vec<Vec<Manifold>> = (0..n_chunks)
+            .map(|_| Vec::with_capacity(out_hint / n_chunks + 8))
+            .collect();
+        out.reserve(out_hint);
         vxl_phys_core::schedule::for_each_chunk_mut(
             &mut outs,
             threads,
@@ -960,9 +971,13 @@ impl NarrowPhase for DefaultNarrowPhase {
                 }
             },
         );
+        let mut produced = 0usize;
         for mut co in outs {
+            produced += co.len();
             out.append(&mut co);
         }
+        // 下一帧的容量提示（纯性能提示，不参与任何判定 ⇒ 确定性无关）。
+        self.out_hint = produced;
     }
 }
 
