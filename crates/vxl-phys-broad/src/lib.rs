@@ -3,6 +3,9 @@
 //! 宽相（§2.3）：「增量 AABB 树（bvh2 风格）为主 + 大世界空间哈希网格」。
 //! M1 落地 `BvhBroadPhase`（增量动态 BVH，`bvh::DynamicBvh`）为主实现；
 //! M0 的 `GridBroadPhase`（均匀空间哈希网格）保留作对照/大世界叠加。
+//! `wide::WideBvh`（8 路宽节点）为已验收但**未接入**的实验模块：树更新更快
+//! （树峰 7.34→3.10ms）但叶粒度令候选数 8×、查询更慢（均 7.47→14.68ms）
+//! ⇒ 净负，见 `BvhBroadPhase` 结论注与 docs/M1-PLAN.md。
 //!
 //! 确定性（§5）：树插入/移动按体索引升序；查询显式栈、先左后右；
 //! 输出对 `(a, b)`（a < b）按字典序排序去重。两者绝不迭代哈希结构本身。
@@ -10,7 +13,8 @@
 #![forbid(unsafe_code)]
 
 pub mod bvh;
-/// 8 路宽节点 BVH 原型（T2 尾数据布局投入；接入前不参与生产路径）。
+/// 8 路宽节点 BVH（T2 尾数据布局投入；**实验模块，未接入生产路径**——
+/// 接入实测净负，见 `BvhBroadPhase` 结论注）。
 pub mod wide;
 
 use std::collections::HashMap;
@@ -18,6 +22,7 @@ use std::collections::HashMap;
 use vxl_phys_core::{BodySet, JobSystem, Quat, Shape, Vec3};
 
 pub use bvh::DynamicBvh;
+pub use wide::WideBvh;
 
 /// 轴对齐包围盒。
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +137,12 @@ pub trait BroadPhase {
 
     /// 诊断：树高（链路审计；默认 0 = 不适用）。
     fn tree_height(&self) -> u32 {
+        0
+    }
+
+    /// 诊断：上一帧候选总数（查询返回的候选条目数之和）——候选粒度审计；
+    /// 默认 0 = 不适用。
+    fn cand_total(&self) -> usize {
         0
     }
 }
@@ -319,6 +330,12 @@ impl BroadPhase for GridBroadPhase {
 /// - 代理更新按体索引升序（确定性）；树跨帧保持（增量 refit/平衡）；
 /// - fat margin = 2×skin（≥ 2cm），静置帧零树操作；
 /// - M1 不提供删体 API（`World` 无删体），叶子与体索引一一对应。
+///
+/// **宽节点（8 路）实测结论（T2 尾，2026-09-13）**：`wide::WideBvh` 已按其
+/// 验收接入过一版，树峰 7.34 → **3.10ms**（叶含 8 体 ⇒ 多数移动落在叶盒内、
+/// 免 refit），但查询均 7.47 → **14.68ms**、峰 22.64 → **33.50ms**——
+/// 叶粒度让候选数 8×（实测 候选均 **208 万/tick**，真实接触对仅 ≈2.25/体），
+/// 查询是**候选受限**而非遍历受限 ⇒ 净负收益，**回退**（详见 docs/M1-PLAN.md）。
 pub struct BvhBroadPhase {
     tree: DynamicBvh,
     skin: f32,
@@ -342,6 +359,8 @@ pub struct BvhBroadPhase {
     prev_awake: Vec<bool>,
     /// 诊断：上一帧各子阶段耗时（µs）：(AABB, 树更新/重建, 查询, 排序)。
     pub last_breakdown_us: (u64, u64, u64, u64),
+    /// 诊断：上一帧候选总数（查询返回的候选条目数之和）——候选粒度/b 因子审计。
+    pub last_cand_total: usize,
 }
 
 impl BvhBroadPhase {
@@ -359,6 +378,7 @@ impl BvhBroadPhase {
             cand_arena: Vec::new(),
             prev_awake: Vec::new(),
             last_breakdown_us: (0, 0, 0, 0),
+            last_cand_total: 0,
         }
     }
 
@@ -560,6 +580,7 @@ impl BroadPhase for BvhBroadPhase {
                     }
                 },
             );
+            let mut cand_total = 0usize;
             for (arena, entries) in refresh {
                 let arena_base = self.cand_arena.len() as u32;
                 self.cand_arena.extend_from_slice(&arena);
@@ -568,8 +589,10 @@ impl BroadPhase for BvhBroadPhase {
                     self.cand_off[iu] = arena_base + off;
                     self.cand_len[iu] = len;
                     self.cache_fat[iu] = fat;
+                    cand_total += len as usize;
                 }
             }
+            self.last_cand_total = cand_total;
         }
         {
             let this = &*self;
@@ -653,6 +676,10 @@ impl BroadPhase for BvhBroadPhase {
 
     fn tree_height(&self) -> u32 {
         self.tree.root_height()
+    }
+
+    fn cand_total(&self) -> usize {
+        self.last_cand_total
     }
 }
 

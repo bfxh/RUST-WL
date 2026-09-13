@@ -6,6 +6,14 @@
 //! ≈29MB（**−67%**）。纯 SoA 拆分仅 −33%；失效范围 / fat 边距 / 树高调优
 //! 均已被实测证伪（见会话记录）。
 //!
+//! **接入实测结论（T2 尾，已回退——先读这段再动手）**：8B 场景（20 万体）
+//! 接入 `BvhBroadPhase` 后，**树峰 7.30 → 3.10ms（−58%，达验收）**、
+//! **查询均 7.74 → 14.68ms（+90%）、峰 24.10 → 33.50ms** ⇒ **净负，已回退**。
+//! 根因（已定量）：查询成本 ≈ **候选总数 × 4ns**；**叶含 8 体 ⇒ 候选粒度 8×**
+//! （叶盒 = 体盒并集，比单体 fat 盒更松）——实测候选 35.4 万 → **207.8 万/tick**，
+//! 与 +6.94ms 逐项吻合。**故「叶宽」是错误方向：宽节点要宽在内部节点，
+//! 叶应保持 1-2 体**（下一版设计的依据，见 docs/M1-PLAN.md 证伪③）。
+//!
 //! **插入策略（B 树式溢出传播）**：新体先落叶；叶满（8 旧体 + 1 新体）⇒ 按最长轴
 //! 切 4+5 成两叶，**多出的叶作为父的一条额外孩子**（父 `count`+1）而非替换原槽位；
 //! 父满（8 子 + 1 新子）⇒ 按最长轴切 5+4 并向祖父传播；**仅根溢出**才新建根。
@@ -666,6 +674,24 @@ impl WideBvh {
         self.body_box[body as usize] = aabb;
     }
 
+    /// 已登记的体槽位数（≈ 最大体 id + 1）——调用方判「有无新体」用。
+    pub fn body_slots(&self) -> usize {
+        self.leaf_of.len()
+    }
+
+    /// 按**体 id** 移动代理（宽相接入路径）。权威解析叶下标：分裂会把体搬到
+    /// 新叶 ⇒ 调用方缓存的旧叶下标会失效。同步体盒旁路（分裂按它重算叶盒）。
+    /// 未在树内的体按新体插入（返回 `changed = true`，调用方据此失效缓存）。
+    pub fn move_proxy_body(&mut self, body: u32, aabb: Aabb, margin: f32) -> (u32, bool) {
+        self.ensure_capacity(body as usize);
+        self.body_box[body as usize] = aabb;
+        let leaf = self.leaf_of[body as usize];
+        if leaf == NULL {
+            return (self.insert(body, aabb), true);
+        }
+        self.move_proxy(leaf, aabb, margin)
+    }
+
     /// 自 `node` 向上 refit（盒 = 子盒并集；高 = 1+max(子高)），**提前退出**
     /// （本层盒与高度均未变 ⇒ 其上只依赖本层，必然不变）。
     ///
@@ -1031,6 +1057,34 @@ mod tests {
             bu_nodes <= in_nodes * 2 + 64,
             "批构建遍历数 {bu_nodes} 远差于增量 {in_nodes}"
         );
+    }
+
+    /// 按体 id 移动（宽相接入 API）：分裂会把体搬到新叶 ⇒ 调用方缓存的旧叶
+    /// 下标失效，故必须由树内 `leaf_of` 权威解析；未入树的体按新体插入。
+    #[test]
+    fn wide_move_proxy_body_resolves_split_relocation() {
+        // 同一小区域塞 16 体 ⇒ 必然发生叶分裂（体被搬离原叶）。
+        let mut t = WideBvh::new_with_capacity(64);
+        for k in 0..16u32 {
+            t.insert(k, aabb(k as f32 * 0.1, 0.0, 0.4));
+        }
+        t.validate();
+        assert_eq!(t.body_slots(), 64, "容量预置应计入体槽");
+        // 取一个体远移：必须报告变化，且新位置可查。
+        let far = aabb(50.0, 50.0, 1.0);
+        let (_leaf, changed) = t.move_proxy_body(0, far, 0.05);
+        assert!(changed, "远移必须报告变化");
+        t.validate();
+        let mut got = Vec::new();
+        t.query(&aabb(50.0, 50.0, 2.0), &mut got);
+        assert!(got.contains(&0), "远移后的体应可被新位置查到");
+        // 同参数第二次：叶盒已含 target ⇒ 免结构操作（缓存可复用）。
+        let (_l2, again) = t.move_proxy_body(0, far, 0.05);
+        assert!(!again, "叶盒已含 target 时应免结构操作");
+        // 未入树的体：按新体插入并报告变化（缓存失效语义）。
+        let (leaf, fresh) = t.move_proxy_body(40, aabb(0.0, 0.0, 0.5), 0.05);
+        assert!(fresh && leaf != NULL, "未入树的体应被插入");
+        t.validate();
     }
 
     /// 叶溢出分裂：9 体 ⇒ 根宽 2、两叶 4+5、全部体仍可查（B 树传播最小例）。
