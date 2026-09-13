@@ -60,10 +60,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - name: 安装文本层工具（typos / actionlint / zizmor）
+      # 工具逐个安装（首次 CI 实测：合并写法 `tool: a,b,c` 在安装步失败——exit 76；
+      # 拆成独立步骤后失败可归因到具体工具，且各自的 manifest/版本独立解析）。
+      - name: 安装 typos
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
-          tool: typos,actionlint,zizmor
+          tool: typos
+      - name: 安装 actionlint
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: actionlint
+      - name: 安装 zizmor
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: zizmor
       - name: 拼写（typos；豁免项见 _typos.toml）
         run: typos .
       - name: 工作流语法（actionlint）
