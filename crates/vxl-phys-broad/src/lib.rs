@@ -13,6 +13,9 @@
 #![forbid(unsafe_code)]
 
 pub mod bvh;
+/// BVH8（宽**内部**节点 + 窄叶）——T2 尾数据布局**第二版原型**：先量「6 层窄叶
+/// 遍历是否真比 18 层二叉便宜」再决定投不投增量侧（见模块头注）。
+pub mod bvh8;
 /// 8 路宽节点 BVH（T2 尾数据布局投入；**实验模块，未接入生产路径**——
 /// 接入实测净负，见 `BvhBroadPhase` 结论注）。
 pub mod wide;
@@ -22,6 +25,7 @@ use std::collections::HashMap;
 use vxl_phys_core::{BodySet, JobSystem, Quat, Shape, Vec3};
 
 pub use bvh::DynamicBvh;
+pub use bvh8::Bvh8;
 pub use wide::WideBvh;
 
 /// 轴对齐包围盒。
