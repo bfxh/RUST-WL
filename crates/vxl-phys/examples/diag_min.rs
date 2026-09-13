@@ -25,6 +25,8 @@ fn main() {
     let baumgarte: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.2);
     let shock: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let inner: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4);
+    // 末位可选 skin（T1 调试旋钮）：「缝 vs skin」关系是留缝密堆微抖的触发通道。
+    let skin: Option<f32> = args.next().and_then(|s| s.parse().ok());
 
     let mut cfg = PhysConfig {
         velocity_iterations: iters,
@@ -34,6 +36,9 @@ fn main() {
         normal_inner: inner,
         ..PhysConfig::default()
     };
+    if let Some(s) = skin {
+        cfg.contact_skin = s;
+    }
     cfg.friction = FrictionModel::Coulomb { mu };
 
     let mut w = World::new(cfg);
