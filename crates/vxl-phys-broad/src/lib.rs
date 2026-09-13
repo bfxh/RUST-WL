@@ -10,6 +10,8 @@
 #![forbid(unsafe_code)]
 
 pub mod bvh;
+/// 8 路宽节点 BVH 原型（T2 尾数据布局投入；接入前不参与生产路径）。
+pub mod wide;
 
 use std::collections::HashMap;
 
