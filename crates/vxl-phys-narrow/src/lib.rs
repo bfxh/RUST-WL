@@ -1456,6 +1456,43 @@ mod tests {
         assert!(max_delta > 0.0, "两路径逐位相同 ⇒ 快路径未被真正测到");
     }
 
+    /// 内边（折痕）幽灵接触判据：盒正中骑在「平地面 / 斜坡」的折痕上时，
+    /// 采样法线**不许是两块面法线的混合**——混合即内边假接触（幽灵推力）。
+    /// 高度场路径取「最深点采样法线」作整条流形法线，折痕处的双线性采样
+    /// 天然会把两块面混在一起，故这里是该缺陷的天然复现位。
+    #[test]
+    fn heightfield_crease_normal_is_not_blended() {
+        // ix≤5 平（h=0），ix>5 沿 +x 抬升 0.5/格 ⇒ 折痕在 x=0（spacing=1，x0=-5）。
+        let mut hf = HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0);
+        for iz in 0..11 {
+            for ix in 0..11 {
+                hf.set_height(ix, iz, (ix as f32 - 5.0).max(0.0) * 0.5);
+            }
+        }
+        let mut b = BodySet::new();
+        b.push_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.4),
+            },
+            Vec3::new(0.0, 0.35, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        let _ = b.push_static(Shape::HeightField(0), Vec3::ZERO, Quat::IDENTITY);
+        let m = manifolds_for(&b, &[hf]);
+        assert_eq!(m.len(), 1);
+        let n = m[0].normal; // 约定：a=盒 → b=地面（指向地面者为主）
+        let floor = Vec3::new(0.0, -1.0, 0.0);
+        let ramp = -Vec3::new(-0.5, 1.0, 0.0).normalize();
+        let d_floor = n.dot(floor);
+        let d_ramp = n.dot(ramp);
+        assert!(n.z.abs() < 1e-3, "折痕法线出现 z 分量（邻格串扰）：{n:?}");
+        assert!(
+            d_floor.max(d_ramp) > 0.995,
+            "折痕法线是两块面法线的混合 ⇒ 内边幽灵接触：{n:?}（floor 对齐 {d_floor}，ramp 对齐 {d_ramp}）"
+        );
+    }
+
     /// T3 盒对专用路径 vs 通用路径**全链对拍**：同一姿态下，唯一变量是
     /// 「体轴直生（专用）还是多面体填充（通用）」，断言 SAT 的 sep/法线/来源
     /// 三者一致，且 `clip` 的接触点集合逐点对应（点数相同、特征号逐位相同、
