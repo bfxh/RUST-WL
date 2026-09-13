@@ -334,6 +334,10 @@ pub struct BvhBroadPhase {
     cand_off: Vec<u32>,
     cand_len: Vec<u32>,
     cand_arena: Vec<u32>,
+    /// 上一帧「参与查询」位（动态且清醒）——睡眠状态翻转检测用（见 `compute_pairs`
+    /// 的不变式注：翻转帧必须全缓存失效，否则睡眠侧不查询 + 清醒侧缓存陈旧
+    /// 会漏掉新接近对；不变式测试 `bvh_pairs_match_brute_force_across_frames` 守门）。
+    prev_awake: Vec<bool>,
     /// 诊断：上一帧各子阶段耗时（µs）：(AABB, 树更新/重建, 查询, 排序)。
     pub last_breakdown_us: (u64, u64, u64, u64),
 }
@@ -351,6 +355,7 @@ impl BvhBroadPhase {
             cand_off: Vec::new(),
             cand_len: Vec::new(),
             cand_arena: Vec::new(),
+            prev_awake: Vec::new(),
             last_breakdown_us: (0, 0, 0, 0),
         }
     }
@@ -401,6 +406,28 @@ impl BroadPhase for BvhBroadPhase {
             },
         );
         let threads = jobs.threads();
+        // 0.5) 睡眠状态翻转检测（T2 查询缓存完备性的关键补丁）：任一体的
+        //      「参与查询」位（动态且清醒）帧间变化 ⇒ 本帧全缓存失效。
+        //      原因：睡眠侧不查询，其新邻居只能靠清醒侧查询兜底；而清醒侧
+        //      可能因未逃出自身 fat 盒而复用旧候选表 → 漏对（不变式测试
+        //      `bvh_pairs_match_brute_force_across_frames` 实测抓出）。
+        //      完备性再证：两体 fat 盒均冻结且不相交时，精确盒（⊆ fat）不可能
+        //      新相交——故「翻转帧」是唯一漏洞，翻转帧全体重查即封闭。
+        //      确定性：只读 awake 位（纯状态），与线程数无关。
+        self.prev_awake.resize(n, true);
+        let mut flip = false;
+        for i in 0..n {
+            let participates = bodies.is_dynamic(i) && bodies.awake[i];
+            if self.prev_awake[i] != participates {
+                self.prev_awake[i] = participates;
+                flip = true;
+            }
+        }
+        if flip {
+            for f in self.cache_fat.iter_mut() {
+                *f = Aabb::EMPTY;
+            }
+        }
         // 全量 AABB 分支与「是否重建树」**解耦**（T2）：AABB 本就增量维护——
         // 仅首次（叶子未建）/ 体数变化（新体）需要全量重算（否则静态体 /
         // 睡眠体会带着零 AABB 进树）；纯「树链化超限」的重建 tick 复用现有
@@ -714,6 +741,77 @@ mod tests {
         let mut bp = BvhBroadPhase::new(0.01);
         let pairs = bp.compute_pairs(&b, &[], &SerialJobSystem);
         assert_eq!(pairs, &[(small.min(big), small.max(big))]);
+    }
+
+    /// T2 查询缓存**完备性**随机化不变式：多帧移动（含高速逃逸/生长/重插、
+    /// 混合睡眠）下，BVH 输出对必须与暴力枚举（同源 stored_aabb 精确重叠）
+    /// 逐一相等。缓存复用若漏对（错失新接近体）此测试立即红。
+    #[test]
+    fn bvh_pairs_match_brute_force_across_frames() {
+        let mut b = world();
+        for gx in -3i32..=3 {
+            for gz in -3i32..=3 {
+                b.push_static(
+                    Shape::Box {
+                        half: Vec3::new(0.5, 0.25, 0.5),
+                    },
+                    Vec3::new(gx as f32, -0.25, gz as f32),
+                    Quat::IDENTITY,
+                );
+            }
+        }
+        for k in 0..160u32 {
+            let x = ((k.wrapping_mul(2_654_435_761)) % 1000) as f32 / 1000.0 * 6.0 - 3.0;
+            let z = ((k.wrapping_mul(40_503)) % 1000) as f32 / 1000.0 * 6.0 - 3.0;
+            let y = 0.6 + ((k.wrapping_mul(97)) % 300) as f32 / 100.0;
+            b.push_dynamic(
+                Shape::Box {
+                    half: Vec3::splat(0.3),
+                },
+                Vec3::new(x, y, z),
+                Quat::IDENTITY,
+                1.0,
+            );
+        }
+        let mut bp = BvhBroadPhase::new(0.01);
+        for frame in 0..60u32 {
+            // 确定性移动：奇数体快（触发逃逸/生长/重插），偶数体慢（缓存命中）；
+            // 每 3 帧让 1/5 体入睡（清醒-睡眠 混合路径）。
+            for i in 0..b.len() {
+                if !b.is_dynamic(i) {
+                    continue;
+                }
+                let f = frame as f32;
+                let s = if i % 2 == 0 { 0.01 } else { 0.12 };
+                b.position[i].x += ((i as f32 * 0.37 + f * 0.11).sin()) * s;
+                b.position[i].z += ((i as f32 * 0.53 + f * 0.17).cos()) * s;
+                b.position[i].y -= if i % 2 == 0 { 0.002 } else { 0.02 };
+                b.awake[i] = !(frame % 3 == 0 && i % 5 == 0);
+            }
+            let got = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+            // 暴力参照：i<j 精确 AABB 重叠（与宽相同规则——**至少一侧为
+            // 「动态且清醒」**：沉睡体不查询、静-静不产对 ⇒ 静×睡与睡×睡
+            // 均无对；清醒×睡/清醒×静由清醒侧查询命中）。
+            let n = b.len();
+            let mut want: Vec<(u32, u32)> = Vec::new();
+            let sa: Vec<Aabb> = (0..n).map(|i| bp.stored_aabb(i).unwrap()).collect();
+            for i in 0..n as u32 {
+                for j in (i + 1)..n as u32 {
+                    let (iu, ju) = (i as usize, j as usize);
+                    let pi = b.is_dynamic(iu) && b.awake[iu];
+                    let pj = b.is_dynamic(ju) && b.awake[ju];
+                    if !pi && !pj {
+                        continue;
+                    }
+                    if sa[iu].overlaps(&sa[ju]) {
+                        want.push((i, j));
+                    }
+                }
+            }
+            want.sort_unstable();
+            want.dedup();
+            assert_eq!(got, want, "frame {frame}");
+        }
     }
 
     #[test]

@@ -115,7 +115,7 @@ pub trait NarrowPhase {
 }
 
 /// 参考面来源（决定裁剪参考多面体；参考面本身按法线对齐重选）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum AxisSrc {
     FaceA,
     FaceB,
@@ -1208,5 +1208,197 @@ mod tests {
             Quat::IDENTITY,
         );
         assert!(manifolds_for(&b, &[]).is_empty());
+    }
+
+    /// T3 盒对 SAT extents 快路径 vs 通用逐顶点路径：300 对随机盒
+    /// （重叠/分离/极端姿态混合）同帧对拍，断言 None/Some 类别一致、
+    /// sep 差 ≤1e-4、法线对齐 >0.999、来源分类一致。守门对象：`sat()`
+    /// 内盒对分支（extents 公式）与通用顶点 min/max 的等价性。
+    #[test]
+    fn box_sat_fast_matches_vertex_reference() {
+        let mut np = DefaultNarrowPhase::new(0.01);
+        let ha = Vec3::new(0.5, 0.3, 0.7);
+        let hb = Vec3::new(0.4, 0.6, 0.2);
+        let ia = np.poly_for(&Shape::Box { half: ha }).unwrap();
+        let ib = np.poly_for(&Shape::Box { half: hb }).unwrap();
+        let mut rng: u32 = 0x1234_5678;
+        let mut next = move || {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (rng >> 8) as f32 / 16_777_216.0
+        };
+        let mut max_delta = 0.0f32;
+        for k in 0..300 {
+            let pa = Vec3::new(next() * 4.0 - 2.0, next() * 4.0 - 2.0, next() * 4.0 - 2.0);
+            let pb = pa + Vec3::new(next() * 2.0 - 1.0, next() * 2.0 - 1.0, next() * 2.0 - 1.0);
+            let ax = Vec3::new(next() + 0.2, next() + 0.5, 1.0).normalize();
+            let bx = Vec3::new(next() + 0.5, next() + 0.2, 1.0).normalize();
+            let qa = Quat::from_axis_angle(ax, next() * core::f32::consts::TAU);
+            let qb = Quat::from_axis_angle(bx, next() * core::f32::consts::TAU);
+            np.poly_a.fill(&np.polys[ia], pa, qa);
+            np.poly_b.fill(&np.polys[ib], pb, qb);
+            let d = pb - pa;
+            // 快路径（盒对 extents 公式）。
+            np.box_a = Some((ha, pa));
+            np.box_b = Some((hb, pb));
+            let fast = np.sat(d);
+            // 通用路径（逐顶点 min/max；轴序、取向、平局规则完全相同，
+            // 唯一差异即投影计算方式）。
+            np.box_a = None;
+            np.box_b = None;
+            let slow = np.sat(d);
+            match (fast, slow) {
+                (None, None) => {}
+                (Some((s1, n1, r1)), Some((s2, n2, r2))) => {
+                    let d = (s1 - s2).abs();
+                    if d > max_delta {
+                        max_delta = d;
+                    }
+                    assert!(d <= 1e-6, "k{k}: sep {s1} vs {s2}（Δ {d}，非 ULP 级）");
+                    assert!(n1.dot(n2).abs() > 0.999, "k{k}: normal {n1:?} vs {n2:?}");
+                    assert_eq!(r1, r2, "k{k}: src {r1:?} vs {r2:?}");
+                }
+                (f, s) => panic!(
+                    "k{k}: 类别不一致 fast={:?} slow={:?}",
+                    f.is_some(),
+                    s.is_some()
+                ),
+            }
+        }
+        eprintln!("快/通用路径 sep 最大 Δ = {max_delta:.3e}（f32 ULP 级；>0 表示快路径确被拉到）");
+        assert!(max_delta > 0.0, "两路径逐位相同 ⇒ 快路径未被真正测到");
+    }
+
+    /// T3 预筛 `obb_separated` 的**单向可靠性**：拒绝 ⇒ 全路径必判分离。
+    /// 这是「绝不漏接触」的充分判据——预筛若误拒一对真接触，物体即穿地/穿透。
+    ///
+    /// 两段：
+    /// ① 随机谱 2000 对（一半沿随机方向的深重叠→贴脸连续谱，一半全随机），
+    ///    两侧样本都有下限断言（鉴别力）；
+    /// ② **ε 带扫掠**：轴对称盒对 + 5 个随机全局旋转，间隙 g 以 1e-5 步长
+    ///    扫过 skin ± 0.4mm。断言 g ≤ skin（真接触）时预筛绝不拒绝——这正是
+    ///    ε=1e-4 余量存在的意义：带内必须交给全路径，不许预筛自作主张。
+    #[test]
+    fn obb_prefilter_never_rejects_a_contact_pair() {
+        let mut np = DefaultNarrowPhase::new(0.02);
+        let ha = Vec3::new(0.5, 0.3, 0.7);
+        let hb = Vec3::new(0.4, 0.6, 0.2);
+        let ia = np.poly_for(&Shape::Box { half: ha }).unwrap();
+        let ib = np.poly_for(&Shape::Box { half: hb }).unwrap();
+        let mut rng: u32 = 0x9E37_79B9;
+        let mut next = move || {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (rng >> 8) as f32 / 16_777_216.0
+        };
+        // 沿单位轴 n 的投影半宽（extents 公式，与预筛同式）。
+        let radius = |q: Quat, h: Vec3, n: Vec3| -> f32 {
+            h.x * q.rotate_vec3(Vec3::X).dot(n).abs()
+                + h.y * q.rotate_vec3(Vec3::Y).dot(n).abs()
+                + h.z * q.rotate_vec3(Vec3::Z).dot(n).abs()
+        };
+        // 段①：随机谱。
+        let (mut rejected, mut contacted) = (0usize, 0usize);
+        for k in 0..2000 {
+            let qa = Quat::from_axis_angle(
+                Vec3::new(next() + 0.2, next() + 0.5, 1.0).normalize(),
+                next() * core::f32::consts::TAU,
+            );
+            let qb = Quat::from_axis_angle(
+                Vec3::new(next() + 0.5, next() + 0.2, 1.0).normalize(),
+                next() * core::f32::consts::TAU,
+            );
+            let pa = Vec3::new(next() * 4.0 - 2.0, next() * 4.0 - 2.0, next() * 4.0 - 2.0);
+            let d = if k % 2 == 0 {
+                // 沿随机方向 u 的「深重叠 → 贴脸」连续谱：位移 ≤ 沿 u 的贴脸距离。
+                let u = Vec3::new(next() * 2.0 - 1.0, next() * 2.0 - 1.0, 1.0 + next()).normalize();
+                let touch = radius(qa, ha, u) + radius(qb, hb, u);
+                u * (touch * (0.75 + 0.25 * next()))
+            } else {
+                Vec3::new(next() * 2.0 - 1.0, next() * 2.0 - 1.0, 1.0 + next())
+            };
+            let pb = pa + d;
+            np.poly_a.fill(&np.polys[ia], pa, qa);
+            np.poly_b.fill(&np.polys[ib], pb, qb);
+
+            np.box_a = Some((ha, pa));
+            np.box_b = Some((hb, pb));
+            let fast = np.sat(d);
+            np.box_a = None;
+            np.box_b = None;
+            let slow = np.sat(d);
+            // T3 快路径与通用路径为 ULP 级等价（实测最大 Δ ~7e-7），
+            // 接受判定只允许在「分离度恰在 skin 刀口带内」时分歧。
+            if fast.is_some() != slow.is_some() {
+                let s = fast.or(slow).map(|x| x.0).unwrap();
+                assert!(
+                    (s - np.skin).abs() <= 1e-6,
+                    "k{k}: 接受判定分歧且不在刀口带（sep {s} vs skin {}）",
+                    np.skin
+                );
+            }
+            if np.obb_separated(pa, qa, ha, pb, qb, hb) {
+                rejected += 1;
+                assert!(fast.is_none(), "k{k}: 预筛拒绝但盒对快路径判接触 {fast:?}");
+                assert!(slow.is_none(), "k{k}: 预筛拒绝但通用路径判接触 {slow:?}");
+            } else if slow.is_some() {
+                contacted += 1;
+            }
+        }
+        assert!(rejected >= 150, "拒绝样本仅 {rejected}，鉴别力不足");
+        assert!(contacted >= 150, "接触样本仅 {contacted}，鉴别力不足");
+
+        // 段②：ε 带扫掠（轴对称盒对 + 随机全局旋转）。
+        let mut rots = [Quat::IDENTITY; 5];
+        for q in rots.iter_mut() {
+            *q = Quat::from_axis_angle(
+                Vec3::new(next() + 0.2, next() + 0.5, 1.0).normalize(),
+                next() * core::f32::consts::TAU,
+            );
+        }
+        for &g0 in rots.iter() {
+            for i in 0..81 {
+                // g ∈ [skin − 0.4mm, skin + 0.4mm]。
+                let g = np.skin - 4e-4 + (i as f32) * 1e-5;
+                let pa = g0.rotate_vec3(Vec3::ZERO);
+                let pb = g0.rotate_vec3(Vec3::new(g + ha.x + hb.x, 0.0, 0.0));
+                let rej = np.obb_separated(pa, g0, ha, pb, g0, hb);
+                np.poly_a.fill(&np.polys[ia], pa, g0);
+                np.poly_b.fill(&np.polys[ib], pb, g0);
+                np.box_a = Some((ha, pa));
+                np.box_b = Some((hb, pb));
+                let fast = np.sat(pb - pa);
+                np.box_a = None;
+                np.box_b = None;
+                let slow = np.sat(pb - pa);
+                // 刀口带宽 ±1e-6（f32 ULP 级，见上段实测 Δ ≤ 7.2e-7）：
+                // 带内的接受判定允许因算术序差异翻转，带外必须逐位一致。
+                let knife = (g - np.skin).abs() <= 1e-6;
+                if !knife {
+                    assert_eq!(
+                        fast.is_some(),
+                        slow.is_some(),
+                        "g={g}: 刀口带外快/通用路径判定不一致"
+                    );
+                }
+                if g <= np.skin - 1e-6 {
+                    assert!(
+                        !rej,
+                        "g={g}（≤skin={}）：接触带内被预筛误拒 → 漏接触",
+                        np.skin
+                    );
+                    assert!(
+                        slow.is_some() && fast.is_some(),
+                        "g={g}: 接触带内快/通用路径判分离"
+                    );
+                } else if g >= np.skin + 1e-6 {
+                    assert!(slow.is_none() && fast.is_none(), "g={g}: 分离带内判接触");
+                } else {
+                    // 刀口带：判定可翻转，但预筛仍不许拒绝（其 ε=1e-4 ≫ ULP）。
+                    assert!(!rej, "g={g}: 刀口带内预筛误拒");
+                }
+                if rej {
+                    assert!(slow.is_none(), "g={g}: 预筛拒绝但全路径判接触");
+                }
+            }
+        }
     }
 }
