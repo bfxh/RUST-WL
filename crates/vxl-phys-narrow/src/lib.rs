@@ -114,10 +114,20 @@ pub struct DefaultNarrowPhase {
     poly_index: HashMap<u64, usize>,
     poly_a: WorldPoly,
     poly_b: WorldPoly,
+    /// 世界多面体填充缓存（T3 快路径）：pair 按 (a,b) 排序 ⇒ 同一体的对连续，
+    /// 单条缓存即可让每体每帧只填一次（大场景实测同一体每帧被填 ~50 次）。
+    /// 纯函数（poly, pos, rot）→ 命中即跳过 33 次旋转；逐位一致。
+    cached_a: (u32, u64),
+    cached_b: (u32, u64),
     axes: Vec<Vec3>,
     clip_in: Vec<(Vec3, u32)>,
     clip_out: Vec<(Vec3, u32)>,
     cand: Vec<ContactPoint>,
+    /// 盒对 SAT 快路径参数（half, 世界中心）：两 poly 均为盒时用 extents
+    /// 投影公式（O(1)/体/轴）替代逐顶点 min/max（24 点/体/轴）。由盒-盒
+    /// 分支设置；圆柱等其它形状为 None（走通用逐顶点路径）。
+    box_a: Option<(Vec3, Vec3)>,
+    box_b: Option<(Vec3, Vec3)>,
 }
 
 fn poly_key(s: &Shape) -> u64 {
@@ -238,10 +248,14 @@ impl DefaultNarrowPhase {
             poly_index: HashMap::new(),
             poly_a: WorldPoly::default(),
             poly_b: WorldPoly::default(),
+            cached_a: (u32::MAX, u64::MAX),
+            cached_b: (u32::MAX, u64::MAX),
             axes: Vec::new(),
             clip_in: Vec::new(),
             clip_out: Vec::new(),
             cand: Vec::new(),
+            box_a: None,
+            box_b: None,
         }
     }
 
@@ -299,24 +313,43 @@ impl DefaultNarrowPhase {
             }
             let mut min_a = f32::MAX;
             let mut max_a = f32::MIN;
-            for &v in &self.poly_a.verts {
-                let d = v.dot(n0);
-                if d < min_a {
-                    min_a = d;
-                }
-                if d > max_a {
-                    max_a = d;
-                }
-            }
             let mut min_b = f32::MAX;
             let mut max_b = f32::MIN;
-            for &v in &self.poly_b.verts {
-                let d = v.dot(n0);
-                if d < min_b {
-                    min_b = d;
+            // T3 快路径：盒对用 extents 投影公式（面法线 [0]/[2]/[4] 即体轴，
+            // 与逐顶点 min/max 数学等价），轴序/取向/来源分类与通用路径同。
+            if let (Some((ha, pa)), Some((hb, pb))) = (self.box_a, self.box_b) {
+                let ax = &self.poly_a.face_normal;
+                let bx = &self.poly_b.face_normal;
+                let ra = ha.x * ax[0].dot(n0).abs()
+                    + ha.y * ax[2].dot(n0).abs()
+                    + ha.z * ax[4].dot(n0).abs();
+                let rb = hb.x * bx[0].dot(n0).abs()
+                    + hb.y * bx[2].dot(n0).abs()
+                    + hb.z * bx[4].dot(n0).abs();
+                let ca = pa.dot(n0);
+                let cb = pb.dot(n0);
+                min_a = ca - ra;
+                max_a = ca + ra;
+                min_b = cb - rb;
+                max_b = cb + rb;
+            } else {
+                for &v in &self.poly_a.verts {
+                    let d = v.dot(n0);
+                    if d < min_a {
+                        min_a = d;
+                    }
+                    if d > max_a {
+                        max_a = d;
+                    }
                 }
-                if d > max_b {
-                    max_b = d;
+                for &v in &self.poly_b.verts {
+                    let d = v.dot(n0);
+                    if d < min_b {
+                        min_b = d;
+                    }
+                    if d > max_b {
+                        max_b = d;
+                    }
                 }
             }
             // 两个分离方向：A 在负侧（n 指向 a→b）或 B 在负侧（翻转）。
@@ -639,6 +672,9 @@ impl NarrowPhase for DefaultNarrowPhase {
         jobs: &dyn JobSystem,
     ) {
         out.clear();
+        // 世界多面体填充缓存跨帧失效（体在帧间移动；键只含体号+形状）。
+        self.cached_a = (u32::MAX, u64::MAX);
+        self.cached_b = (u32::MAX, u64::MAX);
         let threads = jobs.threads();
         // 小规模串行（线程启动开销 > 收益）；并行 = 每块独立 clone（含自有
         // scratch），结果按块序拼接 = pair 序（§5 确定性契约）。
@@ -675,6 +711,54 @@ impl NarrowPhase for DefaultNarrowPhase {
 }
 
 impl DefaultNarrowPhase {
+    /// 盒-盒 OBB 分离预筛（T3 快路径；保守 ε 界）：对 15 根候选轴（3+3 面 +
+    /// 9 棱叉积）用 extents 投影公式算分离度——`(|d·n| − Σ|axis·n|·half) / |n|`
+    /// （未归一化形式免逐轴开方）。任一侧向轴分离度 > skin + ε ⇒ 明确分离，
+    /// 直接拒绝。保守性：判 true 的对在全路径 SAT 下也必拒（同判据 + ε 余量，
+    /// ε ≫ 两侧公式的 fp 误差）；判 false 只是「需完整判定」——落在 ε 带内
+    /// 的对走原路径，行为逐位保持。轴过滤阈值（l2 < 1e-8）与全路径一致，
+    /// 防「测了全路径不测的退化轴」造成集合差。
+    fn obb_separated(&self, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) -> bool {
+        let ua = [
+            ra.rotate_vec3(Vec3::X),
+            ra.rotate_vec3(Vec3::Y),
+            ra.rotate_vec3(Vec3::Z),
+        ];
+        let ub = [
+            rb.rotate_vec3(Vec3::X),
+            rb.rotate_vec3(Vec3::Y),
+            rb.rotate_vec3(Vec3::Z),
+        ];
+        let d = pb - pa;
+        let t = self.skin + 1e-4;
+        let test = |n: Vec3| -> bool {
+            let l2 = n.length_squared();
+            if l2 < 1e-8 {
+                return false; // 退化轴（平行棱叉积）：全路径同样跳过。
+            }
+            let r = ha.x * ua[0].dot(n).abs()
+                + ha.y * ua[1].dot(n).abs()
+                + ha.z * ua[2].dot(n).abs()
+                + hb.x * ub[0].dot(n).abs()
+                + hb.y * ub[1].dot(n).abs()
+                + hb.z * ub[2].dot(n).abs();
+            d.dot(n).abs() - r > t * l2.sqrt()
+        };
+        for i in 0..3 {
+            if test(ua[i]) || test(ub[i]) {
+                return true;
+            }
+        }
+        for a in ua {
+            for b in ub {
+                if test(a.cross(b)) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn process_pair(
         &mut self,
         a: u32,
@@ -812,6 +896,15 @@ impl DefaultNarrowPhase {
                 Shape::Box { .. } | Shape::Cylinder { .. },
                 Shape::Box { .. } | Shape::Cylinder { .. },
             ) => {
+                // T3 专用快路径第一步（盒-盒 OBB 排除预筛）：明确分离的对直接
+                // 拒绝，省去两次通用多面体填充（24 顶点 + 6 法线 + 3 棱方向全
+                // 旋转）与逐顶点 SAT。保守：仅分离度 > skin + ε 才拒——ε 带内
+                // 的对仍走原全路径 ⇒ 行为逐位保持（轴过滤阈值与全路径一致）。
+                if let (Shape::Box { half: ha }, Shape::Box { half: hb }) = (sa, sb) {
+                    if self.obb_separated(pa, ra, *ha, pb, rb, *hb) {
+                        return;
+                    }
+                }
                 let ia = match self.poly_for(sa) {
                     Some(i) => i,
                     None => return,
@@ -820,8 +913,25 @@ impl DefaultNarrowPhase {
                     Some(i) => i,
                     None => return,
                 };
-                self.poly_a.fill(&self.polys[ia], pa, ra);
-                self.poly_b.fill(&self.polys[ib], pb, rb);
+                // 世界多面体填充缓存（T3）：键 = (体号, 多面体序号)；pair 按
+                // (a,b) 排序 ⇒ 同一体连续命中，每体每帧只填一次（纯函数）。
+                if self.cached_a != (a, ia as u64) {
+                    self.poly_a.fill(&self.polys[ia], pa, ra);
+                    self.cached_a = (a, ia as u64);
+                }
+                if self.cached_b != (b, ib as u64) {
+                    self.poly_b.fill(&self.polys[ib], pb, rb);
+                    self.cached_b = (b, ib as u64);
+                }
+                // 盒对 SAT 快路径参数（圆柱 → None，走通用逐顶点路径）。
+                self.box_a = match sa {
+                    Shape::Box { half } => Some((*half, pa)),
+                    _ => None,
+                };
+                self.box_b = match sb {
+                    Shape::Box { half } => Some((*half, pb)),
+                    _ => None,
+                };
                 if let Some((sep, n, src)) = self.sat(pb - pa) {
                     if sep > self.skin {
                         return;
