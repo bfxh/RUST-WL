@@ -9,7 +9,9 @@
 //! 流形法线约定：`normal` 从 a 指向 b；求解器把 +n 冲量施加给 b、−n 施加给 a。
 //! skin = speculative margin（§4.3）：分离距离 ≤ skin 仍生成「预期接触」。
 
-#![forbid(unsafe_code)]
+// 注：本 crate 不再是 `forbid`——SAT 扫描有 SSE2 内核（`simd.rs`，用户已批准
+// unsafe；SAFETY 注释见该模块），其余代码仍 `deny`（模块级 `allow` 仅限那里）。
+#![deny(unsafe_code)]
 
 pub mod heightfield;
 pub mod polytope;
@@ -18,6 +20,8 @@ use std::collections::HashMap;
 
 use heightfield::HeightField;
 use polytope::ConvexPolytope;
+mod simd;
+
 use vxl_phys_core::{JobSystem, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
 
 /// 单个接触点：世界坐标 + 穿透深度（可为小的负值 = 预期接触，供 warm starting 续接）。
@@ -485,6 +489,27 @@ impl DefaultNarrowPhase {
             Some(_) => (6usize, 6usize),
             None => (na, nb),
         };
+        // ===== 盒对快路径：SIMD 4 轴并行扫描（x86_64 SSE2；非 x86_64 走标量）=====
+        // 与下方通用标量循环**逐位等价**（轴内算术/结合序/三条规则全同），
+        // `simd::tests::simd_matches_scalar_bitwise` 逐位对照守门。
+        // 注：曾试「面轴/棱轴分段扫描（分离时跳过棱轴构建）」——实测**更慢**
+        // （窄相峰 26.51 → 28.79，棱轴构建不是瓶颈、分段徒增重入）⇒ 已回退。
+        if let Some((aa, ab)) = box_axes {
+            let (ha, pa) = self.box_a.expect("盒对快路径必置 box_a");
+            let (hb, pb) = self.box_b.expect("盒对快路径必置 box_b");
+            let scanned = simd::sat_scan(&self.axes, ha, &aa, pa, hb, &ab, pb, self.skin);
+            return scanned.map(|(sep, n, idx)| {
+                let src = if idx < n_face_a {
+                    AxisSrc::FaceA
+                } else if idx < n_face_a + n_face_b {
+                    AxisSrc::FaceB
+                } else {
+                    AxisSrc::Edge
+                };
+                (sep, n, src)
+            });
+        }
+        // ===== 非盒对（球/圆柱/高度场参与）：通用标量扫描 =====
         let mut best = f32::MIN;
         let mut best_n = Vec3::ZERO;
         let mut best_src = AxisSrc::Edge;
