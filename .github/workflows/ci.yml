@@ -388,6 +388,39 @@ jobs:
             cov.json
             cov-summary.txt
 
+  # ==================== 金样层（T5）：Rapier 对照三场景（报告层，不阻断） ====================
+  # 独立包（gold-sample 自带 [workspace]，不进主 workspace）⇒ 需单列 job；首次构建要
+  # 拉 rapier 依赖图（网络 + 1-3 分钟）⇒ **只在 PR 与手动触发时跑**（推送不跑，控成本）。
+  # 报告层语义：容差表当前有已知缺口（速度/入睡两列，见 docs/M1-PLAN.md T5），故
+  # continue-on-error 且不进 gates-summary —— 红=提示，不拦门。
+  gold-sample:
+    name: 金样 (Rapier 对照)
+    if: github.event_name != 'push'
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: gold-sample
+      # 配方（必须 substeps=4：默认 1 时 tower25 会塌，见 M1-PLAN T5 注）。
+      - name: 三场景对拍（col45 / pile5 / tower25）
+        working-directory: gold-sample
+        run: |
+          for s in col45 pile5 tower25; do
+            echo "=== $s ===" | tee gold-$s.txt
+            cargo run --release -- "$s" 600 16 0.01 4 3.0 30 4 2>&1 | tee -a gold-$s.txt
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: gold-sample
+          path: |
+            gold-sample/gold-*.txt
+
   # ==================== 汇总门：任一前置门未成功 → 红（Free 私有仓无必需检查，单状态即分支门） ====================
   gates-summary:
     name: 汇总（提交门）
