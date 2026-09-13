@@ -356,14 +356,15 @@ impl BvhBroadPhase {
     }
 
     /// 速度自适应 fat 边距（M1 宽相提速的核心开关之一）：
-    /// `base + |v_lin|·dt·1.5`，上钳 0.25m（防极速体把 fat 盒撑爆导致假对爆炸；
-    /// 实测 k=2.0/上限 0.5 时查询膨胀 > 树更新节省）。
+    /// `base + |v_lin|·dt·1.5`，上钳 0.5m。旧档上限 0.25 在查询缓存 + 就地
+    /// 生长到位后放宽（T2 第十四段）：代价结构已变——宽 fat 盒只增**候选数**
+    /// 不再增**遍历数**（缓存命中时零遍历），快体（少）的多占候选换逃逸率降。
     /// 确定性：只由（速度, dt）决定；同一状态 → 同一边距 → 同一树形。
     #[inline]
     fn fat_margin_for(&self, v: Vec3) -> f32 {
         let base = (self.skin * 2.0).max(0.02);
         let speed = v.length();
-        (base + speed * self.dt * 1.5).min(0.25)
+        (base + speed * self.dt * 1.5).min(0.5)
     }
 
     /// 树高（诊断/负载审计：健康树 ≈ 1.4·log2(n)）。
@@ -400,16 +401,18 @@ impl BroadPhase for BvhBroadPhase {
             },
         );
         let threads = jobs.threads();
-        // 全量分支：首次（叶子未建）/ 体数变化（新体）/ 树链化超限需重建。
-        // 注意：AABB 全量重算与「是否重建树」解耦——小场景（n < 32 不重建）
-        // 也必须至少全量算一次 AABB，否则静态体 / 睡眠体会带着零 AABB 进树。
+        // 全量 AABB 分支与「是否重建树」**解耦**（T2）：AABB 本就增量维护——
+        // 仅首次（叶子未建）/ 体数变化（新体）需要全量重算（否则静态体 /
+        // 睡眠体会带着零 AABB 进树）；纯「树链化超限」的重建 tick 复用现有
+        // AABB（旧实现让重建 tick 白付一次 20 万体全量 AABB ≈16ms）。
         // 非全量分支 = 增量：只处理「清醒动体」（睡眠体与静态体位置不变，
         // AABB 与树内代理均无需更新——稳态零树操作，M1 规模档的成败手）。
-        let rebuild_due = n >= 32 && {
+        let leaves_missing = self.leaves.len() != n;
+        let rebuild_due = !leaves_missing && n >= 32 && {
             let limit = 3.0 * (n as f32).log2() + 16.0;
             self.tree.root_height() as f32 > limit
         };
-        let full = self.leaves.len() != n || rebuild_due;
+        let full = leaves_missing;
         // 0) AABB 计算：纯函数按下标写槽位（§6 并行契约）。分块并行且
         //    spawn 数受控（for_each_chunk_mut：≤ threads−1，禁止线程爆炸）。
         //    门槛 32768：单体内 AABB ≈ 30ns，低于此并行开销（≈0.6ms 启动）不划算。
@@ -682,6 +685,35 @@ mod tests {
             assert_eq!(p_grid, p_bvh, "frame {frame}");
             let _ = &mut b;
         }
+    }
+
+    /// 既有配对漏洞回归（T2 第十四段修复）：睡眠体不做查询，旧「dyn-dyn 只由
+    /// 较大索引侧发射」规则会漏掉「清醒大索引体 vs 睡眠小索引体」——双侧发射
+    /// 后必须检出（否则清醒体可穿过沉睡体）。
+    #[test]
+    fn awake_larger_pairs_with_sleeping_smaller() {
+        let mut b = world();
+        let small = b.push_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::ZERO,
+            Quat::IDENTITY,
+            1.0,
+        );
+        let big = b.push_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.5, 0.0, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        // 小索引体入睡（大索引体保持清醒）。
+        b.awake[small as usize] = false;
+        let mut bp = BvhBroadPhase::new(0.01);
+        let pairs = bp.compute_pairs(&b, &[], &SerialJobSystem);
+        assert_eq!(pairs, &[(small.min(big), small.max(big))]);
     }
 
     #[test]
