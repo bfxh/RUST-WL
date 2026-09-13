@@ -71,13 +71,14 @@ fn main() {
         let bd = w.broad.breakdown_us();
         let th = w.broad.tree_height();
         eprintln!(
-            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | solve 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
+            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | solve 岛数 {:5} 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
             (bd.0 + bd.1 + bd.2 + bd.3) as f64 / 1000.0,
             bd.0 as f64 / 1000.0,
             bd.1 as f64 / 1000.0,
             bd.2 as f64 / 1000.0,
             w.broad.cand_total(),
             tim.narrowphase_us as f64 / 1000.0,
+            w.solver.island_count,
             w.solver.last_phase_us.0 as f64 / 1000.0,
             w.solver.last_phase_us.1 as f64 / 1000.0,
             w.solver.last_phase_us.2 as f64 / 1000.0,
