@@ -34,6 +34,32 @@ impl Aabb {
             && self.min.z <= o.max.z
             && o.min.z <= self.max.z
     }
+
+    /// 空盒（min = +∞、max = −∞）：`contains` 恒假——缓存失效哨兵。
+    pub const EMPTY: Aabb = Aabb {
+        min: Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+        max: Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+    };
+
+    /// `self` 是否完整包含 `o`（含边界）。
+    #[inline]
+    pub fn contains(&self, o: &Aabb) -> bool {
+        o.min.x >= self.min.x
+            && o.min.y >= self.min.y
+            && o.min.z >= self.min.z
+            && o.max.x <= self.max.x
+            && o.max.y <= self.max.y
+            && o.max.z <= self.max.z
+    }
+
+    /// 各向同性膨胀 `m`。
+    #[inline]
+    pub fn grown(&self, m: f32) -> Aabb {
+        Aabb {
+            min: self.min - Vec3::new(m, m, m),
+            max: self.max + Vec3::new(m, m, m),
+        }
+    }
 }
 
 /// 形状 → 世界 AABB（含 margin 膨胀）。
@@ -300,6 +326,14 @@ pub struct BvhBroadPhase {
     /// 精确 AABB（含 skin 膨胀），与树内 fat AABB 分离。
     aabbs: Vec<Aabb>,
     pairs: Vec<(u32, u32)>,
+    /// 查询缓存（M1 T2 查询提速）：每体候选列表（arena 偏移/长度）+ 上次查询
+    /// 所用 fat 盒。完备性：树不变式「精确盒 ⊆ fat 盒」+ 缓存 fat 盒自上次
+    /// 查询未变 ⇒ 两体 fat 盒若在末态相交则在上次查询时已相交——候选必然
+    /// 已入表（逃出缓存盒或树代理被重插时失效重查；配对双侧发射 + 去重）。
+    cache_fat: Vec<Aabb>,
+    cand_off: Vec<u32>,
+    cand_len: Vec<u32>,
+    cand_arena: Vec<u32>,
     /// 诊断：上一帧各子阶段耗时（µs）：(AABB, 树更新/重建, 查询, 排序)。
     pub last_breakdown_us: (u64, u64, u64, u64),
 }
@@ -313,6 +347,10 @@ impl BvhBroadPhase {
             leaves: Vec::new(),
             aabbs: Vec::new(),
             pairs: Vec::new(),
+            cache_fat: Vec::new(),
+            cand_off: Vec::new(),
+            cand_len: Vec::new(),
+            cand_arena: Vec::new(),
             last_breakdown_us: (0, 0, 0, 0),
         }
     }
@@ -410,36 +448,100 @@ impl BroadPhase for BvhBroadPhase {
         if n >= 32 && (self.leaves.is_empty() || rebuild_due) {
             let items: Vec<(u32, Aabb)> = (0..n).map(|i| (i as u32, self.aabbs[i])).collect();
             self.leaves = self.tree.rebuild(&items);
+            // 全量重建：所有缓存失效（代理盒全部重设）。
+            self.cache_fat.clear();
+            self.cache_fat.resize(n, Aabb::EMPTY);
         } else {
             for i in 0..n {
                 if (i as u32) >= self.leaves.len() as u32 {
                     self.leaves.push(self.tree.insert(i as u32, self.aabbs[i]));
+                    self.cache_fat.resize(n, Aabb::EMPTY);
                 } else if bodies.is_dynamic(i) && bodies.awake[i] {
                     // M1：速度自适应边距——快速体在其 fat 盒内连续多帧零结构操作。
                     let m = self.fat_margin_for(bodies.linvel[i]);
-                    self.leaves[i] = self
-                        .tree
-                        .move_proxy_scaled(self.leaves[i], self.aabbs[i], m);
+                    let (nl, changed) =
+                        self.tree
+                            .move_proxy_scaled(self.leaves[i], self.aabbs[i], m);
+                    if changed {
+                        // 代理盒变化（就地生长或重插）→ 查询缓存失效（T2）。
+                        self.leaves[i] = nl;
+                        self.cache_fat[i] = Aabb::EMPTY;
+                    }
                 }
             }
         }
         let d_tree = t_tree.elapsed().as_micros() as u64;
         let t_query = std::time::Instant::now();
-        // 2) 清醒动体查询（dyn-dyn 靠 j > i 去重；dyn-static 只由动体侧发起）。
-        //    睡眠体不查询：沉睡体不产生新接触；被唤醒/被撞由对方（清醒体）
-        //    的查询反向命中（睡眠叶仍在树内），唤醒语义不变。
-        //    树查询只读 → 分块并行（spawn 受控）；每块本地缓冲按块序拼接后
-        //    统一排序去重（排序保序 → 与串行 bit 级一致，§5/§6 契约）。
+        // 2) 清醒动体查询（dyn-dyn 双侧发射由最终排序去重收敛；dyn-static 由
+        //    动体侧发起）。睡眠体不查询：沉睡体不产生新接触；被唤醒/被撞由
+        //    对方（清醒体）的查询反向命中（睡眠叶仍在树内），唤醒语义不变。
+        //    查询缓存（T2）：仅对逃出缓存 fat 盒的体重走树（候选安全复用，
+        //    见 `cache_fat` 注）；随后并行只读消费候选 + 精确过滤。
         let dyns: Vec<u32> = (0..n as u32)
             .filter(|&i| {
                 let i = i as usize;
                 bodies.is_dynamic(i) && bodies.awake[i]
             })
             .collect();
+        self.cache_fat.resize(n, Aabb::EMPTY);
+        self.cand_off.resize(n, 0);
+        self.cand_len.resize(n, 0);
+        // 刷新块划分与查询块一致（块序 = 体区间序 → 合并确定性）。
+        let n_chunks = if threads > 1 && dyns.len() >= 4096 {
+            dyns.len().div_ceil(dyns.len().div_ceil(threads))
+        } else {
+            1
+        };
+        let chunk_len = dyns.len().div_ceil(n_chunks);
         {
+            // 分块并行重查（只读树；每块本地 arena + 条目表），随后串行合并。
+            // 条目 = (体, 本地偏移, 长度, fat 盒)。
+            type RefreshChunk = (Vec<u32>, Vec<(u32, u32, u32, Aabb)>);
             let this = &*self;
             let dyns_ref: &[u32] = &dyns;
             let bodies_ref: &BodySet = bodies;
+            let mut refresh: Vec<RefreshChunk> =
+                (0..n_chunks).map(|_| (Vec::new(), Vec::new())).collect();
+            vxl_phys_core::schedule::for_each_chunk_mut(
+                &mut refresh,
+                threads,
+                2,
+                |start_slot, _len, slots| {
+                    let mut tmp: Vec<u32> = Vec::new();
+                    for (k, (arena, entries)) in slots.iter_mut().enumerate() {
+                        let oi = start_slot + k;
+                        let start = oi * chunk_len;
+                        let end = ((oi + 1) * chunk_len).min(dyns_ref.len());
+                        for &i in &dyns_ref[start..end] {
+                            let iu = i as usize;
+                            let exact = this.aabbs[iu];
+                            if this.cache_fat[iu].contains(&exact) {
+                                continue; // 未逃出缓存盒：候选复用。
+                            }
+                            let m = this.fat_margin_for(bodies_ref.linvel[iu]);
+                            let fat = exact.grown(m);
+                            this.tree.query(&fat, &mut tmp);
+                            let base = arena.len() as u32;
+                            arena.extend_from_slice(&tmp);
+                            entries.push((i, base, tmp.len() as u32, fat));
+                        }
+                    }
+                },
+            );
+            for (arena, entries) in refresh {
+                let arena_base = self.cand_arena.len() as u32;
+                self.cand_arena.extend_from_slice(&arena);
+                for (i, off, len, fat) in entries {
+                    let iu = i as usize;
+                    self.cand_off[iu] = arena_base + off;
+                    self.cand_len[iu] = len;
+                    self.cache_fat[iu] = fat;
+                }
+            }
+        }
+        {
+            let this = &*self;
+            let dyns_ref: &[u32] = &dyns;
             let n_chunks = if threads > 1 && dyns.len() >= 4096 {
                 dyns.len().div_ceil(dyns.len().div_ceil(threads))
             } else {
@@ -457,21 +559,17 @@ impl BroadPhase for BvhBroadPhase {
                         let oi = start_slot + k;
                         let start = oi * chunk_len;
                         let end = ((oi + 1) * chunk_len).min(dyns_ref.len());
-                        let mut qbuf: Vec<u32> = Vec::new();
                         for &i in &dyns_ref[start..end] {
-                            this.tree.query(&this.aabbs[i as usize], &mut qbuf);
-                            for &j in &qbuf {
-                                let j = j as usize;
-                                if j == i as usize || (bodies_ref.is_dynamic(j) && j <= i as usize)
-                                {
+                            let iu = i as usize;
+                            let off = this.cand_off[iu] as usize;
+                            let len = this.cand_len[iu] as usize;
+                            for &j in &this.cand_arena[off..off + len] {
+                                let ju = j as usize;
+                                if ju == iu {
                                     continue;
                                 }
-                                if this.aabbs[i as usize].overlaps(&this.aabbs[j]) {
-                                    let (a, b) = if (i as usize) < j {
-                                        (i, j as u32)
-                                    } else {
-                                        (j as u32, i)
-                                    };
+                                if this.aabbs[iu].overlaps(&this.aabbs[ju]) {
+                                    let (a, b) = if iu < ju { (i, j) } else { (j, i) };
                                     co.push((a, b));
                                 }
                             }
@@ -482,6 +580,22 @@ impl BroadPhase for BvhBroadPhase {
             for mut co in outs {
                 self.pairs.append(&mut co);
             }
+        }
+        // arena 压实（少见：仅当垃圾占比高时；重建各体偏移）。
+        if self.cand_arena.len() > 4_000_000 {
+            let mut fresh: Vec<u32> = Vec::with_capacity(self.cand_arena.len());
+            for &i in &dyns {
+                let iu = i as usize;
+                let off = self.cand_off[iu] as usize;
+                let len = self.cand_len[iu] as usize;
+                if len == 0 {
+                    continue;
+                }
+                let noff = fresh.len() as u32;
+                fresh.extend_from_slice(&self.cand_arena[off..off + len]);
+                self.cand_off[iu] = noff;
+            }
+            self.cand_arena = fresh;
         }
         let d_query = t_query.elapsed().as_micros() as u64;
         let t_sort = std::time::Instant::now();

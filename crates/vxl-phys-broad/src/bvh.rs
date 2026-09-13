@@ -245,30 +245,38 @@ impl DynamicBvh {
 
     /// 移动代理（固定边距版；见 `move_proxy_scaled`）。
     pub fn move_proxy(&mut self, leaf: u32, aabb: Aabb) -> u32 {
-        self.move_proxy_scaled(leaf, aabb, self.fat_margin)
+        self.move_proxy_scaled(leaf, aabb, self.fat_margin).0
     }
 
     /// 移动代理（速度自适应边距版）：叶子已存的 fat 盒包含新精确盒 → 零结构
-    /// 操作；否则 remove + 以 `margin` 重插。返回（可能变化的）叶子索引。
+    /// 操作；逃出旧 fat 盒时首选**就地生长 refit**（T2 树风暴治理：叶盒取
+    /// 旧 fat ∪ 新 fat、沿祖先 refit，无节点手术），仅当叶盒过度疏松
+    /// （周长 > 4× 目标 fat 周长）才 remove + 以 `margin` 重插收紧。
+    /// 返回（可能变化的叶子索引, 盒是否变化——查询缓存失效信号）。
     ///
     /// 动机（M1 宽相提速）：固定 0.02 边距下，下落体每帧位移 > 边距 → 每帧
     /// remove+insert（10 万体规模 = 每帧数万次结构操作，实测树更新 45~70ms）。
-    /// 边距随「本帧位移·k」放大后，快速体可在其 fat 盒内连续多帧不动树。
+    /// 边距随「本帧位移·k」放大后，快速体可在其 fat 盒内连续多帧不动树；
+    /// 再叠加就地生长，逃逸路径也基本零手术（实测树 p95 56→? 见 M1-PLAN）。
     /// 确定性：margin 只由（速度, dt）决定，纯函数，时序无关。
-    pub fn move_proxy_scaled(&mut self, leaf: u32, aabb: Aabb, margin: f32) -> u32 {
+    pub fn move_proxy_scaled(&mut self, leaf: u32, aabb: Aabb, margin: f32) -> (u32, bool) {
         let fat = self.nodes[leaf as usize].aabb;
-        let contains = aabb.min.x >= fat.min.x
-            && aabb.min.y >= fat.min.y
-            && aabb.min.z >= fat.min.z
-            && aabb.max.x <= fat.max.x
-            && aabb.max.y <= fat.max.y
-            && aabb.max.z <= fat.max.z;
-        if contains {
-            return leaf;
+        if fat.contains(&aabb) {
+            return (leaf, false);
         }
-        let body = self.nodes[leaf as usize].body;
-        self.remove(leaf);
-        self.insert_fat(body, aabb, margin)
+        let target = aabb.grown(margin);
+        let grown = union_aabb(&fat, &target);
+        if perimeter(&grown) <= 4.0 * perimeter(&target) {
+            self.nodes[leaf as usize].aabb = grown;
+            // refit 从叶的**父节点**起步（fix_upwards 假定节点有左右子）。
+            let p = self.nodes[leaf as usize].parent;
+            self.fix_upwards(p);
+            (leaf, true)
+        } else {
+            let body = self.nodes[leaf as usize].body;
+            self.remove(leaf);
+            (self.insert_fat(body, aabb, margin), true)
+        }
     }
 
     /// 祖先链 refit + 旋转平衡。
