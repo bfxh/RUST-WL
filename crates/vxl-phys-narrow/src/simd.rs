@@ -17,7 +17,10 @@
 
 use vxl_phys_core::Vec3;
 
-/// 标量参考实现（语义基准）：非 x86_64 走它；x86_64 的测试用它和 SIMD 对照。
+/// 标量参考实现（语义基准）：非 x86_64 走它；x86_64 上由测试用它和 SIMD 逐位对照
+/// （故 x86_64 的发布构建里它「未使用」，非死代码）。
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+#[allow(clippy::too_many_arguments)] // 内核签名（轴表 + 两盒的 half/axes/center + skin）
 /// 返回 `None` = 存在分离轴（拒）或全轴退化；`Some((best_sep, n, idx))` 同原实现。
 pub(crate) fn sat_scan_scalar(
     axes: &[Vec3],
@@ -68,6 +71,7 @@ pub(crate) fn sat_scan_scalar(
 }
 
 /// SIMD 路径分发：x86_64 走 SSE2 内核，其余走标量（结果逐位相同）。
+#[allow(clippy::too_many_arguments)]
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn sat_scan(
     axes: &[Vec3],
@@ -97,6 +101,7 @@ pub(crate) fn sat_scan(
 }
 
 #[cfg(target_arch = "x86_64")]
+#[allow(clippy::too_many_arguments)]
 fn sat_scan_sse2(
     axes: &[Vec3],
     ha: Vec3,
@@ -126,8 +131,8 @@ fn sat_scan_sse2(
             cz[k] = a.z;
         }
         let mut sep_arr = [0f32; 4];
-        let mut flags = 0i32; // bit k: 1 = 该 lane 用 −n（sep2 更大）
-        let mut degen = 0i32; // bit k: 1 = 该 lane 退化（标量侧 continue）
+        let flags: i32; // bit k: 1 = 该 lane 用 −n（sep2 更大；下面 unsafe 块内赋值）
+        let degen: i32; // bit k: 1 = 该 lane 退化（标量侧 continue）
         unsafe {
             let nx = _mm_loadu_ps(cx.as_ptr());
             let ny = _mm_loadu_ps(cy.as_ptr());
