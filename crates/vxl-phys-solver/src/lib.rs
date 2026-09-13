@@ -1131,11 +1131,12 @@ mod tests {
                     a: 0,
                     b: g,
                     normal: Vec3::new(0.0, -1.0, 0.0),
-                    points: vec![ContactPoint {
+                    points: [ContactPoint {
                         point: Vec3::new(0.0, y - 0.5, 0.0),
                         depth,
                         feature: 0,
-                    }],
+                    }]
+                    .into(),
                 };
                 solver.solve(&mut b, &[m], &cfg, dt, &SerialJobSystem);
             } else {

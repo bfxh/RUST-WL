@@ -403,6 +403,15 @@ Rapier 的剩余机制（contact clustering / staged island solver 完整语义�
 4. **受控 A/B/A 定量**（同窗口交错三跑，抵消机器漂移）：窄相 200-tick 总和
    **4653 → 2944ms（−37%）**。
 5. 门：40 测试全绿（narrow 14 项）、clippy 0、fmt/词汇通过。
+6. **第二批（接触点集内联 + 取点去分配）**：`Manifold.points` 由 `Vec` 换
+   `ContactPoints`（内联 ≤4 点缓冲 + Deref 到切片，读取面零改动）——消除
+   **每接触一次堆分配**（8B ~22 万接触/帧）；`select_contacts` 改用复用
+   scratch。实测：窄相 200-tick 总和 2944 → **2189ms（再 −26%；较基线
+   4653 累计 −53%）**、p95 72 → **39ms**；哈希逐位不变（0x0298afbf ✓
+   行为透明）、m0_gates PASS 双跑一致。
+7. **剩余（T3 主体）**：接触对的填充仍未消除——「4 点裁剪专用路径」需把
+   clip 改为直接由 (pos, rot, half) 生成参考/入射面 4 点（免除 33 次旋转
+   填充）；这是达到窄相 ≤25ms 验收（当前峰 46ms）的关键步。
 
 ### T4 求解并行（大岛）
 - 现实约束：核心 `#![forbid(unsafe_code)]`——**大岛内并行需 unsafe 分域**，属

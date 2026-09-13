@@ -21,7 +21,7 @@ use polytope::ConvexPolytope;
 use vxl_phys_core::{JobSystem, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
 
 /// 单个接触点：世界坐标 + 穿透深度（可为小的负值 = 预期接触，供 warm starting 续接）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ContactPoint {
     pub point: Vec3,
     pub depth: f32,
@@ -48,6 +48,51 @@ pub(crate) fn feat_intersect(fa: u32, fb: u32, k: usize) -> u32 {
             & !(FEAT_SIDE_B | FEAT_CLIPPED)
 }
 
+/// 内联接触点集（≤4 点；T3：免每次流形一次堆分配——8B 场景 ~22 万接触/帧，
+/// 旧 `Vec` 构造 = 数十万次分配/帧）。Deref 到 `&[ContactPoint]`：读取面
+/// （len/index/iter）零改动。构造：`[..].into()` 或 `ContactPoints::empty()`。
+#[derive(Clone, Debug, Default)]
+pub struct ContactPoints {
+    buf: [ContactPoint; 4],
+    len: u8,
+}
+
+impl ContactPoints {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// 从切片复制（len > 4 时取前 4——本引擎流形按 ≤4 点构造，防御性截断）。
+    pub fn from_slice(s: &[ContactPoint]) -> Self {
+        let mut out = Self::default();
+        let n = s.len().min(4);
+        out.buf[..n].copy_from_slice(&s[..n]);
+        out.len = n as u8;
+        out
+    }
+}
+
+impl core::ops::Deref for ContactPoints {
+    type Target = [ContactPoint];
+    fn deref(&self) -> &[ContactPoint] {
+        &self.buf[..self.len as usize]
+    }
+}
+
+impl<'a> IntoIterator for &'a ContactPoints {
+    type Item = &'a ContactPoint;
+    type IntoIter = core::slice::Iter<'a, ContactPoint>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<const N: usize> From<[ContactPoint; N]> for ContactPoints {
+    fn from(a: [ContactPoint; N]) -> Self {
+        Self::from_slice(&a)
+    }
+}
+
 /// 接触流形。
 #[derive(Clone, Debug)]
 pub struct Manifold {
@@ -55,7 +100,7 @@ pub struct Manifold {
     pub b: u32,
     /// 从 a 指向 b。
     pub normal: Vec3,
-    pub points: Vec<ContactPoint>,
+    pub points: ContactPoints,
 }
 
 pub trait NarrowPhase {
@@ -123,6 +168,8 @@ pub struct DefaultNarrowPhase {
     clip_in: Vec<(Vec3, u32)>,
     clip_out: Vec<(Vec3, u32)>,
     cand: Vec<ContactPoint>,
+    /// select_contacts 去重取点 scratch（T3：免每接触一次堆分配）。
+    kept_buf: Vec<ContactPoint>,
     /// 盒对 SAT 快路径参数（half, 世界中心）：两 poly 均为盒时用 extents
     /// 投影公式（O(1)/体/轴）替代逐顶点 min/max（24 点/体/轴）。由盒-盒
     /// 分支设置；圆柱等其它形状为 None（走通用逐顶点路径）。
@@ -254,6 +301,7 @@ impl DefaultNarrowPhase {
             clip_in: Vec::new(),
             clip_out: Vec::new(),
             cand: Vec::new(),
+            kept_buf: Vec::new(),
             box_a: None,
             box_b: None,
         }
@@ -556,7 +604,10 @@ impl DefaultNarrowPhase {
                 .then(x.point.z.total_cmp(&y.point.z))
         });
         let min2 = min_sep * min_sep;
-        let mut kept: Vec<ContactPoint> = Vec::with_capacity(4);
+        // 复用 scratch（T3：旧实现每调用一次 Vec::with_capacity(4) —— 8B 场景
+        // ~22 万次/帧的堆分配）。语义逐位不变：按深度序取 ≤4 个非重复点。
+        let mut kept = std::mem::take(&mut self.kept_buf);
+        kept.clear();
         for &c in self.cand.iter() {
             if kept.len() >= 4 {
                 break;
@@ -568,7 +619,9 @@ impl DefaultNarrowPhase {
                 kept.push(c);
             }
         }
-        self.cand = kept;
+        self.cand.clear();
+        self.cand.extend_from_slice(&kept);
+        self.kept_buf = kept;
         !self.cand.is_empty()
     }
 
@@ -821,7 +874,7 @@ impl DefaultNarrowPhase {
                 a,
                 b,
                 normal,
-                points: self.cand.clone(),
+                points: ContactPoints::from_slice(&self.cand),
             });
             return;
         }
@@ -838,11 +891,12 @@ impl DefaultNarrowPhase {
                             a,
                             b,
                             normal: Vec3::Y,
-                            points: vec![ContactPoint {
+                            points: [ContactPoint {
                                 point: pa,
                                 depth: rr,
                                 feature: 0,
-                            }],
+                            }]
+                            .into(),
                         });
                     }
                     return;
@@ -853,11 +907,12 @@ impl DefaultNarrowPhase {
                     a,
                     b,
                     normal: n,
-                    points: vec![ContactPoint {
+                    points: [ContactPoint {
                         point,
                         depth: rr - dist,
                         feature: 0,
-                    }],
+                    }]
+                    .into(),
                 });
             }
             (Shape::Sphere { radius }, convex) => {
@@ -867,11 +922,12 @@ impl DefaultNarrowPhase {
                         a,
                         b,
                         normal: n,
-                        points: vec![ContactPoint {
+                        points: [ContactPoint {
                             point,
                             depth,
                             feature: 0,
-                        }],
+                        }]
+                        .into(),
                     });
                 }
             }
@@ -884,11 +940,12 @@ impl DefaultNarrowPhase {
                         a,
                         b,
                         normal: -n_ba,
-                        points: vec![ContactPoint {
+                        points: [ContactPoint {
                             point,
                             depth,
                             feature: 0,
-                        }],
+                        }]
+                        .into(),
                     });
                 }
             }
@@ -941,7 +998,7 @@ impl DefaultNarrowPhase {
                             a,
                             b,
                             normal: n,
-                            points: self.cand.clone(),
+                            points: ContactPoints::from_slice(&self.cand),
                         });
                     }
                 }
