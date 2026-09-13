@@ -3,11 +3,29 @@ name: ci
 # M0 四门禁（V2 §5）：{测试 + clippy + fmt} × 三编译器矩阵、miri、loom、TSan、ASan；
 # 加确定性矩阵（三编译器 + aarch64 的跨平台哈希比对）与词汇禁令扫描。
 # 四门禁 = 提交门：任一红即阻断合入。
+#
+# 成本控制（2026-09-13）：私有仓 Actions 分钟计费——
+# ① 同分支新推送自动取消旧运行（高频推送下旧运行不再烧完整管线）；
+# ② 纯文档/工具目录改动跳过（docs/**、**/*.md、gold-sample/** 不产出引擎
+#    二进制，门禁无判定力；gold-sample 为独立包不进 workspace）。
+# 注：改动引擎代码的任何提交仍跑全部门禁（纪律不变）。
 
 on:
   push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "gold-sample/**"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "gold-sample/**"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
