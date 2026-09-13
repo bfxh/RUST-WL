@@ -3,6 +3,12 @@
 > 授权链：裁决 63/64/65 → VXLPHYS-V2 §3（碰撞 R1 全量）/§4.1-4.5/§11 M1。
 > M1 出口（V2 §11）：**8B 最低档 + 万级堆叠稳定 + 金样容差内 + 8A 碰撞行（≤1.5ms）**。
 > 本文 = 实测基线 + 已落地段 + 剩余任务（含验收判据），供续建照单执行。
+>
+> **导航（2026-09-14 起本文定位为时间线档案，append-only）**：查决策 →
+> [`adr/`](adr/)；查「试过没用的」→ [`EXPERIMENTS.md`](EXPERIMENTS.md)；
+> 查「还没解决的/下一步入口」→ [`OPEN-PROBLEMS.md`](OPEN-PROBLEMS.md)；
+> 方法论与量化模型 → [`KNOWLEDGE.md`](KNOWLEDGE.md)；命令行 →
+> [`RECIPES.md`](RECIPES.md)；总入口 → [`INDEX.md`](INDEX.md)。
 
 ## 1. 实测基线（Windows x86_64，release，rustc 1.97.1；8 线程除注明外）
 
