@@ -140,6 +140,21 @@ impl VoxelVolume {
         self.origin + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * self.step
     }
 
+    /// 格数 (nx, ny, nz)。
+    pub fn dims(&self) -> (u32, u32, u32) {
+        (self.nx, self.ny, self.nz)
+    }
+
+    /// 体原点（最小角）。
+    pub fn origin(&self) -> Vec3 {
+        self.origin
+    }
+
+    /// 格边长。
+    pub fn step(&self) -> f32 {
+        self.step
+    }
+
     pub fn filled_count(&self) -> usize {
         self.filled
     }

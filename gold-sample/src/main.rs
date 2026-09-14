@@ -238,9 +238,27 @@ fn main() {
     // asleep→awake 反转次数（本跑 ticks tick ⇒ 合规线 = ticks/60 次/体）。
     let mut prev_awake: Vec<bool> = vids.iter().map(|&i| vw.bodies.awake[i]).collect();
     let mut flips: Vec<u32> = vec![0; vids.len()];
+    // 速度对比：分别累计两个引擎的 step 墙钟（预热 20 tick 后再计时）。
+    let mut vxl_ns: u128 = 0;
+    let mut rapier_ns: u128 = 0;
+    let mut vxl_active: usize = 0;
+    let mut rapier_active: usize = 0;
     for t in 1..=ticks {
+        let t0 = std::time::Instant::now();
         vw.step();
+        let dt_vxl = t0.elapsed().as_nanos();
+        let t1 = std::time::Instant::now();
         rw.step();
+        let dt_rap = t1.elapsed().as_nanos();
+        vxl_ns += dt_vxl;
+        rapier_ns += dt_rap;
+        // 「活跃 tick」= 至少一个体清醒（入睡后 step 近乎空转 ⇒ 只有活跃期可比）
+        if vids.iter().any(|&i| vw.bodies.awake[i]) {
+            vxl_active += 1;
+        }
+        if rhs.iter().any(|h| !rw.bodies[*h].is_sleeping()) {
+            rapier_active += 1;
+        }
         for (k, &i) in vids.iter().enumerate() {
             if !prev_awake[k] && vw.bodies.awake[i] {
                 flips[k] += 1;
@@ -290,7 +308,31 @@ fn main() {
             vp.x, vp.y, vp.z, rp.x, rp.y, rp.z
         );
     }
-    println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
+        {
+        let timed = ticks as f64;
+        let v_ms = vxl_ns as f64 / timed / 1e6;
+        let r_ms = rapier_ns as f64 / timed / 1e6;
+        let v_act = vxl_active.max(1) as f64;
+        let r_act = rapier_active.max(1) as f64;
+        let v_ms_act = vxl_ns as f64 / v_act / 1e6;
+        let r_ms_act = rapier_ns as f64 / r_act / 1e6;
+        let l1 = format!(
+            "   vxl-phys  全期 {:.2} ms/tick（{:.0} FPS） | 活跃 {}/{} tick ⇒ {:.2} ms/活跃tick（{:.0} FPS）",
+            v_ms, 1000.0 / v_ms, vxl_active, ticks, v_ms_act, 1000.0 / v_ms_act
+        );
+        let l2 = format!(
+            "   rapier    全期 {:.2} ms/tick（{:.0} FPS） | 活跃 {}/{} tick ⇒ {:.2} ms/活跃tick（{:.0} FPS）",
+            r_ms, 1000.0 / r_ms, rapier_active, ticks, r_ms_act, 1000.0 / r_ms_act
+        );
+        println!("{l1}");
+        println!("{l2}");
+        println!(
+            "   活跃期相对代价 vxl/rapier = {:.2}× | 入睡面：vxl 全程清醒 {} 体，rapier 第 ~50 tick 全体入睡",
+            v_ms_act / r_ms_act,
+            vids.len()
+        );
+    }
+println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
     // 嗡振画像：超阈分解（线性/角速分别）+ 最活跃体明细（含层高）。
     let (mut only_lin, mut only_ang, mut both, mut clean) = (0, 0, 0, 0);
     let mut top: Vec<(usize, f32, f32, f32)> = Vec::new();

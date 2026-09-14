@@ -106,3 +106,17 @@
    若必须进热路径，先给**量化上界**（ADR 0002 的 ≥5% 收益律）。
 4. **分类落地方式**（未来若要把「层」写进代码）：用 **模块边界/可见性**（`pub(crate)`
    与 crate 边界）而非包装类型——零运行时开销；跨 crate 的边界已经由 DAG 保证 ✓。
+
+## 2026-09-14 新增
+
+- **vxl-phys-splat**（域模块·新）：高斯喷溅隐式场 `GaussianSplatField`——
+  密度 `σ(p)=Σw·exp(−½α(p))`（各向异性二次型）、距离 `(τ−σ)/|∇σ|`、法线 `−∇σ/|∇σ|`；
+  实现 `ProviderColliders`（点/盒/球三查）。**物理参数 = 渲染参数**（无第二套表示），
+  渲染桥 `export_splats` 零拷贝导出。热路径 O(#核) 且 3σ 截断；均匀网格/BVH 加速待办。
+- **vxl-phys-narrow/gjk.rs**（窄相·热路径）：`ConvexHull` 支撑 + GJK（单纯形 Voronoi
+  分类，距离收敛判据）+ EPA（地平线重建；退化 → 6 轴 SAT）+ `clip_halfspace` +
+  `fracture_voronoi_hull`。**当前每对重建支撑体（O(n) 拷贝）**——外壳数量上量后
+  应加按 (hull, pose) 的支撑缓存。
+- **vxl-phys-terrain**：新增 `contacts_point_voxel`（点查询：`depth = skin − sdf`）与
+  `VoxelVolume::dims/origin/step` 访问器。
+- **interop**：`ProviderColliders::contacts_point`（默认 false = 不支持）。

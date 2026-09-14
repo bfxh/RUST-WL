@@ -26,47 +26,84 @@ pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
 
+/// 提供者条目（统一 id 空间：体素体 / 高斯喷溅场…）。
+pub enum ProviderEntry {
+    Voxel(vxl_phys_terrain::voxel::VoxelVolume),
+    /// **高斯喷溅场**（喷溅域的物理代理：隐式场提供者，见 `vxl-phys-splat`）。
+    Splat(vxl_phys_splat::GaussianSplatField),
+}
+
 /// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
 #[derive(Default)]
 pub struct Providers {
-    vols: Vec<vxl_phys_terrain::voxel::VoxelVolume>,
+    entries: Vec<ProviderEntry>,
 }
 
 impl Providers {
-    /// 注册体素体，返回其 id（= 注册序）。
+    /// 注册体素体，返回其 id（= 注册序，全提供者共用一个 id 空间）。
     pub fn push(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> u32 {
-        let id = self.vols.len() as u32;
-        self.vols.push(vol);
+        let id = self.entries.len() as u32;
+        self.entries.push(ProviderEntry::Voxel(vol));
+        id
+    }
+
+    /// 注册高斯喷溅场（同 id 空间）。
+    pub fn push_splat(&mut self, field: vxl_phys_splat::GaussianSplatField) -> u32 {
+        let id = self.entries.len() as u32;
+        self.entries.push(ProviderEntry::Splat(field));
         id
     }
 
     pub fn len(&self) -> usize {
-        self.vols.len()
+        self.entries.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.vols.is_empty()
+        self.entries.is_empty()
     }
 
     /// provider(id) 的世界包围盒（宽相 AABB 供给；与 `CollisionProvider::bounds` 同义）。
     pub fn bounds(&self, id: u32) -> Option<Aabb> {
         use vxl_phys_core::interop::CollisionProvider;
-        self.vols.get(id as usize).map(|v| v.bounds())
+        match self.entries.get(id as usize)? {
+            ProviderEntry::Voxel(v) => Some(v.bounds()),
+            ProviderEntry::Splat(f) => {
+                use vxl_phys_core::interop::ProviderColliders;
+                f.bounds(id)
+            }
+        }
     }
 
     pub fn voxel(&self, id: u32) -> Option<&vxl_phys_terrain::voxel::VoxelVolume> {
-        self.vols.get(id as usize)
+        match self.entries.get(id as usize)? {
+            ProviderEntry::Voxel(v) => Some(v),
+            ProviderEntry::Splat(_) => None,
+        }
     }
 
     pub fn voxel_mut(&mut self, id: u32) -> Option<&mut vxl_phys_terrain::voxel::VoxelVolume> {
-        self.vols.get_mut(id as usize)
+        match self.entries.get_mut(id as usize)? {
+            ProviderEntry::Voxel(v) => Some(v),
+            ProviderEntry::Splat(_) => None,
+        }
+    }
+
+    /// 喷溅场只读视图（渲染桥/诊断）。
+    pub fn splat(&self, id: u32) -> Option<&vxl_phys_splat::GaussianSplatField> {
+        match self.entries.get(id as usize)? {
+            ProviderEntry::Splat(f) => Some(f),
+            ProviderEntry::Voxel(_) => None,
+        }
     }
 }
 
 impl vxl_phys_core::interop::ProviderColliders for Providers {
     fn bounds(&self, id: u32) -> Option<Aabb> {
         use vxl_phys_core::interop::CollisionProvider;
-        self.vols.get(id as usize).map(|v| v.bounds())
+        match self.entries.get(id as usize)? {
+            ProviderEntry::Voxel(v) => Some(v.bounds()),
+            ProviderEntry::Splat(f) => f.bounds(id),
+        }
     }
 
     fn contacts_box(
@@ -78,8 +115,11 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         skin: f32,
         out: &mut Vec<vxl_phys_core::interop::InteropContact>,
     ) -> bool {
-        match self.vols.get(id as usize) {
-            Some(v) => vxl_phys_terrain::voxel::contacts_box_voxel(v, half, pos, rot, skin, out),
+        match self.entries.get(id as usize) {
+            Some(ProviderEntry::Voxel(v)) => {
+                vxl_phys_terrain::voxel::contacts_box_voxel(v, half, pos, rot, skin, out)
+            }
+            Some(ProviderEntry::Splat(f)) => f.contacts_box(id, half, pos, rot, skin, out),
             None => false,
         }
     }
@@ -91,8 +131,11 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         skin: f32,
         out: &mut Vec<vxl_phys_core::interop::InteropContact>,
     ) -> bool {
-        match self.vols.get(id as usize) {
-            Some(v) => vxl_phys_terrain::voxel::contacts_point_voxel(v, p, skin, out),
+        match self.entries.get(id as usize) {
+            Some(ProviderEntry::Voxel(v)) => {
+                vxl_phys_terrain::voxel::contacts_point_voxel(v, p, skin, out)
+            }
+            Some(ProviderEntry::Splat(f)) => f.contacts_point(id, p, skin, out),
             None => false,
         }
     }
@@ -105,8 +148,11 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         skin: f32,
         out: &mut Vec<vxl_phys_core::interop::InteropContact>,
     ) -> bool {
-        match self.vols.get(id as usize) {
-            Some(v) => vxl_phys_terrain::voxel::contacts_sphere_voxel(v, center, radius, skin, out),
+        match self.entries.get(id as usize) {
+            Some(ProviderEntry::Voxel(v)) => {
+                vxl_phys_terrain::voxel::contacts_sphere_voxel(v, center, radius, skin, out)
+            }
+            Some(ProviderEntry::Splat(f)) => f.contacts_sphere(id, center, radius, skin, out),
             None => false,
         }
     }
@@ -298,6 +344,19 @@ impl World {
         self.bodies.push_static(Shape::Provider(id), pos, rot)
     }
 
+    /// 注册**高斯喷溅场**（喷溅域）：返回 provider id + 生成静态 marker 体。
+    /// 刚体（盒/球/外壳）经统一提供者通道与喷溅体接触（隐式场 `(τ−σ)/|∇σ|`）。
+    pub fn add_splat_field(&mut self, field: vxl_phys_splat::GaussianSplatField) -> BodyId {
+        let id = self.providers.push_splat(field);
+        self.provider_bounds.push(
+            self.providers
+                .bounds(id)
+                .expect("just inserted provider bounds"),
+        );
+        let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
+        self.bodies.push_static(Shape::Provider(id), pos, rot)
+    }
+
     /// **破坏（M3 第一块）**：把体素体盒域内的占据格转为**刚体碎块**
     /// （贪心合并成盒 → 逐个动态体），并从体素体里移除。返回碎块数。
     /// 确定性：提取顺序 = 固定扫描序（见 `VoxelVolume::extract_boxes`）；
@@ -480,6 +539,11 @@ impl World {
             out.push(self.spawn_hull_body(id, pos, rot, density));
         }
         out
+    }
+
+    /// 外壳点云（局部；渲染/转储用）。
+    pub fn hull_points(&self, hull: u32) -> &[Vec3] {
+        self.narrow.hull_points(hull)
     }
 
     /// 生成**凸体外壳动态体**（多边形域）：点云已在 `add_hull` 注册。
@@ -829,6 +893,42 @@ mod tests {
             let y = w.bodies.position[p as usize].y;
             assert!(y > 0.9 && y < 2.0, "碎块 y = {y} 不在带内");
         }
+        assert!(w.health().is_clean());
+    }
+
+    /// **M3 喷溅域**：盒落在一团高斯喷溅上并停住（隐式场 σ(p) = Σ 核；
+    /// 接触走统一提供者通道 `contacts_box`）。
+    #[test]
+    fn box_rests_on_gaussian_splat_field() {
+        let mut w = World::new(PhysConfig::default());
+        let mut f = vxl_phys_splat::GaussianSplatField::new(0.5);
+        // 半径 1.2 球状栅格（间距 0.4、核半径 0.35）⇒ 顶面等值面 ≈ y = 1.6
+        for i in -3..=3 {
+            for j in -3..=3 {
+                for k in -3..=3 {
+                    let c = Vec3::new(i as f32 * 0.4, j as f32 * 0.4, k as f32 * 0.4);
+                    if c.length() <= 1.2 {
+                        f.push(vxl_phys_splat::Splat::isotropic(c, 0.35, 1.0));
+                    }
+                }
+            }
+        }
+        assert!(f.len() > 100);
+        w.add_splat_field(f);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.4),
+            },
+            Vec3::new(0.0, 3.0, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 停在等值面之上（盒半长 0.4 + 顶面 ≈ 1.6 ⇒ 中心 ≈ 2.0）
+        assert!(y > 1.5 && y < 2.6, "y = {y}");
         assert!(w.health().is_clean());
     }
 

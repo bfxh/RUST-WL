@@ -56,3 +56,8 @@
   tower 更好；睡眠侧匹配线已关闭——全拒也不睡）、T2 边距速度项 K=6（broad 均 −12%、
   树均 −33%、逐位中性）。
 - 决策记录 `adr/0001`–`0007`；**M2 不得启动**。
+
+- **演示视频**：`docs/demo/showcase_full.gif`（四域同场 + vs Rapier 对照卡）
+  —— 复现：`cargo run --release -p vxl-phys --example showcase` 后
+  `python scripts/render_demo.py`；对照：`cd gold-sample && cargo run --release -- pile5 200`。
+- **ADR 0010**：凸体外壳与高斯喷溅的接入方式（HullStore/点查询/隐式场/预断裂）。

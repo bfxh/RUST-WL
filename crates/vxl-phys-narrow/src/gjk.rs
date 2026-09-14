@@ -648,6 +648,7 @@ fn dedup_by_dist(v: &mut Vec<Vec3>) {
 }
 
 /// 点是否落在格 `i` 的 Voronoi 半空间约束内（`tol` 吸收边界浮点误差）。
+#[cfg(test)]
 fn in_voronoi_cell(seeds: &[Vec3], i: usize, q: Vec3, tol: f32) -> bool {
     for (j, s) in seeds.iter().enumerate() {
         if j == i {

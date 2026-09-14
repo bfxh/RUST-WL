@@ -98,3 +98,26 @@
 - **否证且回退**：W1–W5、S1–S8/S10/S11/S13、P1/P3/P4/P5、以上各项全部留档。
 - **结构性结论**：8B 单 tick ≈254ms 中解算占 85%，M1 约束内 ≥30FPS 不可达
   （详见 OPEN-PROBLEMS P3）。
+
+## 2026-09-14 · 演示管线与双引擎对照（本节数字均为本机实跑）
+
+**四域同场演示**（`examples/showcase` → `scripts/render_demo.py`）：
+600 tick（30 盒 + 8 凸碎块 + 76 喷溅核 + 体素地板/墙 + 炮弹）单 tick 均 **1.33 ms
+（752 FPS）**、峰值 2.17 ms（本机；体素面/渲染走 Python 侧，不计入）。产物
+`docs/demo/showcase_full.gif`（12.2 s：片头 + 10 s 场景 + 对照卡）。
+
+**vs Rapier 0.35（gold-sample，同场景同 tick，活跃 tick 口径）**：
+
+| 场景 | vxl-phys | rapier 0.35（默认 TGS-Soft） | 末态 max\|Δpos\|（参照体） |
+|---|---|---|---|
+| col45（45 盒） | 0.98 ms/活跃tick（1021 FPS） | 0.14 ms/活跃tick（7142 FPS） | 0.036 m |
+| pile5（2000 盒） | 38.2 ms/活跃tick（26 FPS） | 8.35 ms/活跃tick（120 FPS） | 0.025 m |
+
+- 口径修正（教训）：首版按「全期均值」比 ⇒ rapier 在 ~50 tick 后全体入睡、step 空转，
+  得出 0.01 ms/tick（78k FPS）的假数据。**必须按活跃 tick 计时**并在表里注明入睡面。
+- 行为差异（如实）：vxl 本场景**全程不入睡**（45/2000 体全清醒），rapier 全部入睡；
+  vxl 的 SPEC §3 休眠判据（重复唤醒 < 1 次/秒/体）合规，但「该睡时是否睡」另有差距。
+- 性能位次：45 盒 7.0×、2000 盒 4.6×（活跃期）；与既有 8B 结论一致（10 万 dynamic
+  @30 FPS 不可达，结构性）。
+- 确定性：既有哈希基线（m0_gates / stress / determinism）**逐位不变**（新增形状/域
+  未触碰既有路径）。

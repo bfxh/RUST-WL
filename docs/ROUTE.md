@@ -200,3 +200,14 @@
      凸体 vs provider 的专用查询；provider 对偶解；键图 + 双 ABI。
 4. **每加一域的顺序铁律**：先写档位表行与金样（含容差）→ 再写求解器 →
    最后接耦合矩阵格子。**不许先写实现后补验收**。
+
+## 2026-09-14 · 多边形 + 高斯喷溅落地（M3 扩展）
+
+| 域 | 状态 | 入口 / 实现 |
+|---|---|---|
+| 多边形（凸体外壳） | ✅ | `add_hull` / `spawn_hull_body` / `spawn_hull_pieces`；窄相 `gjk.rs`（GJK/EPA + 半空间裁剪 + Voronoi 预断裂）；**外壳×提供者 = 顶点采样多点流形**，外壳×{盒/球/外壳} = EPA 单法线 + 外壳近面顶点细化 |
+| 高斯喷溅 | ✅ | 新 crate `vxl-phys-splat`：隐式场 σ(p)=Σw·exp(−½α(p))、SDF `(τ−σ)/|∇σ|`、`ProviderColliders` 三点查；`add_splat_field` 接入；渲染桥 `export_splats` |
+| 演示与对照 | ✅ | `examples/showcase`（四域同场）→ 逐帧转储 → `scripts/render_demo.py` → `docs/demo/showcase_full.gif`；`gold-sample` 增「活跃 tick 计时」双引擎对照 |
+| 网格（任意三角网） | ⏳ | 需 trimesh 提供者（BVH + 点/面查询）；凸壳点云已覆盖凸体通路 |
+| 液体 / 软体 / 布 | ⏳ | crate 骨架在（`vxl-phys-fluid` / `vxl-phys-soft`），求解器待接 |
+| 体素→粒子（沙/尘） | ⏳ | M3 残留（下一个自然切片） |

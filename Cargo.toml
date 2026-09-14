@@ -14,6 +14,7 @@ members = [
     "crates/vxl-phys-replay",
     "crates/vxl-phys-soft",
     "crates/vxl-phys-fluid",
+    "crates/vxl-phys-splat",
     "crates/vxl-phys-wheeled",
     "crates/vxl-phys-aero",
     "crates/vxl-phys-marine",
@@ -41,6 +42,7 @@ vxl-phys-solver = { version = "0.1.0", path = "crates/vxl-phys-solver" }
 vxl-phys-integrate = { version = "0.1.0", path = "crates/vxl-phys-integrate" }
 vxl-phys-field = { version = "0.1.0", path = "crates/vxl-phys-field" }
 vxl-phys-terrain = { version = "0.1.0", path = "crates/vxl-phys-terrain" }
+vxl-phys-splat = { version = "0.1.0", path = "crates/vxl-phys-splat" }
 vxl-phys-replay = { version = "0.1.0", path = "crates/vxl-phys-replay" }
 
 [profile.release]

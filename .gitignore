@@ -1,4 +1,5 @@
 /target
+/out
 /.cargo/config.toml
 **/*.rs.bk
 ~$*

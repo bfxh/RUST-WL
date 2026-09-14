@@ -240,6 +240,7 @@ dependencies = [
  "vxl-phys-narrow",
  "vxl-phys-replay",
  "vxl-phys-solver",
+ "vxl-phys-splat",
  "vxl-phys-terrain",
 ]
 
@@ -328,6 +329,13 @@ version = "0.1.0"
 dependencies = [
  "vxl-phys-core",
  "vxl-phys-narrow",
+]
+
+[[package]]
+name = "vxl-phys-splat"
+version = "0.1.0"
+dependencies = [
+ "vxl-phys-core",
 ]
 
 [[package]]

@@ -442,6 +442,11 @@ impl DefaultNarrowPhase {
         self.hulls.add(points)
     }
 
+    /// 外壳点云（局部坐标；空切片 = id 无效）。
+    pub fn hull_points(&self, id: u32) -> &[Vec3] {
+        self.hulls.get(id).map(|h| h.points.as_slice()).unwrap_or(&[])
+    }
+
     /// 外壳点云 → 局部 AABB 半长（门面构 `Shape::ConvexHull` 用）。
     pub fn hull_half_extents(&self, id: u32) -> Vec3 {
         self.hulls.half_extents(id)
@@ -485,6 +490,7 @@ impl DefaultNarrowPhase {
     ///   逐点深度 `plane − n̂·v`（n̂ = 对方 → 外壳）；取最深 4 点。
     /// - `feature = 顶点序号 + 1`（点云序稳定 ⇒ 跨帧可续接）。
     /// - 外壳 × 高度场：暂不受理（列裁剪对任意凸壳未实现，见 ROUTE §3）。
+    #[allow(clippy::too_many_arguments)] // 与 process_pair 同形（两侧位姿 + 形状 + 出参）
     fn hull_pair(
         &self,
         a: u32,
@@ -511,16 +517,16 @@ impl DefaultNarrowPhase {
         let Some((n_p, _depth, _p)) = gjk::epa(&ua, &ub, 32) else {
             return; // 未相交（宽相 fat 边距会给出近邻对）
         };
-        // 供点体 = 外壳侧（优先 a）；hu_a 为假则 hu_b 为真（调用点保证）
-        let (hull_id, hpos, hrot, n) = if hull_a.is_some() {
-            (hull_a.unwrap(), pa, ra, n_p)
-        } else {
-            (hull_b.unwrap(), pb, rb, -n_p)
+        // 供点体 = 外壳侧（优先 a）；hull_a 为 None 则 hull_b 必为 Some（调用点保证）
+        let (hull_id, hpos, hrot, n, a_is_hull) = match (hull_a, hull_b) {
+            (Some(h), _) => (h, pa, ra, n_p, true),
+            (None, Some(h)) => (h, pb, rb, -n_p, false),
+            (None, None) => return,
         };
         let Some(h) = self.hulls.get(hull_id) else {
             return;
         };
-        let other: &dyn gjk::Support = if hull_a.is_some() { &ub } else { &ua };
+        let other: &dyn gjk::Support = if a_is_hull { &ub } else { &ua };
         let plane = n.dot(other.support(n));
         let hm = Mat3::from_quat(hrot);
         let mut cand: Vec<(f32, usize, Vec3)> = Vec::new();
