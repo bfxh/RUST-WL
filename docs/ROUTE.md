@@ -162,7 +162,11 @@
      bounds；窄相 provider 分支 ← `contacts_box_voxel`；解算；入睡）静置于体素顶面
      并入睡（门面测试 `box_falls_and_rests_on_voxel_provider`）；既有形状路径一字未动
      ⇒ `m0_gates`/`determinism` 哈希逐位不变。
+   - **球 ✅ 已扩（2026-09-14）**：`ProviderColliders::contacts_sphere` +
+     体素解析解（`depth = r − sdf(center)`、法线取 SDF 梯度）——球落体素地面
+     停驻并入睡（门面测试 `sphere_rests_on_voxel_provider`）；体素侧单测覆盖
+     深度/法线/缝超 skin 无接触。
    - **余（M2 后续）**：高度场迁到 provider 通道（包一层、不改数学，逐位不变）；
-     球/凸体 vs provider 的专用查询；provider 对偶解；键图 + 双 ABI。
+     凸体 vs provider 的专用查询；provider 对偶解；键图 + 双 ABI。
 4. **每加一域的顺序铁律**：先写档位表行与金样（含容差）→ 再写求解器 →
    最后接耦合矩阵格子。**不许先写实现后补验收**。

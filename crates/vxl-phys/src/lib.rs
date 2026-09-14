@@ -83,6 +83,20 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
             None => false,
         }
     }
+
+    fn contacts_sphere(
+        &self,
+        id: u32,
+        center: Vec3,
+        radius: f32,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.vols.get(id as usize) {
+            Some(v) => vxl_phys_terrain::voxel::contacts_sphere_voxel(v, center, radius, skin, out),
+            None => false,
+        }
+    }
 }
 
 /// 帧级相位暂存（§0.1 #10：相内 bump，相末 reset，全帧零 free）。
@@ -533,6 +547,31 @@ mod tests {
         assert!(w.health().is_clean());
         // marker 体（provider）保持静止：位置零漂移。
         assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+    }
+
+    /// M2 provider 通道扩到**球**：球经 SDF 解析接触（`depth = r − sdf(c)`）
+    /// 落在体素地面上并入睡；顺带覆盖「斜坡不穿透」。
+    #[test]
+    fn sphere_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0));
+        w.add_voxel(vol);
+        let b = w.add_dynamic(
+            Shape::Sphere { radius: 0.4 },
+            Vec3::new(0.25, 2.0, 0.25),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在体素顶面（y=1.0）上方：y ≈ 1.4
+        assert!(y > 1.32 && y < 1.50, "y = {y}");
+        assert!(!w.bodies.awake[b as usize], "球应已入睡");
+        assert!(w.health().is_clean());
     }
 
     #[test]

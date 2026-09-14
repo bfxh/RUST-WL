@@ -172,6 +172,20 @@ pub trait ProviderColliders: Send + Sync {
         skin: f32,
         out: &mut Vec<InteropContact>,
     ) -> bool;
+
+    /// 「球 vs provider(id)」的接触（世界系）。SDF 类提供者可解析求解
+    /// （`depth = r − sdf(center)`、法线取 SDF 梯度）；默认实现返回 false
+    /// （未支持 ⇒ 该形状对不产生接触）。
+    fn contacts_sphere(
+        &self,
+        _id: u32,
+        _center: Vec3,
+        _radius: f32,
+        _skin: f32,
+        _out: &mut Vec<InteropContact>,
+    ) -> bool {
+        false
+    }
 }
 
 /// 空提供者集合（未注册任何 provider 时的默认）。

@@ -1067,13 +1067,19 @@ impl DefaultNarrowPhase {
             } else {
                 (sa, pa, ra, false)
             };
-            let half = match *body_shape {
-                Shape::Box { half } => half,
-                _ => return, // 非盒形状 vs provider：暂不支持
-            };
             let id = pr_a.or(pr_b).unwrap();
             let mut buf: Vec<vxl_phys_core::interop::InteropContact> = Vec::new();
-            if !providers.contacts_box(id, half, bpos, brot, self.skin, &mut buf) {
+            let ok = match *body_shape {
+                Shape::Box { half } => {
+                    providers.contacts_box(id, half, bpos, brot, self.skin, &mut buf)
+                }
+                // 球：SDF 类提供者解析求解（`depth = r − sdf(center)`）
+                Shape::Sphere { radius } => {
+                    providers.contacts_sphere(id, bpos, radius, self.skin, &mut buf)
+                }
+                _ => false, // 其余形状 vs provider：待专用查询
+            };
+            if !ok {
                 return;
             }
             let sgn = if pr_is_a { 1.0 } else { -1.0 };

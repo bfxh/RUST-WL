@@ -286,6 +286,39 @@ pub fn contacts_box_voxel(
     any
 }
 
+/// 球 vs 体素的**解析**接触（SDF 语义）：`depth = r − sdf(center)`，法线取
+/// SDF 梯度；接触点取「球面点与 provider 表面点的中点」。只保留 `depth ≥ −skin`。
+pub fn contacts_sphere_voxel(
+    v: &VoxelVolume,
+    center: Vec3,
+    radius: f32,
+    skin: f32,
+    out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+) -> bool {
+    let d = v.sdf(center);
+    let depth = radius - d;
+    if depth < -skin {
+        return false;
+    }
+    let e = v.step * 0.5;
+    let gx = v.sdf(center + Vec3::new(e, 0.0, 0.0)) - v.sdf(center - Vec3::new(e, 0.0, 0.0));
+    let gy = v.sdf(center + Vec3::new(0.0, e, 0.0)) - v.sdf(center - Vec3::new(0.0, e, 0.0));
+    let gz = v.sdf(center + Vec3::new(0.0, 0.0, e)) - v.sdf(center - Vec3::new(0.0, 0.0, e));
+    let g = Vec3::new(gx, gy, gz);
+    let n = if g.length_squared() > 1e-12 {
+        g.normalize()
+    } else {
+        Vec3::Y
+    };
+    out.push(vxl_phys_core::interop::InteropContact {
+        point: center - n * ((radius + d) * 0.5),
+        normal: n,
+        depth,
+        feature: 1,
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +395,32 @@ mod tests {
             Vec3::splat(0.5),
             Vec3::new(0.25, 2.5, 0.25),
             Quat::IDENTITY,
+            0.02,
+            &mut out2
+        ));
+    }
+
+    #[test]
+    fn sphere_sdf_contact_depth_and_normal() {
+        let v = floor_volume();
+        // 球心在 y=1.3（地面顶 1.0）、半径 0.4 ⇒ 穿透 0.1
+        let mut out = Vec::new();
+        assert!(contacts_sphere_voxel(
+            &v,
+            Vec3::new(0.25, 1.3, 0.25),
+            0.4,
+            0.02,
+            &mut out
+        ));
+        assert_eq!(out.len(), 1);
+        assert!((out[0].depth - 0.1).abs() < 1e-4, "depth={}", out[0].depth);
+        assert!((out[0].normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-4);
+        // 球心在 y=1.5、半径 0.4 ⇒ 缝 0.1 > skin ⇒ 无接触
+        let mut out2 = Vec::new();
+        assert!(!contacts_sphere_voxel(
+            &v,
+            Vec3::new(0.25, 1.5, 0.25),
+            0.4,
             0.02,
             &mut out2
         ));
