@@ -79,7 +79,15 @@ const FB_DEPTH_JUMP: f32 = 0.00025;
 struct WarmManifold {
     normal: Vec3,
     points: Vec<WarmPoint>,
+    /// 求解印章（本 solve 调用是否刷新过；剪枝用，见 `warm 槽位表` 注）。
+    seen: u32,
 }
+
+/// 死槽键（槽位表空洞哨兵）。
+const DEAD_KEY: (u32, u32) = (u32::MAX, u32::MAX);
+
+/// warm 回写条目：(槽号（`u32::MAX` = 新键）, 键, 数据)。
+type WarmOutEntry = (u32, (u32, u32), WarmManifold);
 
 use vxl_phys_core::Vec3;
 
@@ -174,13 +182,23 @@ struct ContactConstraint {
     a: u32,
     b: u32,
     normal: Vec3,
+    /// warm 槽号（`u32::MAX` = 本 tick 新接触；回写按此**原位写**，零哈希）。
+    warm_slot: u32,
     points: Vec<PointConstraint>,
 }
 
 /// 顺序冲量求解器。
 #[derive(Default)]
 pub struct ImpulseSolver {
-    warm_cache: HashMap<(u32, u32), WarmManifold>,
+    /// **warm 槽位表（稠密）**：(键, 数据) 连续存储；回写按槽号原位写、
+    /// 剪枝对稠密槽单遍扫——`HashMap` 桶遍历曾是 33.5ms/tick 的大头（DESIGN §11）。
+    warm_slots: Vec<((u32, u32), WarmManifold)>,
+    /// 空闲槽号（LIFO 复用，避免周期压实）。
+    warm_free: Vec<u32>,
+    /// 键 → 槽号（查找用；只在查找/分配时触达）。
+    warm_index: HashMap<(u32, u32), u32>,
+    /// 求解印章（自增）。
+    warm_stamp: u32,
     /// 上一帧岛（诊断/调试用）。
     pub island_count: usize,
     /// warm starting 点匹配距离（= 4×skin，构造时可调）。
@@ -189,7 +207,7 @@ pub struct ImpulseSolver {
     pub sleep_resets: u32,
     /// 并行分组复用缓冲（§6）：组 → 约束构建 / warm 更新 / 速度 scratch。
     build_bufs: Vec<Vec<ContactConstraint>>,
-    warm_outs: Vec<Vec<((u32, u32), WarmManifold)>>,
+    warm_outs: Vec<Vec<WarmOutEntry>>,
     group_lv: Vec<Vec<Vec3>>,
     group_av: Vec<Vec<Vec3>>,
     /// 体 → 组内局部索引（u32::MAX = 静态/不在清醒岛）。
@@ -338,7 +356,10 @@ fn group_apply(
 impl ImpulseSolver {
     pub fn new(skin: f32) -> Self {
         Self {
-            warm_cache: HashMap::new(),
+            warm_slots: Vec::new(),
+            warm_free: Vec::new(),
+            warm_index: HashMap::new(),
+            warm_stamp: 0,
             island_count: 0,
             match_dist: (skin * 4.0).max(0.02),
             sleep_resets: 0,
@@ -459,7 +480,9 @@ impl ImpulseSolver {
             awake.len().min(threads).max(1)
         };
 
-        let mut warm = std::mem::take(&mut self.warm_cache);
+        let mut warm_slots = std::mem::take(&mut self.warm_slots);
+        let mut warm_free = std::mem::take(&mut self.warm_free);
+        let mut warm_index = std::mem::take(&mut self.warm_index);
         let mut build_bufs = std::mem::take(&mut self.build_bufs);
         let mut warm_outs = std::mem::take(&mut self.warm_outs);
         let mut group_lv = std::mem::take(&mut self.group_lv);
@@ -501,7 +524,8 @@ impl ImpulseSolver {
             let bodies_ref: &BodySet = bodies;
             let awake_ref: &[usize] = &awake;
             let islands_ref: &[Island] = islands;
-            let warm_ref: &HashMap<(u32, u32), WarmManifold> = &warm;
+            let warm_index_ref: &HashMap<(u32, u32), u32> = &warm_index;
+            let warm_slots_ref: &[((u32, u32), WarmManifold)] = &warm_slots;
             let local_ref: &[u32] = &local_of;
             let sp_ref: &SolverParams = &sp;
             std::thread::scope(|s| {
@@ -519,7 +543,8 @@ impl ImpulseSolver {
                             islands_ref,
                             manifolds,
                             bodies_ref,
-                            warm_ref,
+                            warm_index_ref,
+                            warm_slots_ref,
                             local_ref,
                             lv,
                             av,
@@ -547,7 +572,8 @@ impl ImpulseSolver {
                 islands,
                 manifolds,
                 bodies,
-                &warm,
+                &warm_index,
+                &warm_slots,
                 &local_of,
                 &mut group_lv[0],
                 &mut group_av[0],
@@ -578,28 +604,55 @@ impl ImpulseSolver {
         // （M1 软接触形态起，位置修正走 erp 偏置速度进速度通道 + CFM 正则化，
         //  独立「分裂冲量偏置通道 + 位移写回」已退役——见 SolverParams。）
 
-        // warm 合并（组序 = 岛序；键唯一）+ 剪枝失效键。
-        // 剪枝规则：流形已消失的**双清醒**对才删——睡眠体不移动，其接触
-        // 不会真正消失（睡眠期不被检测只是省算力），若一并剪掉，唤醒后
-        // warm 起点归零会导致数帧收敛变弱（穿透加深）。睡眠体的条目在
-        // 醒来且流形真正消失时自然被清。
+        // —— warm 槽位表：回写（按槽号原位写）+ 剪枝（对稠密槽单遍扫）——
+        //
+        // 设计（DESIGN-staged-solver §11）：`HashMap` 桶遍历/插入曾占 33.5ms/tick
+        // （合并 13.1 + 剪枝 20.7，均为桶访存）。槽位表把「值」搬到连续内存：
+        // 回写零哈希（直接按槽号写）、剪枝单遍顺序扫、索引只存 (键 → u32)。
+        //
+        // 剪枝规则不变：流形已消失的**双清醒**对才删——睡眠体不移动，其接触
+        // 不会真正消失（睡眠期不被检测只是省算力），若一并剪掉，唤醒后 warm
+        // 起点归零会导致数帧收敛变弱（穿透加深）。以「本调用是否刷新过」的
+        // 印章判定「流形是否仍在」：有流形且≥1 体清醒 ⇒ 必属清醒岛 ⇒ 必被
+        // 求解盖章；双睡的有流形但不被求解，两条规则都因「非双清醒」保留。
+        self.warm_stamp = self.warm_stamp.wrapping_add(1);
+        let stamp = self.warm_stamp;
         for wo in warm_outs.drain(..) {
-            for (k, v) in wo {
-                warm.insert(k, v);
+            for (slot, key, mut v) in wo {
+                v.seen = stamp;
+                if slot != u32::MAX {
+                    warm_slots[slot as usize] = (key, v); // 原位写：零哈希
+                } else if let Some(free) = warm_free.pop() {
+                    warm_slots[free as usize] = (key, v);
+                    warm_index.insert(key, free);
+                } else {
+                    warm_slots.push((key, v));
+                    warm_index.insert(key, (warm_slots.len() - 1) as u32);
+                }
             }
         }
         if manifolds.is_empty() {
-            warm.clear();
+            warm_slots.clear();
+            warm_index.clear();
+            warm_free.clear();
         } else {
-            let mut cur: Vec<(u32, u32)> = manifolds.iter().map(|m| (m.a, m.b)).collect();
-            cur.sort_unstable();
-            cur.dedup();
-            warm.retain(|&(a, b), _| {
-                cur.binary_search(&(a, b)).is_ok()
-                    || !(bodies.awake[a as usize] && bodies.awake[b as usize])
-            });
+            // 稠密单遍剪枝（顺序访存）。
+            for (i, (key, v)) in warm_slots.iter_mut().enumerate() {
+                let (a, b) = *key;
+                if a == u32::MAX {
+                    continue; // 已是空洞
+                }
+                let both_awake = bodies.awake[a as usize] && bodies.awake[b as usize];
+                if v.seen != stamp && both_awake {
+                    warm_index.remove(key);
+                    *key = DEAD_KEY;
+                    warm_free.push(i as u32);
+                }
+            }
         }
-        self.warm_cache = warm;
+        self.warm_slots = warm_slots;
+        self.warm_free = warm_free;
+        self.warm_index = warm_index;
         self.build_bufs = build_bufs;
         self.warm_outs = warm_outs;
         self.group_lv = group_lv;
@@ -669,7 +722,8 @@ fn build_constraint(
     out: &mut Vec<ContactConstraint>,
     m: &Manifold,
     bodies: &BodySet,
-    warm: &HashMap<(u32, u32), WarmManifold>,
+    warm_index: &HashMap<(u32, u32), u32>,
+    warm_slots: &[((u32, u32), WarmManifold)],
     match_dist: f32,
     e_threshold: f32,
     sp: &SolverParams,
@@ -719,7 +773,13 @@ fn build_constraint(
         }
     };
 
-    let warmm = warm.get(&(m.a, m.b));
+    // 槽位表查找：索引给槽号，数据在稠密槽位里（回写按槽号原位写）。
+    let warm_slot = warm_index.get(&(m.a, m.b)).copied().unwrap_or(u32::MAX);
+    let warmm = if warm_slot == u32::MAX {
+        None
+    } else {
+        Some(&warm_slots[warm_slot as usize].1)
+    };
     let (t1, t2) = tangents(m.normal);
     let pos_a = bodies.position[a];
     let pos_b = bodies.position[b];
@@ -936,6 +996,7 @@ fn build_constraint(
         a: m.a,
         b: m.b,
         normal: m.normal,
+        warm_slot,
         points: pts,
     });
 }
@@ -1032,12 +1093,13 @@ fn solve_island_group(
     islands: &[Island],
     manifolds: &[Manifold],
     bodies: &BodySet,
-    warm: &HashMap<(u32, u32), WarmManifold>,
+    warm_index: &HashMap<(u32, u32), u32>,
+    warm_slots: &[((u32, u32), WarmManifold)],
     local_of: &[u32],
     lv: &mut [Vec3],
     av: &mut [Vec3],
     cbuf: &mut Vec<ContactConstraint>,
-    warm_out: &mut Vec<((u32, u32), WarmManifold)>,
+    warm_out: &mut Vec<WarmOutEntry>,
     iters: u32,
     e_threshold: f32,
     match_dist: f32,
@@ -1054,7 +1116,8 @@ fn solve_island_group(
                 cbuf,
                 &manifolds[mi],
                 bodies,
-                warm,
+                warm_index,
+                warm_slots,
                 match_dist,
                 e_threshold,
                 sp,
@@ -1115,10 +1178,12 @@ fn solve_island_group(
                 })
                 .collect();
             warm_out.push((
+                c.warm_slot,
                 (c.a, c.b),
                 WarmManifold {
                     normal: c.normal,
                     points: pts,
+                    seen: 0,
                 },
             ));
         }
