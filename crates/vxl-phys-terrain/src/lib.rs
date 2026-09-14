@@ -2,8 +2,12 @@
 //!
 //! 可破坏地形（§4.9）：高度场体素账本 + 柱状支撑图。
 //! M0：高度场集合管理 + 挖掘（dig）+ 包围盒输出；断裂/Voronoi 在 vxl-phys-destruction。
+//! 体素域（ROUTE §3）：`voxel::VoxelVolume`（占据位图 + 局域 SDF）实现
+//! `CollisionProvider`，是「兼容」轴上第一个新域 provider。
 
 #![forbid(unsafe_code)]
+
+pub mod voxel;
 
 use vxl_phys_broad::Aabb;
 use vxl_phys_core::{Quat, Shape, Vec3};

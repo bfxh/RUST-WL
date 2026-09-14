@@ -49,7 +49,7 @@
 | 域 | 表示 | 求解技术（定案/待定） | 现有骨架 |
 |---|---|---|---|
 | 刚体（凸体/多边形/复合） | 凸体 + trimesh + 高度场 | 顺序冲量 → TGS 族（SPEC §2.5）；GJK/EPA + SAT | ✅ M1 在研 |
-| 体素（可破坏地形/建筑） | 稀疏体素 + SDF | 体素块→刚体/粒子（Voronoi 预断裂 + 运行时切割） | `terrain` 账本 |
+| 体素（可破坏地形/建筑） | 稀疏体素 + SDF | 体素块→刚体/粒子（Voronoi 预断裂 + 运行时切割） | `terrain` 账本 + **`voxel::VoxelVolume`（占据位图 + 局域 SDF + `CollisionProvider`，已落地）** |
 | 软体 | 粒子 + XPBD 距离/体积 | XPBD（SPEC §4.6） | `vxl-phys-soft` 参数骨架 |
 | 布料 | 三角网 + XPBD 三组约束 | XPBD + 面元气动（SPEC §4.7） | 同上 |
 | 液体 | 粒子（SPH/PBF）/ 网格（FLIP） | WCSPH → PBF/FLIP 分层（SPEC §4.8） | `vxl-phys-fluid` 骨架 |
@@ -152,5 +152,11 @@
    再谈结构换挡/P4 岛内并行染色。
 3. **体素域先起**（它同时是 provider 与破坏载体）：稀疏体素 + SDF provider +
    与刚体的贯通示例（一条 CI 场景）。
+   - **状态（2026-09-14）**：✅ 表示层与 provider 已落地——`vxl-phys-terrain::voxel`
+     （占据位图 1 bit/格 + 占据包围盒增量维护 + 局域 SDF + 有限差分法线；
+     `impl CollisionProvider`；盒形 6 面×4 角专用查询 `contacts_box_voxel`；
+     6 项测试：SDF 符号/表面/挖洞读空/盒落地 4 底面接触/包围盒跟踪）。
+     哈希逐位不变（纯新增）。**未做**：与刚体的贯通示例——它需要 M2 的
+     「窄相经 provider 路径」迁移（要求逐位不变），属 M2 工作项。
 4. **每加一域的顺序铁律**：先写档位表行与金样（含容差）→ 再写求解器 →
    最后接耦合矩阵格子。**不许先写实现后补验收**。
