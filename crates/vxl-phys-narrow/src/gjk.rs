@@ -669,7 +669,7 @@ fn in_voronoi_cell(seeds: &[Vec3], i: usize, q: Vec3, tol: f32) -> bool {
 pub fn fracture_voronoi_hull(hull: &ConvexHull, seeds: &[Vec3]) -> Vec<Vec<Vec3>> {
     let mut out = Vec::with_capacity(seeds.len());
     for i in 0..seeds.len() {
-        let mut cell: Vec<Vec3> = hull.points.clone();
+        let mut region: Vec<Vec3> = hull.points.clone();
         for (j, s) in seeds.iter().enumerate() {
             if i == j {
                 continue;
@@ -680,12 +680,12 @@ pub fn fracture_voronoi_hull(hull: &ConvexHull, seeds: &[Vec3]) -> Vec<Vec<Vec3>
                 continue;
             }
             let mid = (seeds[i] + *s) * 0.5;
-            cell = clip_halfspace(&cell, n, n.dot(mid));
-            if cell.is_empty() {
+            region = clip_halfspace(&region, n, n.dot(mid));
+            if region.is_empty() {
                 break;
             }
         }
-        out.push(cell);
+        out.push(region);
     }
     out
 }

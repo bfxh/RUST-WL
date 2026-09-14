@@ -14,6 +14,11 @@
 #
 # 白名单：examples/ 与 tests/ 不在扫描面（计时/统计与测试辅助可用 f64）；
 # 注释里出现这些词是允许的（本脚本只匹配代码形态与关键字）。
+#
+# **已批准的具名例外（用户 2026-09 裁决；crate 内有 SAFETY 注释与说明）**：
+#   crates/vxl-phys-narrow —— SAT 扫描的 SSE2 内核 simd.rs 需要 `unsafe` 与
+#   `core::arch`；该 crate 因此用 `deny`（而非 `forbid`）并在模块级 `allow`。
+#   例外仅限该 crate 的 lib.rs（①）与 simd.rs（②④），其余一律照常检查。
 
 set -u
 ROOT="${1:-.}"
@@ -27,6 +32,8 @@ src_files() { # 引擎源码文件清单（含子目录）
 missing_forbid=""
 for lib in "$ROOT"/crates/*/src/lib.rs; do
   [ -e "$lib" ] || continue
+  # 已批准例外：vxl-phys-narrow（SSE2 内核需模块级 allow ⇒ 用 deny）
+  case "$lib" in *vxl-phys-narrow/src/lib.rs) continue ;; esac
   if ! grep -q 'forbid(unsafe_code)' "$lib"; then
     missing_forbid="$missing_forbid$lib"$'\n'
   fi
@@ -38,7 +45,9 @@ if [ -n "$missing_forbid" ]; then
 fi
 
 # ② 真 unsafe 使用（关键字形态：unsafe { / unsafe fn / unsafe impl / unsafe trait / unsafe extern）。
-unsafe_hits=$(src_files | xargs grep -nE 'unsafe[[:space:]]*(\{|fn|impl|trait|extern)' 2>/dev/null || true)
+#    例外：narrow 的 SSE2 内核 simd.rs（已批准；crate 内 SAFETY 注释）。
+unsafe_hits=$(src_files | grep -v 'vxl-phys-narrow/src/simd.rs' \
+  | xargs grep -nE 'unsafe[[:space:]]*(\{|fn|impl|trait|extern)' 2>/dev/null || true)
 if [ -n "$unsafe_hits" ]; then
   echo "❌ ② 引擎源码出现真 unsafe（承重墙禁令）："
   echo "$unsafe_hits"
@@ -54,8 +63,9 @@ if [ -n "$f64_hits" ]; then
   FAIL=1
 fi
 
-# ④ 平台/向量内建（§7 分层）。
-simd_hits=$(src_files | xargs grep -nE 'core::arch|std::simd|core::simd|_mm_|_mm256_|vld1q|is_x86_feature_detected' 2>/dev/null \
+# ④ 平台/向量内建（§7 分层）。例外：narrow 的 SSE2 内核 simd.rs（已批准）。
+simd_hits=$(src_files | grep -v 'vxl-phys-narrow/src/simd.rs' \
+  | xargs grep -nE 'core::arch|std::simd|core::simd|_mm_|_mm256_|vld1q|is_x86_feature_detected' 2>/dev/null \
   | grep -vE '//' || true)
 if [ -n "$simd_hits" ]; then
   echo "❌ ④ 引擎源码使用 platform/SIMD 内建（§7：主路径保持标量语义）："

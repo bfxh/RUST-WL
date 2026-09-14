@@ -31,6 +31,8 @@ pub enum ProviderEntry {
     Voxel(vxl_phys_terrain::voxel::VoxelVolume),
     /// **高斯喷溅场**（喷溅域的物理代理：隐式场提供者，见 `vxl-phys-splat`）。
     Splat(vxl_phys_splat::GaussianSplatField),
+    /// **三角网格**（网格域：静态关卡几何，薄壳接触，见 `vxl-phys-terrain::mesh`）。
+    Mesh(vxl_phys_terrain::mesh::TriMesh),
 }
 
 /// 形状的平均迎风面积估计（阻力用）：盒 = 三对面面积均值，球 = πr²，
@@ -73,6 +75,13 @@ impl Providers {
         id
     }
 
+    /// 注册三角网格（静态关卡；同 id 空间）。
+    pub fn push_mesh(&mut self, mesh: vxl_phys_terrain::mesh::TriMesh) -> u32 {
+        let id = self.entries.len() as u32;
+        self.entries.push(ProviderEntry::Mesh(mesh));
+        id
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -90,20 +99,32 @@ impl Providers {
                 use vxl_phys_core::interop::ProviderColliders;
                 f.bounds(id)
             }
+            ProviderEntry::Mesh(m) => {
+                use vxl_phys_core::interop::ProviderColliders;
+                m.bounds(id)
+            }
         }
     }
 
     pub fn voxel(&self, id: u32) -> Option<&vxl_phys_terrain::voxel::VoxelVolume> {
         match self.entries.get(id as usize)? {
             ProviderEntry::Voxel(v) => Some(v),
-            ProviderEntry::Splat(_) => None,
+            _ => None,
+        }
+    }
+
+    /// 网格只读视图（渲染/诊断）。
+    pub fn mesh(&self, id: u32) -> Option<&vxl_phys_terrain::mesh::TriMesh> {
+        match self.entries.get(id as usize)? {
+            ProviderEntry::Mesh(m) => Some(m),
+            _ => None,
         }
     }
 
     pub fn voxel_mut(&mut self, id: u32) -> Option<&mut vxl_phys_terrain::voxel::VoxelVolume> {
         match self.entries.get_mut(id as usize)? {
             ProviderEntry::Voxel(v) => Some(v),
-            ProviderEntry::Splat(_) => None,
+            _ => None,
         }
     }
 
@@ -111,7 +132,7 @@ impl Providers {
     pub fn splat(&self, id: u32) -> Option<&vxl_phys_splat::GaussianSplatField> {
         match self.entries.get(id as usize)? {
             ProviderEntry::Splat(f) => Some(f),
-            ProviderEntry::Voxel(_) => None,
+            _ => None,
         }
     }
 }
@@ -122,6 +143,7 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         match self.entries.get(id as usize)? {
             ProviderEntry::Voxel(v) => Some(v.bounds()),
             ProviderEntry::Splat(f) => f.bounds(id),
+            ProviderEntry::Mesh(m) => m.bounds(id),
         }
     }
 
@@ -139,6 +161,7 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
                 vxl_phys_terrain::voxel::contacts_box_voxel(v, half, pos, rot, skin, out)
             }
             Some(ProviderEntry::Splat(f)) => f.contacts_box(id, half, pos, rot, skin, out),
+            Some(ProviderEntry::Mesh(m)) => m.contacts_box(id, half, pos, rot, skin, out),
             None => false,
         }
     }
@@ -155,6 +178,7 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
                 vxl_phys_terrain::voxel::contacts_point_voxel(v, p, skin, out)
             }
             Some(ProviderEntry::Splat(f)) => f.contacts_point(id, p, skin, out),
+            Some(ProviderEntry::Mesh(m)) => m.contacts_point(id, p, skin, out),
             None => false,
         }
     }
@@ -172,6 +196,7 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
                 vxl_phys_terrain::voxel::contacts_sphere_voxel(v, center, radius, skin, out)
             }
             Some(ProviderEntry::Splat(f)) => f.contacts_sphere(id, center, radius, skin, out),
+            Some(ProviderEntry::Mesh(m)) => m.contacts_sphere(id, center, radius, skin, out),
             None => false,
         }
     }
@@ -354,6 +379,21 @@ impl World {
     /// 提供者的 bounds 供给（与高度场同机制）。返回 marker 体 id。
     pub fn add_voxel(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> BodyId {
         let id = self.providers.push(vol);
+        self.provider_bounds.push(
+            self.providers
+                .bounds(id)
+                .expect("just inserted provider bounds"),
+        );
+        let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
+        self.bodies.push_static(Shape::Provider(id), pos, rot)
+    }
+
+    /// 注册**三角网格**（网格域：静态关卡几何）：返回 provider id + 静态 marker 体。
+    /// 接触语义为薄壳（`depth = skin − dist(最近面)`，法线 = 面法线），见
+    /// `vxl_phys_terrain::mesh` 模块文档（含「皮肤带 < bin/2」精度前提）。
+    pub fn add_mesh(&mut self, mut mesh: vxl_phys_terrain::mesh::TriMesh) -> BodyId {
+        mesh.build_grid(); // 加速结构（桶边长 = max(均边, 0.5)）
+        let id = self.providers.push_mesh(mesh);
         self.provider_bounds.push(
             self.providers
                 .bounds(id)
@@ -547,15 +587,15 @@ impl World {
         rot: Quat,
         density: f32,
     ) -> Vec<u32> {
-        let Some(cells) = self.narrow.fracture_hull(hull, seeds) else {
+        let Some(regions) = self.narrow.fracture_hull(hull, seeds) else {
             return Vec::new();
         };
-        let mut out = Vec::with_capacity(cells.len());
-        for cell in cells {
-            if cell.len() < 4 {
+        let mut out = Vec::with_capacity(regions.len());
+        for region in regions {
+            if region.len() < 4 {
                 continue; // 退化格（无体积）
             }
-            let id = self.narrow.add_hull(cell);
+            let id = self.narrow.add_hull(region);
             out.push(self.spawn_hull_body(id, pos, rot, density));
         }
         out
@@ -1050,6 +1090,71 @@ mod tests {
         println!("free: y={y_free:.3} v={v_free:.3} | drag: y={y_drag:.3} v={v_drag:.3}");
         assert!(y_drag > y_free + 0.2, "介质应显著减速：free y={y_free} drag y={y_drag}");
         assert!(v_drag > v_free + 0.5, "末速应更高（落得更慢）：{v_free} vs {v_drag}");
+    }
+
+    /// **网格域（M3 扩展）**：盒落在三角网格地面上并停住（薄壳接触；
+    /// 8 顶点 + 6 面心采样 ⇒ 底四角多点接触）。
+    #[test]
+    fn box_rests_on_mesh_ground() {
+        let mut w = World::new(PhysConfig::default());
+        // 4×4 米网格地面（y = 0，朝上）
+        let ground = vxl_phys_terrain::mesh::TriMesh::quad(
+            Vec3::ZERO,
+            Vec3::X * 2.0,
+            Vec3::Z * 2.0,
+            Vec3::Y,
+        );
+        w.add_mesh(ground);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.3, 2.0, -0.2),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        assert!(y > 0.42 && y < 0.70, "y = {y}"); // 静置在网格面上方（半长 0.5）
+        assert!(w.health().is_clean());
+    }
+
+    /// **网格域**：球在斜网格上按**面法线**接触并沿坡下滑（球无滚阻必下滚——
+    /// 因此断言「接触带内 + 法向速度被抑制 + 沿坡下滑」，而非「停在坡上」）。
+    #[test]
+    fn sphere_contacts_sloped_mesh_along_face_normal() {
+        let mut w = World::new(PhysConfig::default());
+        // 斜面：沿 +u 抬升（面法线 n 偏向 −X）
+        let slope = 0.25f32;
+        let n = Vec3::new(-slope, 1.0, 0.0).normalize();
+        let u = Vec3::new(1.0, slope, 0.0).normalize() * 8.0;
+        let v = Vec3::Z * 8.0;
+        let ground = vxl_phys_terrain::mesh::TriMesh::quad(Vec3::ZERO, u, v, n);
+        w.add_mesh(ground);
+        let ball = w.add_dynamic(
+            Shape::Sphere { radius: 0.4 },
+            Vec3::new(0.0, 1.5, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        // 触面后约 0.5 秒：仍在接触带内、法向速度被压制、沿 −u 下滑
+        for _ in 0..90 {
+            w.step();
+        }
+        let p = w.bodies.position[ball as usize];
+        let vel = w.bodies.linvel[ball as usize];
+        let dist = p.dot(n);
+        let v_n = vel.dot(n);
+        let down = vel.dot(u.normalize());
+        assert!(
+            dist > 0.30 && dist < 0.75,
+            "应在接触带内（半径 0.4）：沿法线 {dist}"
+        );
+        assert!(v_n.abs() < 1.0, "法向速度应被接触抑制：{v_n}");
+        assert!(down < -0.05, "应沿坡下滑（−u 方向）：v·u = {down}");
+        assert!(w.health().is_clean());
     }
 
     /// M2 provider 通道扩到**球**：球经 SDF 解析接触（`depth = r − sdf(c)`）

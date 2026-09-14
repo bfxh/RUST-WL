@@ -14,7 +14,7 @@
 //! 性能边界：点查询 O(#splats·cut)（cut = 3σ 外截断）；加速结构（均匀网格/BVH）见
 //! CATALOG「待办」——当前档位面向演示与中等规模（≤ 数千颗）。
 
-#![deny(unsafe_code)]
+#![forbid(unsafe_code)]
 
 use vxl_phys_core::interop::{InteropContact, ProviderColliders};
 use vxl_phys_core::{Aabb, Mat3, Vec3};
@@ -62,7 +62,7 @@ impl Splat {
 #[derive(Clone, Debug)]
 struct Grid {
     origin: Vec3,
-    inv_cell: f32,
+    inv_bin: f32,
     dims: (u32, u32, u32),
     bins: Vec<Vec<u32>>,
 }
@@ -88,8 +88,8 @@ pub struct GaussianSplatField {
     pub medium_velocity: Vec3,
 }
 
-/// 建网格的格数上限（超限不建，退回全扫；防内存灾难）。
-const GRID_MAX_CELLS: u64 = 4 << 20;
+/// 建网格的桶数上限（超限不建，退回全扫；防内存灾难）。
+const GRID_MAX_BINS: u64 = 4 << 20;
 
 impl Default for GaussianSplatField {
     fn default() -> Self {
@@ -128,35 +128,35 @@ impl GaussianSplatField {
         for s in &self.splats {
             max_s = max_s.max(s.scale.x).max(s.scale.y).max(s.scale.z);
         }
-        let cell = max_s * 3.0;
-        if cell <= 1e-6 {
+        let bin = max_s * 3.0;
+        if bin <= 1e-6 {
             return;
         }
         let b = self.world_bounds();
         let dims = (
-            ((b.max.x - b.min.x) / cell).ceil() as u32 + 1,
-            ((b.max.y - b.min.y) / cell).ceil() as u32 + 1,
-            ((b.max.z - b.min.z) / cell).ceil() as u32 + 1,
+            ((b.max.x - b.min.x) / bin).ceil() as u32 + 1,
+            ((b.max.y - b.min.y) / bin).ceil() as u32 + 1,
+            ((b.max.z - b.min.z) / bin).ceil() as u32 + 1,
         );
-        let cells = dims.0 as u64 * dims.1 as u64 * dims.2 as u64;
-        if cells == 0 || cells > GRID_MAX_CELLS {
+        let n_bins = dims.0 as u64 * dims.1 as u64 * dims.2 as u64;
+        if n_bins == 0 || n_bins > GRID_MAX_BINS {
             return;
         }
-        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); cells as usize];
-        let inv_cell = 1.0 / cell;
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); n_bins as usize];
+        let inv_bin = 1.0 / bin;
         for (i, s) in self.splats.iter().enumerate() {
             let r = max_s * 3.0;
             let lo = s.center - Vec3::splat(r);
             let hi = s.center + Vec3::splat(r);
             let c0 = (
-                (((lo.x - b.min.x) * inv_cell).floor().max(0.0)) as u32,
-                (((lo.y - b.min.y) * inv_cell).floor().max(0.0)) as u32,
-                (((lo.z - b.min.z) * inv_cell).floor().max(0.0)) as u32,
+                (((lo.x - b.min.x) * inv_bin).floor().max(0.0)) as u32,
+                (((lo.y - b.min.y) * inv_bin).floor().max(0.0)) as u32,
+                (((lo.z - b.min.z) * inv_bin).floor().max(0.0)) as u32,
             );
             let c1 = (
-                (((hi.x - b.min.x) * inv_cell).ceil() as u32).min(dims.0 - 1),
-                (((hi.y - b.min.y) * inv_cell).ceil() as u32).min(dims.1 - 1),
-                (((hi.z - b.min.z) * inv_cell).ceil() as u32).min(dims.2 - 1),
+                (((hi.x - b.min.x) * inv_bin).ceil() as u32).min(dims.0 - 1),
+                (((hi.y - b.min.y) * inv_bin).ceil() as u32).min(dims.1 - 1),
+                (((hi.z - b.min.z) * inv_bin).ceil() as u32).min(dims.2 - 1),
             );
             for cx in c0.0..=c1.0 {
                 for cy in c0.1..=c1.1 {
@@ -169,7 +169,7 @@ impl GaussianSplatField {
         }
         self.grid = Some(Grid {
             origin: b.min,
-            inv_cell,
+            inv_bin,
             dims,
             bins,
         });
@@ -214,9 +214,9 @@ impl GaussianSplatField {
         let empty: &[u32] = &[];
         let (list, all) = match &self.grid {
             Some(g) => {
-                let cx = ((p.x - g.origin.x) * g.inv_cell).floor();
-                let cy = ((p.y - g.origin.y) * g.inv_cell).floor();
-                let cz = ((p.z - g.origin.z) * g.inv_cell).floor();
+                let cx = ((p.x - g.origin.x) * g.inv_bin).floor();
+                let cy = ((p.y - g.origin.y) * g.inv_bin).floor();
+                let cz = ((p.z - g.origin.z) * g.inv_bin).floor();
                 if cx < 0.0 || cy < 0.0 || cz < 0.0 {
                     (empty, false)
                 } else {

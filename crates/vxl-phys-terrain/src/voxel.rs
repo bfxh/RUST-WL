@@ -359,9 +359,15 @@ impl VoxelVolume {
 
     /// **确定性抖动种子**（Voronoi 预断裂用）：`n` 个种子按立方根网格铺开 + 整数
     /// 哈希抖动（无外部 RNG；同参数 ⇒ 同结果）。`jitter` ∈ [0,1] 为格内抖动比例。
+    ///
+    /// 网格边 = `ceil(n^(1/3))`：用**整数搜索**求（`side³ ≥ n` 的最小 side）——
+    /// 与 `f64::cbrt().ceil()` 同结果，但不引入 f64（§5 严格 f32 纪律）。
     pub fn seeds_jittered(min: Vec3, max: Vec3, n: usize, jitter: f32) -> Vec<Vec3> {
         let n = n.max(1);
-        let side = (n as f64).cbrt().ceil().max(1.0) as usize;
+        let mut side = 1usize;
+        while side * side * side < n {
+            side += 1;
+        }
         let inv = 1.0 / side as f32;
         let mut out = Vec::with_capacity(side * side * side);
         let mut k = 0usize;

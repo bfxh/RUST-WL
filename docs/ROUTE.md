@@ -163,7 +163,10 @@
   种子，无外部 RNG）+ 门面 `World::fracture_voronoi` + 演示 `m3_voronoi`
   （墙 64 格 → 27 碎块、逃逸 0、干净）。脆性**凸体外壳**（非体素）的 Voronoi 需
   `Shape::ConvexHull` + GJK/EPA（SPEC §2.4），列为后续。
-- ⚠️ **残留**：体素块→**粒子**（沙/尘）；凸体/网格切割（`extract_where` 已给通用落点）。
+- ✅ **凸体外壳切割**（2026-09-15）：窄相 `gjk.rs` 增 `clip_halfspace`（半空间裁剪，交点
+  收敛到切割面上的 2D 凸包，防 O(n²) 膨胀）与 `fracture_voronoi_hull`（最近种子分区，
+  平铺性同体素版）。
+- ⚠️ **残留**：体素块→**粒子**（沙/尘）——按用户口径**不做**。
 
 
 
@@ -208,7 +211,7 @@
 | 多边形（凸体外壳） | ✅ | `add_hull` / `spawn_hull_body` / `spawn_hull_pieces`；窄相 `gjk.rs`（GJK/EPA + 半空间裁剪 + Voronoi 预断裂）；**外壳×提供者 = 顶点采样多点流形**，外壳×{盒/球/外壳} = EPA 单法线 + 外壳近面顶点细化 |
 | 高斯喷溅 | ✅ | 新 crate `vxl-phys-splat`：隐式场 σ(p)=Σw·exp(−½α(p))、SDF `(τ−σ)/|∇σ|`、`ProviderColliders` 三点查；`add_splat_field` 接入；渲染桥 `export_splats` |
 | 演示与对照 | ✅ | `examples/showcase`（四域同场）→ 逐帧转储 → `scripts/render_demo.py` → `docs/demo/showcase_full.gif`；`gold-sample` 增「活跃 tick 计时」双引擎对照 |
-| 网格（任意三角网） | ⏳ | 需 trimesh 提供者（BVH + 点/面查询）；凸壳点云已覆盖凸体通路 |
+| 网格（任意三角网） | ✅ | `vxl-phys-terrain::mesh::TriMesh`：薄壳语义（`depth = skin − 最近三角形距离`，法线 = 面法线），均匀网格邻域加速（格边 = 平均边长，下限 0.5）；门面 `add_mesh`；测试：盒静置 / 球沿坡面法线接触 |
 | 液体 / 软体 / 布 | ⏳ | crate 骨架在（`vxl-phys-fluid` / `vxl-phys-soft`），求解器待接 |
 | 体素→粒子（沙/尘） | ⏳ | M3 残留（下一个自然切片） |
 

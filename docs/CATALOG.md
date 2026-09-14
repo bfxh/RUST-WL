@@ -52,7 +52,7 @@
 
 | crate | 域 | 现有关键件 | 依赖 | 状态 | 热路径 |
 |---|---|---|---|---|---|
-| `vxl-phys-terrain` | 体素/地形 | `TerrainSet`（高度场账本）+ **`voxel::VoxelVolume`**（占据位图 + 局域 SDF + `CollisionProvider`）+ 贪心提取/球域切割 | core, narrow, broad | ✅（M3 第一块） | 🌤 每 tick（体素查询在外层调用时进 🔥） |
+| `vxl-phys-terrain` | 体素/地形 | `TerrainSet`（高度场账本）+ **`voxel::VoxelVolume`**（占据位图 + 局域 SDF + `CollisionProvider`）+ 贪心提取/球域切割 + **`mesh::TriMesh`**（任意三角网薄壳提供者 + 均匀网格加速） | core, narrow, broad | ✅（M3 第一块） | 🌤 每 tick（体素/网格查询在外层调用时进 🔥） |
 | `vxl-phys-destruction` | 断裂/碎块形状 | 骨架（Voronoi 预断裂待做） | — | 🦴 | ❄️ |
 | `vxl-phys-soft` | 软体/布（XPBD） | 参数骨架（compliance 档位） | — | 🦴 | 🔥（实现后） |
 | `vxl-phys-fluid` | 液体（SPH/PBF/FLIP） | 参数骨架 | — | 🦴 | 🔥（实现后，GPU 为主） |
@@ -92,6 +92,7 @@
 | `solver` | warm 槽位表 | 每 tick | 稠密槽位 + 原位写 + 单遍剪枝（M1-PLAN §16-§18） |
 | `solver` | 休眠/CCD | 每 tick / 事件级 | `sleep`（岛级原子）＋ `ccd.rs`（命中判据：沿法向接近） |
 | `terrain` | `voxel.rs` | 域表示 | 占据位图 + 局域 SDF（自适应查询范围）+ 贪心提取/球域切割 |
+| `terrain` | `mesh.rs` | 域表示（三角网） | 薄壳语义：`depth = skin − 最近三角形距离`、法线 = 面法线（无内外判定）；Ericson 最近点闭式解；均匀网格（格边 = 平均边长、下限 0.5，三角形 AABB 登记覆盖格，3×3×3 邻域查询）；`build_grid()` 建表（`GRID_MAX_BINS` 封顶），不建表回退全扫；精度前提 `skin < 格边/2` |
 
 ## 4. 性能纪律（分类不得影响性能——用户令）
 
