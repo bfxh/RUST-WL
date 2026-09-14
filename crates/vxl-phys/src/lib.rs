@@ -338,19 +338,28 @@ impl World {
                 self.bodies.shape[m.a as usize],
                 self.bodies.shape[m.b as usize],
             );
-            let (other, prov) = match (sa, sb) {
-                (Shape::Provider(p), _) => (m.b, p),
-                (_, Shape::Provider(p)) => (m.a, p),
+            let (other, prov, other_is_a) = match (sa, sb) {
+                (Shape::Provider(p), _) => (m.b, p, false),
+                (_, Shape::Provider(p)) => (m.a, p, true),
                 _ => continue,
             };
             if prov != id || !self.bodies.is_dynamic(other as usize) {
                 continue;
             }
             let v = self.bodies.linvel[other as usize];
-            let sp = v.length();
-            if sp < speed_threshold {
+            // **冲击判据 = 沿接触法向的接近速度**（不是体速！）：
+            // 贴地滑行是切向运动，体速很大但不该破坏——按体速判会一路挖穿
+            // 自己脚下的地板（实测：8 m/s 滑行弹体把地板挖穿 ⇒ 碎块逃逸）。
+            // 法线 a→b：other 在 a 侧 ⇒ 接近速度 = v·n；在 b 侧 ⇒ −v·n。
+            let approach = if other_is_a {
+                v.dot(m.normal)
+            } else {
+                -v.dot(m.normal)
+            };
+            if approach < speed_threshold {
                 continue;
             }
+            let sp = approach;
             // 接触点 = 流形点均值（确定性）
             let n = m.points.len().max(1) as f32;
             let mut c = Vec3::ZERO;

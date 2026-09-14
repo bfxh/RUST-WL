@@ -309,6 +309,22 @@ impl CollisionProvider for VoxelVolume {
     }
 }
 
+/// 盒的世界 AABB 半长：`|R|·half`（与宽相同式）。
+fn box_aabb_half(half: Vec3, rot: Quat) -> Vec3 {
+    let m = vxl_phys_core::Mat3::from_quat(rot);
+    Vec3::new(
+        (m.mul_vec3(Vec3::new(half.x, 0.0, 0.0))).x.abs()
+            + (m.mul_vec3(Vec3::new(0.0, half.y, 0.0))).x.abs()
+            + (m.mul_vec3(Vec3::new(0.0, 0.0, half.z))).x.abs(),
+        (m.mul_vec3(Vec3::new(half.x, 0.0, 0.0))).y.abs()
+            + (m.mul_vec3(Vec3::new(0.0, half.y, 0.0))).y.abs()
+            + (m.mul_vec3(Vec3::new(0.0, 0.0, half.z))).y.abs(),
+        (m.mul_vec3(Vec3::new(half.x, 0.0, 0.0))).z.abs()
+            + (m.mul_vec3(Vec3::new(0.0, half.y, 0.0))).z.abs()
+            + (m.mul_vec3(Vec3::new(0.0, 0.0, half.z))).z.abs(),
+    )
+}
+
 /// 盒形包络的体素专用接触（**按盒的面聚合**，标准「参考面」做法）。
 ///
 /// 采样 = 6 个面的面中心 + 4 角（每面 5 点，共 30 点）。**主导面** = skin 带内
@@ -326,6 +342,51 @@ pub fn contacts_box_voxel(
     out: &mut Vec<vxl_phys_core::interop::InteropContact>,
 ) -> bool {
     let m = vxl_phys_core::Mat3::from_quat(rot);
+    // **自适应查询范围（本轮修复）**：先收集「盒 AABB（±1 格）范围内的占据格」，
+    // 采样点对这批格求最近距离——而不是只扫点周围 ±1 格（后者会让大碎块的采样点
+    // 找不到最近的体素格、拿不到接触 ⇒ 自由落体穿地，实测 74/79 逃逸）。
+    let ah = box_aabb_half(half, rot);
+    let lo = v.grid_of(pos - ah - Vec3::splat(v.step));
+    let hi = v.grid_of(pos + ah + Vec3::splat(v.step));
+    let mut cells: Vec<(i32, i32, i32)> = Vec::new();
+    for iz in lo.2.max(0)..=hi.2.min(v.nz as i32 - 1) {
+        for iy in lo.1.max(0)..=hi.1.min(v.ny as i32 - 1) {
+            for ix in lo.0.max(0)..=hi.0.min(v.nx as i32 - 1) {
+                if v.get(ix as u32, iy as u32, iz as u32) {
+                    cells.push((ix, iy, iz));
+                }
+            }
+        }
+    }
+    if cells.is_empty() {
+        return false;
+    }
+    // 到「这批格」的带符号距离（同 `sdf` 公式，但遍历给定列表）
+    let sd = |p: Vec3| -> f32 {
+        let mut best = v.step * 2.0;
+        for &(ix, iy, iz) in &cells {
+            let lo = v.grid_center(ix as u32, iy as u32, iz as u32) - Vec3::splat(v.step * 0.5);
+            let hi = lo + Vec3::splat(v.step);
+            let q = Vec3::new(
+                (lo.x - p.x).max(p.x - hi.x).max(0.0),
+                (lo.y - p.y).max(p.y - hi.y).max(0.0),
+                (lo.z - p.z).max(p.z - hi.z).max(0.0),
+            );
+            let outside = q.length();
+            let d = if outside > 0.0 {
+                outside
+            } else {
+                let inx = (p.x - lo.x).min(hi.x - p.x);
+                let iny = (p.y - lo.y).min(hi.y - p.y);
+                let inz = (p.z - lo.z).min(hi.z - p.z);
+                -inx.min(iny).min(inz)
+            };
+            if d < best {
+                best = d;
+            }
+        }
+        best
+    };
     // 6 个面（局部轴向外法线）：±X/±Y/±Z
     let dirs = [
         Vec3::new(-1.0, 0.0, 0.0),
@@ -371,7 +432,7 @@ pub fn contacts_box_voxel(
         }
         for s in &samples {
             let p = pos + m.mul_vec3(Vec3::new(s.0, s.1, s.2));
-            let d = v.sdf(p);
+            let d = sd(p);
             if d < skin {
                 count[k] += 1;
                 deepest[k] = deepest[k].min(d);
@@ -420,7 +481,7 @@ pub fn contacts_box_voxel(
             (l[0], l[1], l[2])
         };
         let p = pos + m.mul_vec3(Vec3::new(lx, ly, lz));
-        let d = v.sdf(p);
+        let d = sd(p);
         if d >= skin {
             continue;
         }

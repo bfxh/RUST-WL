@@ -1069,13 +1069,22 @@ impl DefaultNarrowPhase {
             };
             let id = pr_a.or(pr_b).unwrap();
             let mut buf: Vec<vxl_phys_core::interop::InteropContact> = Vec::new();
+            // **接触带按相对速度自适应**（实测修复）：固定 skin（0.02 m）小于每 tick
+            // 位移（8 m/s ⇒ 0.13 m）时，体**跨过皮肤带** ⇒ 进入体内才建接触，此时
+            // 接近速度已≈0 ⇒ 冲击判据不触发、且无 spec 减速（实测：8 m/s 弹体无声
+            // 停在墙前 0.04 m、零破坏）。带 = max(skin, |v_rel|·dt·1.5)；dt 取引擎
+            // 固定基础步 1/60（子步更小 ⇒ 该带偏保守、安全）。
+            let vrel = if pr_is_a {
+                bodies.linvel[b as usize] - bodies.linvel[a as usize]
+            } else {
+                bodies.linvel[a as usize] - bodies.linvel[b as usize]
+            };
+            let band = self.skin.max(vrel.length() * (1.0 / 60.0) * 1.5);
             let ok = match *body_shape {
-                Shape::Box { half } => {
-                    providers.contacts_box(id, half, bpos, brot, self.skin, &mut buf)
-                }
+                Shape::Box { half } => providers.contacts_box(id, half, bpos, brot, band, &mut buf),
                 // 球：SDF 类提供者解析求解（`depth = r − sdf(center)`）
                 Shape::Sphere { radius } => {
-                    providers.contacts_sphere(id, bpos, radius, self.skin, &mut buf)
+                    providers.contacts_sphere(id, bpos, radius, band, &mut buf)
                 }
                 _ => false, // 其余形状 vs provider：待专用查询
             };

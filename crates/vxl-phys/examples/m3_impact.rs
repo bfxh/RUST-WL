@@ -38,7 +38,7 @@ fn main() {
         Shape::Box {
             half: Vec3::splat(0.4),
         },
-        Vec3::new(-3.0, 2.0, 0.0),
+        Vec3::new(-2.0, 3.0, 0.0), // 空中直线撞击（贴地滑行会被地板摩擦减速、冲击不纯）
         Quat::IDENTITY,
         2000.0,
     );
