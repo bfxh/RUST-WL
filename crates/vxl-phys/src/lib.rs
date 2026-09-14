@@ -319,6 +319,23 @@ impl World {
         n
     }
 
+    /// **球域挖洞**（任意形状切割第一步；爆炸/弹坑形态）：提取球内格 → 碎块 + 移除。
+    /// 返回碎块数。确定性：格心判据 + 固定贪心扫描序（见 `extract_sphere`）。
+    pub fn carve_sphere(&mut self, id: u32, center: Vec3, radius: f32, density: f32) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let boxes = vol.extract_sphere(center, radius);
+        let n = boxes.len();
+        for (c, h) in boxes {
+            let mass = density * 8.0 * h.x * h.y * h.z;
+            self.bodies
+                .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
     /// **冲击破坏（M3）**：扫描最近一次检测的流形，对「动体 × provider(id)」的
     /// **高速接触**在接触点处挖出并转为碎块（挖出半径随冲击速度增长）。
     /// 返回本次产生的碎块总数。确定性：按流形序处理、挖域为轴对齐盒、
@@ -381,22 +398,14 @@ impl World {
             } else {
                 Vec3::ZERO
             };
-            // **挖域 = 冲击体之后的一段板**（从「接触点 + 冲击体半径之外」起、
-            // 沿冲击方向延伸 2r；截面半径 r）。构造上不与冲击体重叠 ⇒ 不会被
-            // 位置修正挤出（此前「接触点周围的盒」会让碎块与弹体重叠 ⇒ 挤出 +
-            // 隧道逃逸，实测「逃逸」计数与 KE 异常增长）。
-            let near = c + dir * (reach + 0.05);
-            let far = near + dir * (2.0 * r);
-            let (mn, mx) = if dir.dot(Vec3::X) >= 0.0 {
-                (near, far)
-            } else {
-                (far, near)
-            };
-            let lo = Vec3::new(mn.x.min(mx.x) - r, mn.y.min(mx.y) - r, mn.z.min(mx.z) - r);
-            let hi = Vec3::new(mn.x.max(mx.x) + r, mn.y.max(mx.y) + r, mn.z.max(mx.z) + r);
+            // **弹坑 = 球域**（任意形状切割第一步）：球心 = 接触点 + 冲击方向 ×
+            // 1.05r ⇒ 坑的**近缘正好落在接触点**、整体在材料里（薄墙会被打穿，
+            // 物理如此）；与冲击体只在接近点相切、不重叠。
+            let _ = reach;
+            let center = c + dir * (r * 1.05);
             // 碎块**静止生成**（初速留给调用方用 `spawn_box_debris_vel` 显式给；
             // 引擎不凭空造动量——「继承半速」实测是能量源，已否）。
-            total += self.spawn_box_debris_vel(id, lo, hi, density, Vec3::ZERO);
+            total += self.carve_sphere(id, center, r, density);
         }
         total
     }

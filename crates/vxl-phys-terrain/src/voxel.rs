@@ -198,6 +198,37 @@ impl VoxelVolume {
     /// 注意：占据包围盒只增不减 ⇒ 提取后 `bounds()` 可能偏保守（宽相多做工作，
     /// 不影响正确性；需要紧盒时调用方重建体积或加紧盒接口）。
     pub fn extract_boxes(&mut self, min: Vec3, max: Vec3) -> Vec<(Vec3, Vec3)> {
+        self.extract_where(min, max, |_ix, _iy, _iz| true)
+    }
+
+    /// **球域挖洞**（任意形状切割第一步；爆炸/弹坑形态）：提取**格心落在球内**的
+    /// 占据格，合并成轴对齐盒（贪心同 `extract_where`）。确定性：格心判据 +
+    /// 固定扫描序。返回 `(中心, 半长)` 列表；半径 ≤ 0 时为 0 个。
+    pub fn extract_sphere(&mut self, center: Vec3, radius: f32) -> Vec<(Vec3, Vec3)> {
+        if radius <= 0.0 {
+            return Vec::new();
+        }
+        let r2 = radius * radius;
+        // 复制到局部：闭包不得借用 self（调用处已 &mut self 借出）
+        let (origin, step) = (self.origin, self.step);
+        self.extract_where(
+            center - Vec3::splat(radius),
+            center + Vec3::splat(radius),
+            move |ix, iy, iz| {
+                let c =
+                    origin + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * step;
+                (c - center).length_squared() <= r2
+            },
+        )
+    }
+
+    /// 通用提取：在 `[min, max]` 的格范围内，取「占据 且 谓词为真」的格，
+    /// 贪心合并成轴对齐盒并清除（+X 拉长 → +Y 整行 → +Z 整片）。
+    /// 谓词签名 `(ix, iy, iz) -> bool`；**确定性**：扫描序与扩展方向固定。
+    pub fn extract_where<F>(&mut self, min: Vec3, max: Vec3, inside: F) -> Vec<(Vec3, Vec3)>
+    where
+        F: Fn(i32, i32, i32) -> bool,
+    {
         let mut out = Vec::new();
         let lo = self.grid_of(min);
         let hi = self.grid_of(max);
@@ -213,19 +244,24 @@ impl VoxelVolume {
         for iz in z0..=z1 {
             for iy in y0..=y1 {
                 for ix in x0..=x1 {
-                    if !self.get(ix as u32, iy as u32, iz as u32) {
+                    if !self.get(ix as u32, iy as u32, iz as u32) || !inside(ix, iy, iz) {
                         continue;
                     }
                     // +X 连续
                     let mut ex = ix;
-                    while ex < x1 && self.get((ex + 1) as u32, iy as u32, iz as u32) {
+                    while ex < x1
+                        && self.get((ex + 1) as u32, iy as u32, iz as u32)
+                        && inside(ex + 1, iy, iz)
+                    {
                         ex += 1;
                     }
                     // +Y 整行匹配
                     let mut ey = iy;
                     'ey: while ey < y1 {
                         for kx in ix..=ex {
-                            if !self.get(kx as u32, (ey + 1) as u32, iz as u32) {
+                            if !self.get(kx as u32, (ey + 1) as u32, iz as u32)
+                                || !inside(kx, ey + 1, iz)
+                            {
                                 break 'ey;
                             }
                         }
@@ -236,7 +272,9 @@ impl VoxelVolume {
                     'ez: while ez < z1 {
                         for ky in iy..=ey {
                             for kx in ix..=ex {
-                                if !self.get(kx as u32, ky as u32, (ez + 1) as u32) {
+                                if !self.get(kx as u32, ky as u32, (ez + 1) as u32)
+                                    || !inside(kx, ky, ez + 1)
+                                {
                                     break 'ez;
                                 }
                             }
@@ -653,6 +691,28 @@ mod tests {
             0.02,
             &mut out2
         ));
+    }
+
+    #[test]
+    fn sphere_extract_carves_crater() {
+        // 8×8×8 实体块（格边长 0.5、origin 0）：球域挖洞 ⇒ 洞内变空、盒数>0、
+        // 移除格数 ≈ 球体积/格体积（格心判据 ⇒ 数量级一致即可）
+        let mut v = VoxelVolume::new(Vec3::ZERO, 0.5, 8, 8, 8);
+        v.fill_box(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        let filled0 = v.filled_count();
+        let boxes = v.extract_sphere(Vec3::new(2.0, 2.0, 2.0), 1.0);
+        let removed = filled0 - v.filled_count();
+        assert!(!boxes.is_empty(), "球域应提取出碎块盒");
+        let vol_cells = (4.0 / 3.0 * std::f32::consts::PI * 1.0f32.powi(3)) / 0.5f32.powi(3);
+        assert!(
+            (removed as f32) > vol_cells * 0.6 && (removed as f32) < vol_cells * 1.4,
+            "移除格数 {removed} 应接近球体积格数 {vol_cells:.1}"
+        );
+        // 球心处已空
+        assert!(!v.get(4, 4, 4), "球心格应被挖掉");
+        // 球外的角点仍在
+        assert!(v.get(0, 0, 0));
+        assert!(v.get(7, 7, 7));
     }
 
     #[test]
