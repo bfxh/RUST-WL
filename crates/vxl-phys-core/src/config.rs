@@ -49,7 +49,22 @@ pub struct PhysConfig {
     pub substeps: u32,
     /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 16。
     pub velocity_iterations: u32,
+    /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
+    /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
+    /// 3 自由度）+ 强转动耦合，单向 GS 的慢模正在歧管内部——内层 K 遍把歧管内
+    /// 收敛等价提到 ≈K×外层。实测（45 盒最小沸腾档）：16 次外层残留 ≈15% 重力
+    /// 增量（微抖 |v|≈0.03 永不入睡，角点接触下升级沸腾），内层 4 遍后入睡。
+    /// 1 = 关闭（M0 行为）；默认 4。代价 ≈ 仅法向通道 ×K。
+    pub normal_inner: u32,
+    /// 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
+    /// 主迭代后再**反序**过一遍全部约束，把底层承载沿约束图反向传播一次——
+    /// 深层堆叠（>16 层）收敛所需迭代数 ≈ 2×层数，反序一遍等效补多轮。
+    /// 0 = 关闭（默认，M0 数值行为不变）；建议 2~8（成本 ≈ shock/velocity 比例）。
+    pub shock_iterations: u32,
     /// §4.3 接触 speculative margin（skin）四档：0.02/0.01/0.005/0.002。
+    /// 默认 0.02（M1 金样对齐：= Rapier 预测距离 0.02——留缝密堆的侧向
+    /// speculative 接触从首帧即存在，2000 盒 5 层堆开局即稳、600 tick 全睡；
+    /// 0.01 需经 1200 tick 沸腾行程才入睡，实测见 docs/M1-PLAN.md）。
     pub contact_skin: f32,
     /// §4.3 GJK 收敛容差（M0 SAT 路径仅存档）。
     pub gjk_tolerance: f32,
@@ -62,14 +77,26 @@ pub struct PhysConfig {
     pub ccd_max_steps: u32,
     /// §4.4 摩擦模型（默认材质；逐材质见 BodySet::materials）。
     pub friction: FrictionModel,
-    /// §4.5 恢复系数 e ∈ [0,1]（默认材质；材质对取 max）。
+    /// §4.5 恢复系数 e ∈ `[0,1]`（默认材质；材质对取 max）。
     pub restitution: f32,
     /// §4.5 恢复速度阈值：低于它的碰撞 e 视作 0（防微弹跳）。
     pub restitution_threshold: f32,
-    /// 位置修正（Baumgarte）系数。
+    /// 位置修正（Baumgarte）系数。**M1 软接触形态后仅用于兼容旧档**：
+    /// 位置修正改走「erp 偏置速度」进速度通道（见下三参），本字段保留占位。
     pub baumgarte: f32,
-    /// 线性 slop（穿透容差，不参与 bias）。
+    /// 线性 slop（穿透容差，不参与偏置）。
     pub linear_slop: f32,
+    /// M1 软接触（TGS-Soft 语义，与 Rapier 0.35 默认同构）：接触法向的
+    /// 正则化参数。`contact_freq_hz`/`contact_damping_ratio` = 动-动接触的
+    /// 等效弹簧固有频率/阻尼比（Rapier 默认 30 Hz / ζ=10）；`static_freq_hz`
+    /// = 含静态侧的接触（更硬，防挤压穿过，Rapier 默认 60 Hz）；穿透时
+    /// 正则化自动退化为硬投影（cfm=1），speculative（浅缝）接触才施加软性。
+    pub contact_freq_hz: f32,
+    pub contact_damping_ratio: f32,
+    pub static_contact_freq_hz: f32,
+    /// 位置修正（erp）偏置速度上限（m/s；Rapier `max_corrective_velocity`
+    /// 默认 3.0）——替代旧分裂冲量通道的 0.5 上钳，偏置走速度通道 + 正则化。
+    pub max_corrective_velocity: f32,
     /// 限速（M0 的防隧道保守闸；CCD 落地后放宽）。
     pub max_linear_velocity: f32,
     pub max_angular_velocity: f32,
@@ -95,7 +122,9 @@ impl Default for PhysConfig {
             dt: 1.0 / 60.0,
             substeps: 1,
             velocity_iterations: 16,
-            contact_skin: 0.01,
+            normal_inner: 4,
+            shock_iterations: 0,
+            contact_skin: 0.02,
             gjk_tolerance: 1e-5,
             ccd_speed_threshold: f32::INFINITY,
             ccd_extent_ratio: 0.5,
@@ -105,6 +134,10 @@ impl Default for PhysConfig {
             restitution_threshold: 1.0,
             baumgarte: 0.2,
             linear_slop: 0.005,
+            contact_freq_hz: 30.0,
+            contact_damping_ratio: 10.0,
+            static_contact_freq_hz: 60.0,
+            max_corrective_velocity: 3.0,
             max_linear_velocity: 100.0,
             max_angular_velocity: 50.0,
             sleep_linear: 0.04,

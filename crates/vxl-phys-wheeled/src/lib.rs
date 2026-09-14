@@ -1,6 +1,6 @@
-//! # vxl-phys-vehicle
+//! # vxl-phys-wheeled
 //!
-//! 车辆（§4.10，射线悬挂 + 刷子轮胎模型）—— M2 落地。
+//! 地面行驶域（§4.10，射线悬挂 + 刷子轮胎模型）—— M2 落地。
 //!
 //! - 悬挂：轮心射线（stiffness/damping/行程三参数）；
 //! - 轮胎：简化刷子模型（α_peak、载荷敏感、μ(s) 纵滑曲线）；
@@ -10,7 +10,7 @@
 #![forbid(unsafe_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VehiclePreset {
+pub enum RidePreset {
     /// 线性轮胎 + 包络钳制。
     Arcade,
     /// 全刷子模型 + 载荷转移。
@@ -48,8 +48,8 @@ pub struct Drivetrain {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct VehicleConfig {
-    pub preset: VehiclePreset,
+pub struct RideConfig {
+    pub preset: RidePreset,
     pub suspension: Suspension,
     pub tire: BrushTire,
     pub drivetrain: Drivetrain,
@@ -58,10 +58,10 @@ pub struct VehicleConfig {
     pub drift_aligning_torque: f32,
 }
 
-impl Default for VehicleConfig {
+impl Default for RideConfig {
     fn default() -> Self {
         Self {
-            preset: VehiclePreset::Arcade,
+            preset: RidePreset::Arcade,
             suspension: Suspension {
                 stiffness: 30_000.0,
                 damping: 3_000.0,
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn gear_ratios_monotonic_down() {
-        let d = VehicleConfig::default().drivetrain;
+        let d = RideConfig::default().drivetrain;
         for w in d.gear_ratios.windows(2) {
             assert!(w[0] > w[1]);
         }

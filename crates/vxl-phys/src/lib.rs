@@ -26,6 +26,79 @@ pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
 
+/// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
+#[derive(Default)]
+pub struct Providers {
+    vols: Vec<vxl_phys_terrain::voxel::VoxelVolume>,
+}
+
+impl Providers {
+    /// 注册体素体，返回其 id（= 注册序）。
+    pub fn push(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> u32 {
+        let id = self.vols.len() as u32;
+        self.vols.push(vol);
+        id
+    }
+
+    pub fn len(&self) -> usize {
+        self.vols.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vols.is_empty()
+    }
+
+    /// provider(id) 的世界包围盒（宽相 AABB 供给；与 `CollisionProvider::bounds` 同义）。
+    pub fn bounds(&self, id: u32) -> Option<Aabb> {
+        use vxl_phys_core::interop::CollisionProvider;
+        self.vols.get(id as usize).map(|v| v.bounds())
+    }
+
+    pub fn voxel(&self, id: u32) -> Option<&vxl_phys_terrain::voxel::VoxelVolume> {
+        self.vols.get(id as usize)
+    }
+
+    pub fn voxel_mut(&mut self, id: u32) -> Option<&mut vxl_phys_terrain::voxel::VoxelVolume> {
+        self.vols.get_mut(id as usize)
+    }
+}
+
+impl vxl_phys_core::interop::ProviderColliders for Providers {
+    fn bounds(&self, id: u32) -> Option<Aabb> {
+        use vxl_phys_core::interop::CollisionProvider;
+        self.vols.get(id as usize).map(|v| v.bounds())
+    }
+
+    fn contacts_box(
+        &self,
+        id: u32,
+        half: Vec3,
+        pos: Vec3,
+        rot: Quat,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.vols.get(id as usize) {
+            Some(v) => vxl_phys_terrain::voxel::contacts_box_voxel(v, half, pos, rot, skin, out),
+            None => false,
+        }
+    }
+
+    fn contacts_sphere(
+        &self,
+        id: u32,
+        center: Vec3,
+        radius: f32,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.vols.get(id as usize) {
+            Some(v) => vxl_phys_terrain::voxel::contacts_sphere_voxel(v, center, radius, skin, out),
+            None => false,
+        }
+    }
+}
+
 /// 帧级相位暂存（§0.1 #10：相内 bump，相末 reset，全帧零 free）。
 ///
 /// M0 已接入的消费者 = 帧末状态哈希的规范化缓冲（每次哈希 alloc→打包→reset，
@@ -114,6 +187,9 @@ pub struct World {
     manifolds: Vec<Manifold>,
     ccd_manifolds: Vec<Manifold>,
     hf_bounds: Vec<Aabb>,
+    /// 外部碰撞提供者集合（体素/网格…；ROUTE §2.1 兼容轴）与其 AABB。
+    providers: Providers,
+    provider_bounds: Vec<Aabb>,
     timings: PhaseTimings,
 }
 
@@ -152,6 +228,8 @@ impl World {
             manifolds: Vec::new(),
             ccd_manifolds: Vec::new(),
             hf_bounds: Vec::new(),
+            providers: Providers::default(),
+            provider_bounds: Vec::new(),
             timings: PhaseTimings::default(),
         }
     }
@@ -191,6 +269,188 @@ impl World {
         self.hf_bounds.push(bounds);
         let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
         self.bodies.push_static(Shape::HeightField(id), pos, rot)
+    }
+
+    /// 注册一个**体素体**为碰撞提供者（新域接入的第一条路径，ROUTE §3/§5）：
+    /// 加入提供者集合 + 静态 Marker 体 `Shape::Provider(id)`；宽相 AABB 由
+    /// 提供者的 bounds 供给（与高度场同机制）。返回 marker 体 id。
+    pub fn add_voxel(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> BodyId {
+        let id = self.providers.push(vol);
+        self.provider_bounds.push(
+            self.providers
+                .bounds(id)
+                .expect("just inserted provider bounds"),
+        );
+        let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
+        self.bodies.push_static(Shape::Provider(id), pos, rot)
+    }
+
+    /// **破坏（M3 第一块）**：把体素体盒域内的占据格转为**刚体碎块**
+    /// （贪心合并成盒 → 逐个动态体），并从体素体里移除。返回碎块数。
+    /// 确定性：提取顺序 = 固定扫描序（见 `VoxelVolume::extract_boxes`）；
+    /// 碎块质量 = `density × 8·hx·hy·hz`。
+    pub fn spawn_box_debris(&mut self, id: u32, min: Vec3, max: Vec3, density: f32) -> usize {
+        self.spawn_box_debris_vel(id, min, max, density, Vec3::ZERO)
+    }
+
+    /// 同 [`spawn_box_debris`](Self::spawn_box_debris)，但碎块带初速 `vel`
+    /// （冲击破坏用：碎块继承部分冲击速度 ⇒ 与冲击体的相对速度被压低）。
+    pub fn spawn_box_debris_vel(
+        &mut self,
+        id: u32,
+        min: Vec3,
+        max: Vec3,
+        density: f32,
+        vel: Vec3,
+    ) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let boxes = vol.extract_boxes(min, max);
+        let n = boxes.len();
+        for (c, h) in boxes {
+            let mass = density * 8.0 * h.x * h.y * h.z;
+            let b =
+                self.bodies
+                    .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+            self.bodies.linvel[b as usize] = vel;
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
+    /// **球域挖洞**（任意形状切割第一步；爆炸/弹坑形态）：提取球内格 → 碎块 + 移除。
+    /// 返回碎块数。确定性：格心判据 + 固定贪心扫描序（见 `extract_sphere`）。
+    pub fn carve_sphere(&mut self, id: u32, center: Vec3, radius: f32, density: f32) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let boxes = vol.extract_sphere(center, radius);
+        let n = boxes.len();
+        for (c, h) in boxes {
+            let mass = density * 8.0 * h.x * h.y * h.z;
+            self.bodies
+                .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
+    /// **Voronoi 预断裂（M3）**：把域内体素按「距最近种子」分块（划分，守恒），
+    /// 每块提取为刚体碎块并移除。`seeds` 由调用方给（可用
+    /// `vxl_phys_terrain::voxel::VoxelVolume::seeds_jittered` 生成确定性抖动种子）。
+    /// 返回碎块总数。
+    pub fn fracture_voronoi(
+        &mut self,
+        id: u32,
+        min: Vec3,
+        max: Vec3,
+        seeds: &[Vec3],
+        density: f32,
+    ) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let cells = vol.fracture_voronoi(min, max, seeds);
+        let mut n = 0usize;
+        for (_si, boxes) in cells {
+            for (c, h) in boxes {
+                let mass = density * 8.0 * h.x * h.y * h.z;
+                self.bodies
+                    .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+                n += 1;
+            }
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
+    /// **冲击破坏（M3）**：扫描最近一次检测的流形，对「动体 × provider(id)」的
+    /// **高速接触**在接触点处挖出并转为碎块（挖出半径随冲击速度增长）。
+    /// 返回本次产生的碎块总数。确定性：按流形序处理、挖域为轴对齐盒、
+    /// 提取顺序固定（见 `extract_boxes`）。
+    ///
+    /// `speed_threshold` = 触发阈值（m/s，取动体速度）；`density` = 碎块密度。
+    pub fn apply_impact_destruction(
+        &mut self,
+        id: u32,
+        speed_threshold: f32,
+        density: f32,
+    ) -> usize {
+        // 先在只读扫描里收集「挖点」（按流形序），再逐个挖 —— 保持确定性。
+        let mut digs: Vec<(Vec3, f32, Vec3, f32)> = Vec::new();
+        for m in &self.manifolds {
+            let (sa, sb) = (
+                self.bodies.shape[m.a as usize],
+                self.bodies.shape[m.b as usize],
+            );
+            let (other, prov, other_is_a) = match (sa, sb) {
+                (Shape::Provider(p), _) => (m.b, p, false),
+                (_, Shape::Provider(p)) => (m.a, p, true),
+                _ => continue,
+            };
+            if prov != id || !self.bodies.is_dynamic(other as usize) {
+                continue;
+            }
+            let v = self.bodies.linvel[other as usize];
+            // **冲击判据 = 沿接触法向的接近速度**（不是体速！）：
+            // 贴地滑行是切向运动，体速很大但不该破坏——按体速判会一路挖穿
+            // 自己脚下的地板（实测：8 m/s 滑行弹体把地板挖穿 ⇒ 碎块逃逸）。
+            // 法线 a→b：other 在 a 侧 ⇒ 接近速度 = v·n；在 b 侧 ⇒ −v·n。
+            let approach = if other_is_a {
+                v.dot(m.normal)
+            } else {
+                -v.dot(m.normal)
+            };
+            if approach < speed_threshold {
+                continue;
+            }
+            let sp = approach;
+            // 接触点 = 流形点均值（确定性）
+            let n = m.points.len().max(1) as f32;
+            let mut c = Vec3::ZERO;
+            for p in m.points.iter() {
+                c += p.point;
+            }
+            // 冲击体沿冲击方向的半径（保守：包围球半径）——挖域从它之外开始
+            let reach = self.bodies.shape[other as usize]
+                .bounding_sphere_radius()
+                .min(2.0);
+            digs.push((c * (1.0 / n), sp, v, reach));
+        }
+        let mut total = 0usize;
+        for (c, sp, v, reach) in digs {
+            // 挖出半径随**实际冲击速度**增长（钳到 0.25..0.9 m）
+            let r = (0.2 + 0.06 * sp).clamp(0.25, 0.9);
+            let dir = if v.length_squared() > 1e-9 {
+                v.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            // **弹坑 = 球域**（任意形状切割第一步）：球心 = 接触点 + 冲击方向 ×
+            // 1.05r ⇒ 坑的**近缘正好落在接触点**、整体在材料里（薄墙会被打穿，
+            // 物理如此）；与冲击体只在接近点相切、不重叠。
+            let _ = reach;
+            let center = c + dir * (r * 1.05);
+            // 碎块**静止生成**（初速留给调用方用 `spawn_box_debris_vel` 显式给；
+            // 引擎不凭空造动量——「继承半速」实测是能量源，已否）。
+            total += self.carve_sphere(id, center, r, density);
+        }
+        total
+    }
+
+    /// 提供者集合只读视图（体素体诊断/可视化用）。
+    pub fn providers(&self) -> &Providers {
+        &self.providers
+    }
+
+    /// 提供者数据变化（如体素挖洞）后刷新宽相 AABB（确定性：按 id 序全量重算）。
+    pub fn refresh_provider_bounds(&mut self) {
+        for id in 0..self.providers.len() as u32 {
+            if let Some(b) = self.providers.bounds(id) {
+                self.provider_bounds[id as usize] = b;
+            }
+        }
     }
 
     pub fn add_field(&mut self, field: Box<dyn ForceField>) {
@@ -238,11 +498,17 @@ impl World {
         let maxa = self.config.max_angular_velocity;
         Integrator::integrate_velocities(&mut self.bodies, Vec3::ZERO, dt, maxl, maxa);
         self.timings.integrate_vel_us += t0.elapsed().as_micros() as u64;
-        // 3) 宽相。
+        // 3) 宽相（先注入步长：速度自适应 fat 边距用）。
         let t0 = std::time::Instant::now();
+        self.broad.set_step(dt);
         let pairs = self
             .broad
-            .compute_pairs(&self.bodies, &self.hf_bounds, self.jobs.as_ref())
+            .compute_pairs(
+                &self.bodies,
+                &self.hf_bounds,
+                &self.provider_bounds,
+                self.jobs.as_ref(),
+            )
             .to_vec();
         self.timings.broadphase_us += t0.elapsed().as_micros() as u64;
         // 4) 窄相。
@@ -251,6 +517,7 @@ impl World {
             &self.bodies,
             &pairs,
             self.terrain.slice(),
+            &self.providers,
             &mut self.manifolds,
             self.jobs.as_ref(),
         );
@@ -328,14 +595,22 @@ impl World {
                     &self.bodies,
                     &pairs,
                     self.terrain.slice(),
+                    &self.providers,
                     &mut self.ccd_manifolds,
                     self.jobs.as_ref(),
                 );
                 if let Some(m) = self.ccd_manifolds.first() {
                     // 法线 a→b；换算成「推离表面、指向动体」的方向。
                     let n_into_body = if m.a == i as u32 { -m.normal } else { m.normal };
-                    hit = Some((t, n_into_body));
-                    break;
+                    // **只有「正在接近表面」的采样才算命中**（命中判据细化，本轮修复）：
+                    // 贴地滑行/静置的体在每个采样都天生有接触，按「有接触即命中」会
+                    // 把它钳回起点、原地锁死（实测：弹体滑到墙前 0.1 m 停住）。
+                    // 接近判据：法线指向动体 ⇒ 速度沿它 < 0 即压向表面。
+                    let closing = n_into_body.dot(v) < 0.0;
+                    if closing {
+                        hit = Some((t, n_into_body));
+                        break;
+                    }
                 }
             }
             if let Some((t_hit, n_into_body)) = hit {
@@ -409,6 +684,168 @@ mod tests {
         // 静置在 y ≈ 0.5 + 少许穿透修正余量。
         assert!(y > 0.45 && y < 0.62, "y = {y}");
         assert!(w.health().is_clean());
+    }
+
+    /// **M2 贯通切片**（ROUTE §7）：**刚体 ↔ 体素**——盒经 `Shape::Provider` 路径
+    /// 落在体素地面上并入睡（跨域唯一通道 `ProviderColliders` 的第一条端到端用例）。
+    #[test]
+    fn box_falls_and_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0)); // 顶面 y = 1.0
+        let marker = w.add_voxel(vol);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.0, 2.5, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在体素顶面（y=1.0）上方：y ≈ 1.5 + 少许穿透修正余量。
+        assert!(y > 1.42 && y < 1.60, "y = {y}");
+        assert!(!w.bodies.awake[b as usize], "盒应已入睡（静置 10s）");
+        assert!(w.health().is_clean());
+        // marker 体（provider）保持静止：位置零漂移。
+        assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+    }
+
+    /// M2 provider 通道扩到**球**：球经 SDF 解析接触（`depth = r − sdf(c)`）
+    /// 落在体素地面上并入睡；顺带覆盖「斜坡不穿透」。
+    #[test]
+    fn sphere_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0));
+        w.add_voxel(vol);
+        let b = w.add_dynamic(
+            Shape::Sphere { radius: 0.4 },
+            Vec3::new(0.25, 2.0, 0.25),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在体素顶面（y=1.0）上方：y ≈ 1.4
+        assert!(y > 1.32 && y < 1.50, "y = {y}");
+        assert!(!w.bodies.awake[b as usize], "球应已入睡");
+        assert!(w.health().is_clean());
+    }
+
+    /// **M3 破坏切片**：体素柱被「切掉顶部」⇒ 顶部转成刚体碎块，落在余柱上停驻；
+    /// 余柱（仍在体素体里）与碎块共同构成确定性可继续推进的场景。
+    #[test]
+    fn carve_top_spawns_debris_resting_on_column() {
+        let mut w = World::new(PhysConfig::default());
+        // 柱：X/Z ∈ [−0.5,0.5]、Y ∈ [0,4)，格边长 0.5（8 层 × 2×2）
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-2.0, 0.0, -2.0), 0.5, 8, 8, 8);
+        vol.fill_box(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 4.0, 0.5));
+        w.add_voxel(vol);
+        // 切掉顶部 1m（Y ∈ [3,4)）⇒ 碎块（2×2×2 格 ⇒ 贪心合并为 1 个 1m 立方）
+        let n = w.spawn_box_debris(
+            0,
+            Vec3::new(-0.5, 3.0, -0.5),
+            Vec3::new(0.5, 4.0, 0.5),
+            1000.0,
+        );
+        assert_eq!(n, 1, "顶部 8 格应合并为 1 个碎块盒");
+        for _ in 0..600 {
+            w.step();
+        }
+        let h = w.health();
+        assert!(h.is_clean(), "无 NaN / 无深穿透");
+        // 碎块落在余柱顶面（y=3.0）上方：中心 ≈ 3.5
+        let mut top = 0.0f32;
+        for i in 0..w.bodies.len() {
+            if w.bodies.is_dynamic(i) {
+                top = top.max(w.bodies.position[i].y);
+            }
+        }
+        assert!(top > 3.3 && top < 3.7, "碎块应停在余柱上，实际 top={top}");
+    }
+
+    /// **M3 冲击破坏**：高速盒撞体素墙 ⇒ 接触点处挖洞并产出碎块；墙体素减少、
+    /// 场景干净，且**整轮可复现**（同一构造两次 → 碎块数/末态哈希一致）。
+    #[test]
+    fn impact_carves_wall_and_spawns_debris() {
+        let run = || -> (usize, usize, usize, u128) {
+            let mut w = World::new(PhysConfig::default());
+            // 地板（整幅 1 层）+ 墙（X ∈ [0,0.5]、Y ∈ [0.5,2.5)、Z ∈ [−2,2)）
+            let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
+                Vec3::new(-4.0, 0.0, -4.0),
+                0.5,
+                16,
+                16,
+                16,
+            );
+            vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 0.5, 4.0));
+            vol.fill_box(Vec3::new(0.0, 0.5, -2.0), Vec3::new(0.5, 2.5, 2.0));
+            let filled0 = vol.filled_count();
+            w.add_voxel(vol);
+            // 炮弹：半 0.4 的盒，以 12 m/s 冲墙
+            let bullet = w.add_dynamic(
+                Shape::Box {
+                    half: Vec3::splat(0.4),
+                },
+                Vec3::new(-3.0, 1.0, 0.0),
+                Quat::IDENTITY,
+                2000.0,
+            );
+            w.bodies.linvel[bullet as usize] = Vec3::new(12.0, 0.0, 0.0);
+            let mut debris_total = 0usize;
+            for _ in 0..240 {
+                w.step();
+                debris_total += w.apply_impact_destruction(0, 3.0, 1000.0);
+            }
+            let filled1 = w.providers.voxel(0).unwrap().filled_count();
+            let bodies = w.bodies.len();
+            (debris_total, filled0 - filled1, bodies, w.state_hash())
+        };
+        let (debris, carved, _bodies, hash1) = run();
+        assert!(debris > 0, "应触发冲击破坏（产出碎块）");
+        assert!(carved > 0, "墙体素应减少（挖洞）carved={carved}");
+        let (debris2, carved2, _b, hash2) = run();
+        assert_eq!((debris, carved), (debris2, carved2), "破坏应可复现（计数）");
+        assert_eq!(hash1, hash2, "破坏应可复现（末态哈希逐位一致）");
+    }
+
+    /// **CCD 回归**（本轮修复）：开启 CCD 后，**贴地滑行**的体不得被锁死。
+    /// 修前：每个扫描采样都有地面接触 ⇒ 判「命中」⇒ 钳回起点、原地停住。
+    /// 修后：只有「沿法向接近」的采样才算命中 ⇒ 切向滑行不受影响。
+    #[test]
+    fn ccd_does_not_lock_sliding_body() {
+        let cfg = PhysConfig {
+            ccd_speed_threshold: 5.0,
+            ..PhysConfig::default()
+        };
+        let mut w = World::new(cfg);
+        let hf = HeightField::flat(-20.0, -20.0, 41, 41, 1.0, 0.0);
+        w.add_heightfield(hf);
+        // 贴地盒（底面 y=0.5 略上方）以 8 m/s 沿 +X 滑行（超过 CCD 阈值 5）
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.0, 0.55, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        w.bodies.linvel[b as usize] = Vec3::new(8.0, 0.0, 0.0);
+        for _ in 0..60 {
+            w.step();
+        }
+        let x = w.bodies.position[b as usize].x;
+        // 摩擦会减速，但绝不该「原地不动」：修前 x ≈ 0，修后应有明显位移
+        assert!(x > 2.0, "CCD 不应锁死滑行体：x = {x}");
     }
 
     #[test]

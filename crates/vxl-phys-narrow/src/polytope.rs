@@ -9,7 +9,7 @@ use vxl_phys_core::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub struct ConvexPolytope {
-    /// 展开顶点：面 i 的顶点 = verts[face_start[i]..face_start[i+1]]。
+    /// 展开顶点：面 i 的顶点 = `verts[face_start[i]..face_start[i+1]]`。
     pub verts: Vec<Vec3>,
     pub face_normal: Vec<Vec3>,
     pub face_start: Vec<u32>,
@@ -171,5 +171,40 @@ mod tests {
     fn box_has_three_unique_edge_dirs() {
         let p = ConvexPolytope::box_polytope(Vec3::splat(0.5));
         assert_eq!(p.edge_dirs.len(), 3);
+    }
+
+    /// 钉板：盒多面体的面法线/棱方向「顺序 + 取向」是 SAT 的隐含契约。
+    ///
+    /// - `face_normal[0]/[2]/[4]` 必须是 +X/+Y/+Z（T3 extents 快路径按此
+    ///   下标配对 half 分量，顺序一改即静默错算）；
+    /// - SAT 严格 `>` 首次极大值平局规则依赖轴序列顺序，重排 = 全局行为变更。
+    ///
+    /// 任何重排都必须在此测试显式更新，不允许无感漂移。
+    #[test]
+    fn box_axis_order_and_orientation_is_pinned() {
+        let p = ConvexPolytope::box_polytope(Vec3::new(0.5, 1.0, 2.0));
+        let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let expect_axes = [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
+        assert_eq!(p.face_normal.len(), 6);
+        for (i, e) in expect_axes.iter().enumerate() {
+            assert_eq!(bits(p.face_normal[i]), bits(*e), "face_normal[{i}]");
+        }
+        // 棱方向：finish() 按面序首次出现去重 → [+Y, +Z, +X]（全正取向）。
+        let expect_edges = [Vec3::Y, Vec3::Z, Vec3::X];
+        assert_eq!(p.edge_dirs.len(), 3);
+        for (i, e) in expect_edges.iter().enumerate() {
+            assert_eq!(bits(p.edge_dirs[i]), bits(*e), "edge_dirs[{i}]");
+        }
+        // 盒三轴互叉必为单位轴（9 对全非退化 → SAT 棱轴数恒为 9，无跳过）。
+        for &ea in &p.edge_dirs {
+            for &eb in &p.edge_dirs {
+                let c = ea.cross(eb);
+                let l2 = c.length_squared();
+                assert!(
+                    l2 < 1e-8 || (l2 - 1.0).abs() < 1e-6,
+                    "cross {ea:?}×{eb:?} 非退化但非单位：{l2}"
+                );
+            }
+        }
     }
 }

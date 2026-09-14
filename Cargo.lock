@@ -244,6 +244,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vxl-phys-aero"
+version = "0.1.0"
+
+[[package]]
 name = "vxl-phys-broad"
 version = "0.1.0"
 dependencies = [
@@ -336,11 +340,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vxl-phys-vehicle"
-version = "0.1.0"
-
-[[package]]
-name = "vxl-phys-vehicles-air"
+name = "vxl-phys-wheeled"
 version = "0.1.0"
 
 [[package]]

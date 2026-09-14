@@ -1,6 +1,6 @@
-//! # vxl-phys-vehicles-air
+//! # vxl-phys-aero
 //!
-//! 飞行器（§1 vxl-phys-vehicles-air）：面元气动力 —— M2+ 落地。
+//! 气动域（面元气动力）—— M2+ 落地。
 //! 每三角面：F = ½ρ·Cd·A·(v_wind − v_tri)·|v_rel|（Bridson 线化气动力，与布料 §4.7 同通道）。
 
 #![forbid(unsafe_code)]

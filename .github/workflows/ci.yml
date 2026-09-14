@@ -1,19 +1,146 @@
 name: ci
 
-# M0 四门禁（V2 §5）：{测试 + clippy + fmt} × 三编译器矩阵、miri、loom、TSan、ASan；
-# 加确定性矩阵（三编译器 + aarch64 的跨平台哈希比对）与词汇禁令扫描。
-# 四门禁 = 提交门：任一红即阻断合入。
+# 门禁分层（V2 §5 + M1 静态层）：
+#   ① 提交门（四门禁）：{测试 + clippy + fmt} × 三编译器矩阵、miri、loom、TSan、ASan；
+#   ② 静态层：文本/工作流（typos / actionlint / zizmor / 纪律扫描 / 词汇）、
+#      依赖图（cargo-deny / cargo-machete）、文档与强化 lint（rustdoc -D warnings、
+#      clippy 强化档）；
+#   ③ 确定性层：三编译器 + aarch64 的跨平台哈希比对；
+#   ④ 报告层（不阻断）：覆盖率。
+# 汇总门 `gates-summary` 把 ①②③ 收敛成**一个状态**——Free 私有仓无「必需检查」
+# 功能，单状态即事实上的分支门（任一前置门未成功 → 汇总红）。
+#
+# 安全基线（zizmor 审计）：workflow 级 `permissions: contents: read` 最小权限、
+# checkout `persist-credentials: false`（凭据不落盘）、第三方 action 全部按 commit
+# SHA 固定（唯一例外 = dtolnay/rust-toolchain 的 stable/nightly 滚动 ref，见其行内
+# 豁免注释与理由）。
+#
+# 成本控制（2026-09-13）：私有仓 Actions 分钟计费——
+# ① 同分支新推送自动取消旧运行（高频推送下旧运行不再烧完整管线）；
+# ② 纯文档/工具目录改动跳过（docs/**、**/*.md、gold-sample/** 不产出引擎
+#    二进制，门禁无判定力；gold-sample 为独立包不进 workspace）；
+# ③ 编译类 job 统一挂 rust-cache（Cargo.lock 键控）；
+# ④ 零编译的文本层检查合并在一个 job 内（省 runner 分配开销）。
+# 注：改动引擎代码的任何提交仍跑全部门禁（纪律不变）。
 
 on:
   push:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "gold-sample/**"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "gold-sample/**"
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 最小权限：全部 job 只读仓库内容（无需写权限；产物上传由 action 自身完成）。
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  # 本机常备 `.cargo/config.toml`（非 ASCII 路径规避：target-dir = C:/vxl-wl-target，
+  # 该文件在 .gitignore 内、不入仓）。此处显式固定 CI 的 target 目录：既让缓存与
+  # 产物路径符合预期，也让「哪天本地配置被误提交」不至于在 runner 上造出 `C:` 目录。
+  CARGO_TARGET_DIR: target
 
 jobs:
-  # ---- 矩阵①：三编译器 × 全量测试/静态检查 ----
+  # ==================== 静态层 ①：文本与工作流（零编译，单 job 合并） ====================
+  static-text:
+    name: 静态 (文本/工作流/纪律)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      # 工具逐个安装（首次 CI 实测：合并写法 `tool: a,b,c` 在安装步失败——exit 76；
+      # 拆成独立步骤后失败可归因到具体工具，且各自的 manifest/版本独立解析）。
+      - name: 安装 typos
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: typos
+      - name: 安装 actionlint（Go 工具，install-action 无此条目 ⇒ 取 release 资产 + 校验哈希）
+        env:
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          curl -sSL -o actionlint.tar.gz \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+          actionlint --version
+      - name: 安装 zizmor
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: zizmor
+      - name: 拼写（typos；豁免项见 _typos.toml）
+        run: typos .
+      - name: 工作流语法（actionlint）
+        run: actionlint
+      - name: 工作流安全审计（zizmor：未固定 action/权限过大/表达式注入/凭据残留）
+        env:
+          # 提供 token ⇒ 启用在线审计（已知易受攻击的 action 版本、仿冒提交等）；
+          # 无 token 时 zizmor 自动降级为离线审计并如实提示。
+          GH_TOKEN: ${{ github.token }}
+        run: zizmor --persona=regular .
+      - name: 纪律扫描（forbid 覆盖 / 零 unsafe / 零 f64 / 零 SIMD 内建 / 零 fast-math）
+        run: bash scripts/discipline_scan.sh .
+      - name: 词汇禁令扫描（裁决 61）
+        run: bash scripts/vocab_scan.sh .
+
+  # ==================== 静态层 ②：依赖图 ====================
+  static-deps:
+    name: 静态 (依赖)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: 安装依赖审计工具
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-deny,cargo-machete
+      - name: 依赖审计（公告 / 许可白名单 / 禁用 / 来源；配置见 deny.toml）
+        run: cargo deny check
+      - name: 未使用依赖（cargo-machete）
+        run: cargo machete
+
+  # ==================== 静态层 ③：文档与强化 lint ====================
+  static-code:
+    name: 静态 (文档/强化 lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] 该 action 的 ref 即工具链名（stable/nightly），无固定 SHA 语义
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: rustdoc 警告即错误（含 broken intra-doc links）
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+      - name: 强化档 clippy（在 -D warnings 之上追加项目纪律 lint）
+        run: >-
+          cargo clippy --workspace --all-targets --
+          -D warnings
+          -D clippy::todo
+          -D clippy::unimplemented
+          -D clippy::dbg_macro
+          -D clippy::mem_forget
+          -D clippy::undocumented_unsafe_blocks
+          -D clippy::let_underscore_must_use
+
+  # ==================== 矩阵①：三编译器 × 全量测试/静态检查 ====================
   matrix:
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -25,10 +152,13 @@ jobs:
           - { os: ubuntu-latest, label: "GCC / x86_64", linker: "" }
           - { os: ubuntu-latest, label: "Clang+LLD / x86_64", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
         with:
           components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Clang 工具链（clang 行）
         if: contains(matrix.label, 'Clang')
         run: sudo apt-get update && sudo apt-get install -y clang lld
@@ -43,42 +173,51 @@ jobs:
           RUSTFLAGS: ${{ matrix.linker }}
         run: cargo test --workspace --release
 
-  # ---- 门①：miri（子集 = vxl-phys-core 单测；UB/别名/泄漏）----
+  # ==================== 门①：miri（子集 = vxl-phys-core 单测；UB/别名/泄漏） ====================
   miri:
     name: miri (core 子集)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
         with:
           components: miri
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: miri test -p vxl-phys-core
         env:
           MIRIFLAGS: -Zmiri-strict-provenance
         run: cargo +nightly miri test -p vxl-phys-core --lib
 
-  # ---- 门②：loom（并发原语模型；见 crates/vxl-phys-core/tests/loom_primitives.rs）----
+  # ==================== 门②：loom（并发原语模型；见 crates/vxl-phys-core/tests/loom_primitives.rs） ====================
   loom:
     name: loom (并发原语)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: loom 模型测试
         env:
           RUSTFLAGS: --cfg loom
           LOOM_MAX_PREEMPTIONS: 3
         run: cargo test -p vxl-phys-core --test loom_primitives
 
-  # ---- 门③：TSan（数据竞争；跑并行契约测试）----
+  # ==================== 门③：TSan（数据竞争；跑并行契约测试） ====================
   tsan:
     name: TSan (并行路径)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
         with:
           components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: TSan 并行契约测试
         env:
           RUSTFLAGS: -Zsanitizer=thread
@@ -88,15 +227,18 @@ jobs:
           cargo +nightly test --release -Zbuild-std \
             --target x86_64-unknown-linux-gnu -p vxl-phys --lib parallel
 
-  # ---- 门④：ASan（地址/越界/泄漏；core 单测 + 门槛场景短跑）----
+  # ==================== 门④：ASan（地址/越界/泄漏；core 单测 + 门槛场景短跑） ====================
   asan:
     name: ASan (core + 门槛短跑)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@nightly # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
         with:
           components: rust-src
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: ASan core 单测
         env:
           RUSTFLAGS: -Zsanitizer=address
@@ -110,7 +252,7 @@ jobs:
           CARGO_PROFILE_RELEASE_LTO: "false"
         run: cargo +nightly run --release -p vxl-phys --example m0_gates
 
-  # ---- 确定性矩阵：三编译器各跑门槛与 10 轮哈希，上传产物 ----
+  # ==================== 确定性矩阵：三编译器各跑门槛与 10 轮哈希，上传产物 ====================
   determinism:
     name: 确定性 (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
@@ -122,8 +264,11 @@ jobs:
           - { os: ubuntu-latest, label: "GCC", linker: "" }
           - { os: ubuntu-latest, label: "Clang", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Clang 工具链（clang 行）
         if: contains(matrix.label, 'Clang')
         run: sudo apt-get update && sudo apt-get install -y clang lld
@@ -135,22 +280,33 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.linker }}
         run: cargo run --release -p vxl-phys --example determinism | tee determinism-${{ matrix.label }}.txt
-      - uses: actions/upload-artifact@v4
+      # T6 8A 碰撞行：**报告层，不阻断**——计时随 runner 而异（验收以本机数字为准），
+      # 故退出码只记录不拦门；JSON 报告进产物（含 env / p50 / p95 / 首帧建树分项）。
+      - name: 8A 碰撞行（报告，不阻断）
+        continue-on-error: true
+        env:
+          RUSTFLAGS: ${{ matrix.linker }}
+        run: cargo run --release -p vxl-phys --example m1_collision_row -- row-${{ matrix.label }}.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gates-${{ matrix.label }}
           path: |
             gates-${{ matrix.label }}.json
             determinism-${{ matrix.label }}.txt
+            row-${{ matrix.label }}.json
 
-  # ---- 确定性矩阵：aarch64 交叉编译 + QEMU 实跑（私有仓无托管 ARM runner 时的等价覆盖）----
+  # ==================== 确定性矩阵：aarch64 交叉编译 + QEMU 实跑（私有仓无托管 ARM runner 时的等价覆盖） ====================
   determinism-arm64:
     name: 确定性 (GCC-aarch64/qemu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
         with:
           targets: aarch64-unknown-linux-gnu
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: 交叉工具链 + QEMU
         run: |
           sudo apt-get update
@@ -162,18 +318,18 @@ jobs:
         run: |
           cargo run --release --target aarch64-unknown-linux-gnu -p vxl-phys --example determinism \
             | tee determinism-GCC-aarch64.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gates-GCC-aarch64
           path: determinism-GCC-aarch64.txt
 
-  # ---- 汇总：跨编译器/跨架构哈希必须全等（§5 跨平台位级一致）----
+  # ==================== 汇总：跨编译器/跨架构哈希必须全等（§5 跨平台位级一致） ====================
   hash-compare:
     name: 跨平台哈希比对
     needs: [determinism, determinism-arm64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: arts }
       - name: gate_scene.hash.final 全等断言（x86_64 三编译器）
         run: |
@@ -205,10 +361,90 @@ jobs:
           echo "唯一哈希数 = $n（应为 1；>1 即跨平台不一致）"
           test "$n" -eq 1
 
-  # ---- 词汇禁令扫描（裁决 61；施工令 T6）----
-  vocab:
-    name: 词汇禁令扫描
+  # ==================== 报告层：覆盖率（不阻断；产物供趋势观察） ====================
+  coverage:
+    name: 覆盖率 (报告)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: 安装 cargo-llvm-cov
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        with:
+          tool: cargo-llvm-cov
+      - name: 覆盖率（全量测试 + 摘要）
+        run: cargo llvm-cov --workspace --release --json --output-path cov.json --summary-only | tee cov-summary.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: coverage
+          path: |
+            cov.json
+            cov-summary.txt
+
+  # ==================== 金样层（T5）：Rapier 对照三场景（报告层，不阻断） ====================
+  # 独立包（gold-sample 自带 [workspace]，不进主 workspace）⇒ 需单列 job；首次构建要
+  # 拉 rapier 依赖图（网络 + 1-3 分钟）⇒ **只在 PR 与手动触发时跑**（推送不跑，控成本）。
+  # 报告层语义：容差表当前有已知缺口（速度/入睡两列，见 docs/M1-PLAN.md T5），故
+  # continue-on-error 且不进 gates-summary —— 红=提示，不拦门。
+  gold-sample:
+    name: 金样 (Rapier 对照)
+    if: github.event_name != 'push'
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: bash scripts/vocab_scan.sh .
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: gold-sample
+      # 配方（必须 substeps=4：默认 1 时 tower25 会塌，见 M1-PLAN T5 注）。
+      - name: 三场景对拍（col45 / pile5 / tower25）
+        working-directory: gold-sample
+        run: |
+          for s in col45 pile5 tower25; do
+            echo "=== $s ===" | tee gold-$s.txt
+            cargo run --release -- "$s" 600 16 0.01 4 3.0 30 4 2>&1 | tee -a gold-$s.txt
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: gold-sample
+          path: |
+            gold-sample/gold-*.txt
+
+  # ==================== 汇总门：任一前置门未成功 → 红（Free 私有仓无必需检查，单状态即分支门） ====================
+  gates-summary:
+    name: 汇总（提交门）
+    needs:
+      - static-text
+      - static-deps
+      - static-code
+      - matrix
+      - miri
+      - loom
+      - tsan
+      - asan
+      - determinism
+      - determinism-arm64
+      - hash-compare
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # `if: always()` 是承重的：缺了它，前置门失败会让本 job 被 SKIP，
+      # 而 GitHub 把 skipped 的必需检查视作通过——门就漏了。
+      - name: 任一前置门未成功则失败
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "::error::前置门结果：${{ join(needs.*.result, ', ') }}"
+          exit 1
+      - name: 全部前置门成功
+        run: echo "全部前置门成功（${{ join(needs.*.result, ', ') }}）"

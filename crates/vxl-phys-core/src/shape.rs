@@ -6,15 +6,28 @@
 /// 高度场句柄（数据本体在 `vxl-phys-narrow::heightfield`，账本在 `vxl-phys-terrain`）。
 pub type HeightFieldId = u32;
 
+/// 外部碰撞提供者句柄（数据本体由域 crate 持有；窄相经 `interop::ProviderColliders` 查询）。
+pub type ProviderId = u32;
+
 /// 圆柱碰撞棱柱的边数（确定性要求：固定值，不可运行时改）。
 pub const CYLINDER_SEGMENTS: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Shape {
-    Box { half: Vec3 },
-    Sphere { radius: f32 },
-    Cylinder { half_height: f32, radius: f32 },
+    Box {
+        half: Vec3,
+    },
+    Sphere {
+        radius: f32,
+    },
+    Cylinder {
+        half_height: f32,
+        radius: f32,
+    },
     HeightField(HeightFieldId),
+    /// **外部碰撞提供者体**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）：
+    /// id 索引 `interop::ProviderColliders`。静态 Marker 体，AABB 由提供者给。
+    Provider(ProviderId),
 }
 
 use crate::math::Vec3;
@@ -29,7 +42,7 @@ impl Shape {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
-            Shape::HeightField(_) => f32::INFINITY,
+            Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
         }
     }
 
@@ -39,6 +52,7 @@ impl Shape {
             Shape::Sphere { .. } => "sphere",
             Shape::Cylinder { .. } => "cylinder",
             Shape::HeightField(_) => "heightfield",
+            Shape::Provider(_) => "provider",
         }
     }
 }

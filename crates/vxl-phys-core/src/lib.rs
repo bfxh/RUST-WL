@@ -11,8 +11,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aabb;
 pub mod body;
 pub mod config;
+pub mod interop;
 pub mod mass;
 pub mod material;
 pub mod math;
@@ -20,6 +22,7 @@ pub mod mem;
 pub mod schedule;
 pub mod shape;
 
+pub use aabb::{union_aabb, Aabb};
 pub use body::{BodyId, BodySet, BodyType};
 pub use config::{FrictionModel, PhysConfig, Preset};
 pub use mass::{mass_props, MassProps};

@@ -39,6 +39,25 @@ bash scripts/vocab_scan.sh .
 - 判定：**属 M1 顶尖化靶场**（8B 万级档 ≤16.6ms 是 M1 出口；R1 清单的量化 BVH/pair 批/
   warm GJK/染色并行/SIMD 正对准这三块）。M0 门禁不设此项，如实记录基线。
 
+## 门禁分层（2026-09-13 增补：静态层 + 汇总门）
+
+M0 的四门禁（miri/loom/TSan/ASan）与三编译器矩阵保持不变；其上补**静态层**与
+**单状态汇总门**（Free 私有仓无「必需检查」功能，靠一个汇总 job 充当事实上的
+分支门）。完整说明与本地复现命令见 `docs/M1-PLAN.md` 第十七段。
+
+| 层 | job | 内容 |
+|---|---|---|
+| 静态① | `static-text` | typos（拼写，`_typos.toml` 术语豁免）/ actionlint（工作流语法）/ zizmor（工作流安全审计）/ `discipline_scan.sh`（forbid 覆盖、零 unsafe、零 f64、零 SIMD 内建、零 fast-math）/ `vocab_scan.sh` |
+| 静态② | `static-deps` | `cargo deny check`（公告/许可白名单/禁用/来源，`deny.toml`）/ `cargo machete`（未使用依赖） |
+| 静态③ | `static-code` | `RUSTDOCFLAGS=-D warnings cargo doc`（含 broken intra-doc links）/ 强化档 clippy（`todo`/`unimplemented`/`dbg_macro`/`mem_forget`/`undocumented_unsafe_blocks`/`let_underscore_must_use`） |
+| 报告 | `coverage` | `cargo llvm-cov`（`continue-on-error`，产物归档，不阻断） |
+| 汇总 | `gates-summary` | `needs` 全部前置门，`if: always()` + `contains(needs.*.result, …)`——任一 failure/cancelled/skipped 即红 |
+
+安全基线（zizmor 审计口径，当前 0 发现）：workflow 级 `permissions: contents: read`、
+checkout `persist-credentials: false`、第三方 action 按 commit SHA 固定（唯一例外 =
+`dtolnay/rust-toolchain` 的 stable/nightly 滚动 ref，行内 `# zizmor: ignore[unpinned-uses]`
+给出理由）。
+
 ## CI 实测（首轮 run 34689679069，2026-09-12）
 
 绿：loom / miri / ASan / 词汇扫描 / 三编译器矩阵（MSVC、GCC、Clang+LLD）/ 三编译器
@@ -73,10 +92,11 @@ bash scripts/vocab_scan.sh .
 3. **arena 接入面**：施工令提「每相（broad/narrow/solve）各自 arena」。M0 实际接入
    两个真实消费者：哈希规范化缓冲（每帧 alloc→reset）与 CCD 之外的热路径未动；
    宽/窄/求解三相的缓冲化与其 R1 重写同批（M1）——机制、计数与平稳性已在本相实证。
-4. **词汇禁令**：`vxl-` 前缀按施工令 §3 推荐解释豁免；`vxl-phys-vehicle` /
-   `vxl-phys-vehicles-air` 两个 crate 名（V1 §1 DAG）列入显式白名单，改名待裁
-   （全仓一次提交）；高度场网格步长字段已改名为 `spacing`（原名属禁令词）；
-   `std::cell` 为 Rust 标准库路径豁免。扫描脚本头部逐条列明白名单。
+4. **词汇禁令**：`vxl-` 前缀按施工令 §3 推荐解释豁免（引擎自身代号）；原两个
+   含禁令词的 crates 骨架已改名为 `vxl-phys-wheeled` / `vxl-phys-aero`
+   （用户裁决 2026-09-12：不留 crate 名豁免；改名提交见 git log），扫描器白名单
+   随之删除；高度场网格步长字段已改名为 `spacing`（原名属禁令词）；`std::cell`
+   为 Rust 标准库路径豁免。扫描脚本头部逐条列明白名单。
 
 ## 待用户动作
 

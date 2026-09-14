@@ -39,10 +39,10 @@ vxl-phys/
 ├─ vxl-phys-integrate   半隐式欧拉 + 固定步/子步 + 批量积分
 ├─ vxl-phys-soft        软体/布料（XPBD）
 ├─ vxl-phys-fluid       流体（SPH/PBF/FLIP）
-├─ vxl-phys-vehicle     车辆（悬挂/轮胎/传动）
+├─ vxl-phys-wheeled     地面行驶域（悬挂/轮胎/传动）
 ├─ vxl-phys-terrain     可破坏地形（高度场体素账本 + 断裂）
 ├─ vxl-phys-destruction 预断裂/运行时断裂/碎片
-├─ vxl-phys-vehicles-air  飞行器（面元气动力）
+├─ vxl-phys-aero        气动域（面元气动力）
 ├─ vxl-phys-marine      船只（浮力采样/波浪耦合）
 ├─ vxl-phys-mech        机械（齿轮/皮带/活塞/马达约束组）
 ├─ vxl-phys-field       力场注册表（重力/风/爆炸/吸引/排斥/涡流/自定义）
@@ -54,7 +54,7 @@ vxl-phys/
 
 依赖注入：各模块依赖 `trait`（如 `BroadPhase`、`Solver`、`Integrator`、
 `ForceField`、`GpuBackend`），核心不 import 具体实现——自定义实现不改核心。
-Cargo features：`gpu` / `soft` / `fluid` / `vxl-phys-vehicle` / … 默认最小
+Cargo features：`gpu` / `soft` / `fluid` / `vxl-phys-wheeled` / … 默认最小
 （core+broad+narrow+solver+integrate+island）。
 
 ## 2. 求解器本体（七子系统，技术选型定案）

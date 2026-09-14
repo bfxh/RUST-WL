@@ -53,8 +53,8 @@ pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
                 local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
             }
         }
-        // 高度场只作为静态地形存在，不参与质量属性。
-        Shape::HeightField(_) => MassProps {
+        // 高度场 / 外部 provider 只作为静态地形存在，不参与质量属性。
+        Shape::HeightField(_) | Shape::Provider(_) => MassProps {
             mass: 0.0,
             inv_mass: 0.0,
             local_inv_inertia: Vec3::ZERO,
