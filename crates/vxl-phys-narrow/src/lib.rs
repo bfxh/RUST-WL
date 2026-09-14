@@ -268,6 +268,10 @@ pub struct DefaultNarrowPhase {
     box_axes_a: Option<[Vec3; 3]>,
     box_axes_b: Option<[Vec3; 3]>,
     /// 体轴缓存（T3）：键 = (体号, 姿态指纹)。盒对路径原先**每对**都重算两体的
+    /// **外壳世界点缓存**（两侧各一份）：键 = (体号, 姿态指纹)，与 `cached_ax_*`
+    /// 同机制 ⇒ 同体同帧多对时只做一次 O(n) 世界变换（顶点采样/EPA 细化共用）。
+    hull_pts: [Vec<Vec3>; 2],
+    cached_hull: [(u32, u64); 2],
     /// 3 次旋转（同体在 (a,b) 序下连续出现，与 `cached_a/cached_b` 同机制）
     /// ⇒ 纯函数、命中即同值 ⇒ **逐位透明**。两槽分别给对的两个侧别。
     cached_ax_a: (u32, u64, [Vec3; 3]),
@@ -460,6 +464,32 @@ impl DefaultNarrowPhase {
             .map(|h| gjk::fracture_voronoi_hull(h, seeds))
     }
 
+    /// 填充「外壳世界点缓存」（side：0 = 对侧 a、1 = 侧 b）。
+    /// 返回 true = 该形状是外壳且缓存已就绪（点列在 `self.hull_pts[side]`）。
+    fn fill_hull_world(
+        &mut self,
+        side: usize,
+        body: u32,
+        shape: &Shape,
+        pos: Vec3,
+        rot: Quat,
+    ) -> bool {
+        let Shape::ConvexHull { hull, .. } = *shape else {
+            return false;
+        };
+        let fp = rot_fp(rot);
+        if self.cached_hull[side] != (body, fp) {
+            let m = Mat3::from_quat(rot);
+            let out = &mut self.hull_pts[side];
+            out.clear();
+            if let Some(h) = self.hulls.get(hull) {
+                out.extend(h.points.iter().map(|p| pos + m.mul_vec3(*p)));
+            }
+            self.cached_hull[side] = (body, fp);
+        }
+        true
+    }
+
     /// 形状 → 支撑体（不支持的形状返回 None）。
     fn support_of(&self, shape: &Shape, pos: Vec3, rot: Quat) -> Option<gjk::ShapeSupport<'_>> {
         match *shape {
@@ -492,7 +522,7 @@ impl DefaultNarrowPhase {
     /// - 外壳 × 高度场：暂不受理（列裁剪对任意凸壳未实现，见 ROUTE §3）。
     #[allow(clippy::too_many_arguments)] // 与 process_pair 同形（两侧位姿 + 形状 + 出参）
     fn hull_pair(
-        &self,
+        &mut self,
         a: u32,
         b: u32,
         sa: &Shape,
@@ -501,37 +531,74 @@ impl DefaultNarrowPhase {
         ra: Quat,
         pb: Vec3,
         rb: Quat,
+        heightfields: &[HeightField],
         out: &mut Vec<Manifold>,
     ) {
-        let hull_a = match *sa {
-            Shape::ConvexHull { hull, .. } => Some(hull),
-            _ => None,
+        let a_is_hull = matches!(*sa, Shape::ConvexHull { .. });
+        let (side, body_id, hshape, hpos, hrot) = if a_is_hull {
+            (0usize, a, sa, pa, ra)
+        } else {
+            (1usize, b, sb, pb, rb)
         };
-        let hull_b = match *sb {
-            Shape::ConvexHull { hull, .. } => Some(hull),
-            _ => None,
-        };
+        let other_shape = if a_is_hull { sb } else { sa };
+        // 世界点缓存（早于借支撑体：填充需要 &mut self）
+        if !self.fill_hull_world(side, body_id, hshape, hpos, hrot) {
+            return;
+        }
+
+        // —— 对方是高度场（L1）：顶点采样，与盒/圆柱版同构 ——
+        if let Shape::HeightField(hf_id) = *other_shape {
+            let Some(hf) = heightfields.get(hf_id as usize) else {
+                return;
+            };
+            self.cand.clear();
+            let n_pts = self.hull_pts[side].len();
+            for idx in 0..n_pts {
+                let v = self.hull_pts[side][idx];
+                if let Some((h, _)) = hf.sample(v.x, v.z) {
+                    let depth = h - v.y;
+                    if depth > -self.skin {
+                        self.cand.push(ContactPoint {
+                            point: Vec3::new(v.x, h, v.z),
+                            depth,
+                            feature: idx as u32,
+                        });
+                    }
+                }
+            }
+            if self.cand.is_empty() || !self.select_contacts(self.min_point_sep) {
+                return;
+            }
+            let deepest = self.cand[0];
+            let n_t = hf
+                .sample(deepest.point.x, deepest.point.z)
+                .map(|(_, n)| n)
+                .unwrap_or(Vec3::Y);
+            // 法线约定 a→b：外壳在 a（地形在 b）⇒ −n_t；否则 +n_t
+            let normal = if a_is_hull { -n_t } else { n_t };
+            out.push(Manifold {
+                a,
+                b,
+                normal,
+                points: ContactPoints::from_slice(&self.cand),
+            });
+            return;
+        }
+
+        // —— 对方是盒/球/外壳：GJK/EPA 一次法线 + 外壳近面顶点细化 ——
         let (Some(ua), Some(ub)) = (self.support_of(sa, pa, ra), self.support_of(sb, pb, rb)) else {
-            return; // 对方形状不受理（如高度场）
+            return; // 对方形状不受理
         };
         let Some((n_p, _depth, _p)) = gjk::epa(&ua, &ub, 32) else {
             return; // 未相交（宽相 fat 边距会给出近邻对）
         };
-        // 供点体 = 外壳侧（优先 a）；hull_a 为 None 则 hull_b 必为 Some（调用点保证）
-        let (hull_id, hpos, hrot, n, a_is_hull) = match (hull_a, hull_b) {
-            (Some(h), _) => (h, pa, ra, n_p, true),
-            (None, Some(h)) => (h, pb, rb, -n_p, false),
-            (None, None) => return,
-        };
-        let Some(h) = self.hulls.get(hull_id) else {
-            return;
-        };
+        let n = if a_is_hull { n_p } else { -n_p }; // 对方 → 外壳
         let other: &dyn gjk::Support = if a_is_hull { &ub } else { &ua };
         let plane = n.dot(other.support(n));
-        let hm = Mat3::from_quat(hrot);
         let mut cand: Vec<(f32, usize, Vec3)> = Vec::new();
-        for (i, lp) in h.points.iter().enumerate() {
-            let w = hpos + hm.mul_vec3(*lp);
+        let n_pts = self.hull_pts[side].len();
+        for i in 0..n_pts {
+            let w = self.hull_pts[side][i];
             let d = plane - n.dot(w);
             if d > -self.skin {
                 cand.push((d, i, w));
@@ -584,6 +651,8 @@ impl DefaultNarrowPhase {
             box_b: None,
             box_axes_a: None,
             box_axes_b: None,
+            hull_pts: [Vec::new(), Vec::new()],
+            cached_hull: [(u32::MAX, u64::MAX), (u32::MAX, u64::MAX)],
             cached_ax_a: (u32::MAX, u64::MAX, [Vec3::ZERO; 3]),
             cached_ax_b: (u32::MAX, u64::MAX, [Vec3::ZERO; 3]),
             ref_v: Vec::new(),
@@ -1161,6 +1230,7 @@ impl NarrowPhase for DefaultNarrowPhase {
         self.cached_b = (u32::MAX, u64::MAX);
         self.cached_ax_a = (u32::MAX, u64::MAX, [Vec3::ZERO; 3]);
         self.cached_ax_b = (u32::MAX, u64::MAX, [Vec3::ZERO; 3]);
+        self.cached_hull = [(u32::MAX, u64::MAX), (u32::MAX, u64::MAX)];
         let threads = jobs.threads();
         // 小规模串行（线程启动开销 > 收益）；并行 = 每块独立 clone（含自有
         // scratch），结果按块序拼接 = pair 序（§5 确定性契约）。
@@ -1267,15 +1337,17 @@ impl DefaultNarrowPhase {
                 }
                 // 外壳 vs 提供者：**顶点采样**（逐顶点按 SDF 解析求深度/法线；
                 // 多点 ⇒ 面接触稳定）。顶点序即特征序之外的 provider 特征由各点给。
-                Shape::ConvexHull { hull, .. } => {
-                    let Some(h) = self.hulls.get(hull) else {
+                Shape::ConvexHull { .. } => {
+                    // 世界点走缓存（同体同帧多对时只做一次 O(n) 变换）
+                    let side = if pr_is_a { 1 } else { 0 };
+                    let body = if pr_is_a { b } else { a };
+                    if !self.fill_hull_world(side, body, body_shape, bpos, brot) {
                         return;
-                    };
-                    let m = vxl_phys_core::Mat3::from_quat(brot);
+                    }
                     let mut supported = false;
-                    for p in h.points.iter() {
-                        let w = bpos + m.mul_vec3(*p);
-                        supported |= providers.contacts_point(id, w, band, &mut buf);
+                    for k in 0..self.hull_pts[side].len() {
+                        supported |=
+                            providers.contacts_point(id, self.hull_pts[side][k], band, &mut buf);
                     }
                     supported
                 }
@@ -1340,7 +1412,7 @@ impl DefaultNarrowPhase {
         // **凸体外壳参与的对**（多边形域）：外壳 × {盒|球|外壳} → GJK/EPA。
         // 与提供者的组合已在上面的 provider 分支处理；与高度场暂不受理。
         if matches!(*sa, Shape::ConvexHull { .. }) || matches!(*sb, Shape::ConvexHull { .. }) {
-            self.hull_pair(a, b, sa, sb, pa, ra, pb, rb, out);
+            self.hull_pair(a, b, sa, sb, pa, ra, pb, rb, heightfields, out);
             return;
         }
 

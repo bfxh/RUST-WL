@@ -57,6 +57,16 @@ impl Splat {
     }
 }
 
+/// 均匀网格（密集 `Vec<Vec<u32>>`；按注册序登记 ⇒ 格内索引自然升序。
+/// **格内序 = 注册序** ⇒ 查询求和顺序与全扫一致 ⇒ 逐位一致，见模组测试）。
+#[derive(Clone, Debug)]
+struct Grid {
+    origin: Vec3,
+    inv_cell: f32,
+    dims: (u32, u32, u32),
+    bins: Vec<Vec<u32>>,
+}
+
 /// 高斯喷溅场（隐式场；实现提供者接口）。
 #[derive(Clone, Debug)]
 pub struct GaussianSplatField {
@@ -65,7 +75,14 @@ pub struct GaussianSplatField {
     pub iso: f32,
     /// 截断（α 超过该值不再计入；9 = 3σ）。
     pub cut: f32,
+    /// 加速结构（`rebuild_grid` 建；`push` 置脏为 None ⇒ 不建即为全扫）。
+    grid: Option<Grid>,
+    /// 建网格的门槛（核数少时全扫更快；0 = 总是建）。
+    pub grid_min_splats: usize,
 }
+
+/// 建网格的格数上限（超限不建，退回全扫；防内存灾难）。
+const GRID_MAX_CELLS: u64 = 4 << 20;
 
 impl Default for GaussianSplatField {
     fn default() -> Self {
@@ -79,11 +96,73 @@ impl GaussianSplatField {
             splats: Vec::new(),
             iso,
             cut: 9.0,
+            grid: None,
+            grid_min_splats: 64,
         }
     }
 
     pub fn push(&mut self, s: Splat) {
         self.splats.push(s);
+        self.grid = None; // 脏（下次查询退回全扫；需要时重建）
+    }
+
+    /// 建/重建均匀网格（格边长 = 3·max(尺度)；超限或核数不足则建空）。
+    /// 幂等：重复调用结果相同（确定性）。
+    pub fn rebuild_grid(&mut self) {
+        self.grid = None;
+        let n = self.splats.len();
+        if n < self.grid_min_splats {
+            return;
+        }
+        let mut max_s = 0.0f32;
+        for s in &self.splats {
+            max_s = max_s.max(s.scale.x).max(s.scale.y).max(s.scale.z);
+        }
+        let cell = max_s * 3.0;
+        if cell <= 1e-6 {
+            return;
+        }
+        let b = self.world_bounds();
+        let dims = (
+            ((b.max.x - b.min.x) / cell).ceil() as u32 + 1,
+            ((b.max.y - b.min.y) / cell).ceil() as u32 + 1,
+            ((b.max.z - b.min.z) / cell).ceil() as u32 + 1,
+        );
+        let cells = dims.0 as u64 * dims.1 as u64 * dims.2 as u64;
+        if cells == 0 || cells > GRID_MAX_CELLS {
+            return;
+        }
+        let mut bins: Vec<Vec<u32>> = vec![Vec::new(); cells as usize];
+        let inv_cell = 1.0 / cell;
+        for (i, s) in self.splats.iter().enumerate() {
+            let r = max_s * 3.0;
+            let lo = s.center - Vec3::splat(r);
+            let hi = s.center + Vec3::splat(r);
+            let c0 = (
+                (((lo.x - b.min.x) * inv_cell).floor().max(0.0)) as u32,
+                (((lo.y - b.min.y) * inv_cell).floor().max(0.0)) as u32,
+                (((lo.z - b.min.z) * inv_cell).floor().max(0.0)) as u32,
+            );
+            let c1 = (
+                (((hi.x - b.min.x) * inv_cell).ceil() as u32).min(dims.0 - 1),
+                (((hi.y - b.min.y) * inv_cell).ceil() as u32).min(dims.1 - 1),
+                (((hi.z - b.min.z) * inv_cell).ceil() as u32).min(dims.2 - 1),
+            );
+            for cx in c0.0..=c1.0 {
+                for cy in c0.1..=c1.1 {
+                    for cz in c0.2..=c1.2 {
+                        let idx = ((cx * dims.1 + cy) * dims.2 + cz) as usize;
+                        bins[idx].push(i as u32);
+                    }
+                }
+            }
+        }
+        self.grid = Some(Grid {
+            origin: b.min,
+            inv_cell,
+            dims,
+            bins,
+        });
     }
 
     #[inline]
@@ -101,7 +180,7 @@ impl GaussianSplatField {
         &self.splats
     }
 
-    /// 单核在 `p` 的二次型 α = Σⱼ((p−c)·uⱼ/sⱼ)²（各向异性轴对齐到 uⱼ）。
+    /// 单核二次型 α = Σⱼ((p−c)·uⱼ/sⱼ)²（各向异性轴对齐到 uⱼ）。
     #[inline]
     fn alpha(s: &Splat, ax: &[Vec3; 3], p: Vec3) -> f32 {
         let d = p - s.center;
@@ -119,11 +198,39 @@ impl GaussianSplatField {
         a
     }
 
+    /// 候选核迭代（顺序 = 注册序；有网格时只取所在格的登记表 ⇒ 与全扫逐位一致）。
+    #[inline]
+    fn candidates(&self, p: Vec3) -> impl Iterator<Item = &Splat> {
+        let empty: &[u32] = &[];
+        let (list, all) = match &self.grid {
+            Some(g) => {
+                let cx = ((p.x - g.origin.x) * g.inv_cell).floor();
+                let cy = ((p.y - g.origin.y) * g.inv_cell).floor();
+                let cz = ((p.z - g.origin.z) * g.inv_cell).floor();
+                if cx < 0.0 || cy < 0.0 || cz < 0.0 {
+                    (empty, false)
+                } else {
+                    let (cx, cy, cz) = (cx as u32, cy as u32, cz as u32);
+                    if cx >= g.dims.0 || cy >= g.dims.1 || cz >= g.dims.2 {
+                        (empty, false)
+                    } else {
+                        let i = ((cx * g.dims.1 + cy) * g.dims.2 + cz) as usize;
+                        (g.bins[i].as_slice(), false)
+                    }
+                }
+            }
+            None => (empty, true),
+        };
+        let splats = &self.splats;
+        let len = if all { splats.len() } else { list.len() };
+        (0..len).map(move |k| if all { &splats[k] } else { &splats[list[k] as usize] })
+    }
+
     /// 密度 σ(p) 与梯度 ∇σ(p)（解析；截断外核不计）。
     pub fn density_grad(&self, p: Vec3) -> (f32, Vec3) {
         let mut sum = 0.0;
         let mut g = Vec3::ZERO;
-        for s in &self.splats {
+        for s in self.candidates(p) {
             let ax = s.axes();
             let a = Self::alpha(s, &ax, p);
             if a > self.cut {
@@ -361,6 +468,92 @@ mod tests {
         let fz = f.sdf(Vec3::new(0.0, 0.0, 0.8));
         let fx = f.sdf(Vec3::new(0.8, 0.0, 0.0));
         assert!(fz < fx, "fz={fz} fx={fx}（Z 向应更“实”）");
+    }
+
+    /// **L3 验收主判据**：网格加速与全扫**逐位一致**（格内索引升序 = 注册序）。
+    #[test]
+    fn grid_matches_brute_force_bitwise() {
+        let mut f = GaussianSplatField::new(0.5);
+        let mut st: u32 = 0x1234_5678;
+        let mut next = move || {
+            st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (st >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..200 {
+            let c = Vec3::new(next() * 4.0 - 2.0, next() * 4.0 - 2.0, next() * 4.0 - 2.0);
+            let r = 0.15 + next() * 0.3;
+            f.push(Splat::isotropic(c, r, 0.4 + next()));
+        }
+        let mut pts = Vec::new();
+        let mut st2: u32 = 0x9e37_79b9;
+        let mut next2 = move || {
+            st2 = st2.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (st2 >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..500 {
+            pts.push(Vec3::new(
+                next2() * 6.0 - 3.0,
+                next2() * 6.0 - 3.0,
+                next2() * 6.0 - 3.0,
+            ));
+        }
+        // 全扫基线（未建网格）
+        let brute: Vec<(f32, Vec3)> = pts.iter().map(|&p| f.density_grad(p)).collect();
+        f.rebuild_grid();
+        for (i, &p) in pts.iter().enumerate() {
+            let g = f.density_grad(p);
+            assert_eq!(g.0.to_bits(), brute[i].0.to_bits(), "σ 不一致 @{i}");
+            assert_eq!(g.1.x.to_bits(), brute[i].1.x.to_bits(), "gx @{i}");
+            assert_eq!(g.1.y.to_bits(), brute[i].1.y.to_bits(), "gy @{i}");
+            assert_eq!(g.1.z.to_bits(), brute[i].1.z.to_bits(), "gz @{i}");
+        }
+    }
+
+    /// L3 微基准（`cargo test -- --nocapture` 看数字）：全扫 vs 网格的查询耗时。
+    /// 只报数不设阈值（时间类断言在 CI 上不稳）；正确性由上面的逐位一致测试负责。
+    #[test]
+    fn grid_speedup_microbench() {
+        let mut f = GaussianSplatField::new(0.5);
+        let mut st: u32 = 0x51ed_2701;
+        let mut next = move || {
+            st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (st >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for _ in 0..2000 {
+            let c = Vec3::new(next() * 20.0 - 10.0, next() * 8.0, next() * 20.0 - 10.0);
+            f.push(Splat::isotropic(c, 0.3, 1.0));
+        }
+        let mut pts = Vec::new();
+        for _ in 0..2000 {
+            pts.push(Vec3::new(
+                next() * 20.0 - 10.0,
+                next() * 8.0,
+                next() * 20.0 - 10.0,
+            ));
+        }
+        let t0 = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for _ in 0..10 {
+            for &p in &pts {
+                acc += f.density_grad(p).0;
+            }
+        }
+        let brute = t0.elapsed().as_secs_f64();
+        f.rebuild_grid();
+        let t1 = std::time::Instant::now();
+        let mut acc2 = 0.0f32;
+        for _ in 0..10 {
+            for &p in &pts {
+                acc2 += f.density_grad(p).0;
+            }
+        }
+        let grid = t1.elapsed().as_secs_f64();
+        println!(
+            "L3 微基准（2000 核 × 2000 点 × 10 轮）：全扫 {:.1} ms | 网格 {:.1} ms | 加速 {:.1}×（acc {acc:.3} vs {acc2:.3}）",
+            brute * 1e3,
+            grid * 1e3,
+            brute / grid
+        );
     }
 
     #[test]

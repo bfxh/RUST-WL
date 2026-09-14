@@ -346,7 +346,8 @@ impl World {
 
     /// 注册**高斯喷溅场**（喷溅域）：返回 provider id + 生成静态 marker 体。
     /// 刚体（盒/球/外壳）经统一提供者通道与喷溅体接触（隐式场 `(τ−σ)/|∇σ|`）。
-    pub fn add_splat_field(&mut self, field: vxl_phys_splat::GaussianSplatField) -> BodyId {
+    pub fn add_splat_field(&mut self, mut field: vxl_phys_splat::GaussianSplatField) -> BodyId {
+        field.rebuild_grid(); // 加速结构（与全扫逐位一致；核数不足则内部退回全扫）
         let id = self.providers.push_splat(field);
         self.provider_bounds.push(
             self.providers
@@ -841,6 +842,21 @@ mod tests {
         assert!(w.health().is_clean());
         // marker 体（provider）保持静止：位置零漂移。
         assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+    }
+
+    /// **L1**：外壳落在高度场上（顶点采样；此前不受理 ⇒ 直接穿地）。
+    #[test]
+    fn hull_rests_on_heightfield() {
+        let mut w = ground_world(); // 平地高度场（y = 0）
+        let hull = w.add_hull(cube_hull_points(0.5));
+        let b = w.spawn_hull_body(hull, Vec3::new(0.1, 3.0, -0.1), Quat::IDENTITY, 1.0);
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在平地（y=0）上方：半长 0.5 ⇒ y ≈ 0.5
+        assert!(y > 0.40 && y < 0.62, "y = {y}");
+        assert!(w.health().is_clean());
     }
 
     /// **M3 多边形域**：凸体外壳落在体素地面上（外壳 × 提供者 = 顶点采样多点流形）。
