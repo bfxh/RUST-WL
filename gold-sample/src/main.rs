@@ -285,8 +285,8 @@ fn main() {
             prev_awake[k] = vw.bodies.awake[i];
         }
         // 逐帧转储（每 2 tick 一帧；两侧引擎位姿 + 各自 step 墙钟）
-        if dump_path.is_some() {
-            if t % 2 == 0 {
+        if dump_path.is_some() && t % 2 == 0 {
+            {
                 if let Some(f) = dump.as_mut() {
                     use std::io::Write as _;
                     f.write_all(&(t as u32).to_le_bytes()).unwrap();
