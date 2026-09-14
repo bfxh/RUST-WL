@@ -1672,3 +1672,30 @@ T4 5.51× 且串并行哈希同值 ✓、金样 tower25 逐项同数（0.236 / 8
 （`WarmManifold.points: Vec<WarmPoint>` 每 tick 22 万次分配+释放）。修法 = **点数据
 扁平 arena**（`warm_points: Vec<WarmPoint>` 连续 + 槽位存 (off, len)；收集直接写入
 分组 arena、串行合并时顺序拼接、保留条目重写 offset）⇒ 预期再省 ~12ms 且逐位不变。
+
+### 17. 点数据扁平 arena（2026-09-14 第十四段）：**尝试后回退**（不变量 bug），配方与判据记档
+
+**动机**（§16 残余）：泄漏探针实测「被替换旧值的释放 churn」≈11.4ms/tick——
+`WarmManifold.points: Vec<WarmPoint>` 每 tick 22 万次小 Vec 分配+释放。
+
+**实现（已回退）**：`WarmManifold` 改为 `{normal, points_off: u32, points_len: u8, seen}`
+（无堆）；点数据进**扁平 arena**（双缓冲 `warm_points` / `warm_points_scratch`，
+容量跨 tick 复用）；收集直写**分组 arena**、合并时顺序拼接并重基 offset；
+保留条目（双睡）数据搬进新 arena 并重写 offset。
+
+**实测**：8B 总均 **298.6**（vs 槽位表版 316.4，**−17.8ms**）、解算均 257.5 ⇒ 收益真实，
+**但 m0_gates 压力场景在 tick ~60 后 panic**：`range start index 138435 out of range
+for slice of length 138184`。诊断探针（打印 slot/off/len/键/seen）显示坏槽
+**`seen` 陈旧（=60，即本调用未刷新）却仍在索引里**，且 offset 超出当前 arena
+⇒ **「键→槽唯一性」不变量被破坏**（同一键出现两个槽：索引指向其一，另一槽的
+`offset` 停在旧 arena 上；剪枝时 `index.remove(key)` 只摘掉索引的那一个）。
+
+**下一步的正确做法（重做时按此）**：
+1. 在 merge 末尾加**不变量自检**（debug 断言/测试）：对每个索引键
+   `warm_slots[index[key]].0 == key && seen == stamp`；对每个活槽
+   `points_off + points_len <= arena.len()`；
+2. 排查「同键双槽」的产生点——最可能是**同一调用内同键出现两次**
+   （两处 `warm_outs` 条目都看到 `slot == u32::MAX` 各分配一次）或
+   `warm_free` 与旧索引的交互；修法优先「写入前先查索引（同键复用它已有的槽）」；
+3. 用 `m0_gates`（两个场景）+ 8B + 金样三场景判定；逐位不变是硬要求。
+**当前状态**：槽位表（§16）已落地且稳（−9.9%、逐位不变）；arena 属**未完成项**。
