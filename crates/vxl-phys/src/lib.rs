@@ -33,6 +33,25 @@ pub enum ProviderEntry {
     Splat(vxl_phys_splat::GaussianSplatField),
 }
 
+/// 形状的平均迎风面积估计（阻力用）：盒 = 三对面面积均值，球 = πr²，
+/// 其余（含外壳）取局部 AABB 近似；不可估计返回 0（不施加阻力）。
+fn cross_section_area(shape: &Shape) -> f32 {
+    match *shape {
+        Shape::Box { half } => {
+            4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
+        }
+        Shape::Sphere { radius } => std::f32::consts::PI * radius * radius,
+        Shape::Cylinder {
+            half_height,
+            radius,
+        } => 2.0 * radius * (2.0 * half_height) / 2.0 + std::f32::consts::PI * radius * radius,
+        Shape::ConvexHull { half, .. } => {
+            4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
+        }
+        Shape::HeightField(_) | Shape::Provider(_) => 0.0,
+    }
+}
+
 /// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
 #[derive(Default)]
 pub struct Providers {
@@ -603,10 +622,54 @@ impl World {
         self.tick += 1;
     }
 
+    /// **介质通道（喷溅场作介质）**：对每个动体 × 每个「密度 > 0」的喷溅场均采样，
+    /// 累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`（单侧耦合，见 `MediumField`）。
+    /// 确定性：场按 id 序、体按索引序；中线量 `v_rel = v − 介质流速`。
+    /// 零成本短路：介质密度 0 的场不采样（不是介质的喷溅场完全不受影响）。
+    fn medium_pass(&mut self) {
+        const DRAG_CD: f32 = 1.0;
+        for id in 0..self.providers.len() as u32 {
+            let Some(f) = self.providers.splat(id) else {
+                continue;
+            };
+            if f.medium_density <= 0.0 {
+                continue;
+            }
+            let bb = self.provider_bounds[id as usize];
+            for i in 0..self.bodies.len() {
+                if !self.bodies.is_dynamic(i) {
+                    continue;
+                }
+                let p = self.bodies.position[i];
+                if p.x < bb.min.x || p.x > bb.max.x || p.y < bb.min.y
+                    || p.y > bb.max.y || p.z < bb.min.z || p.z > bb.max.z
+                {
+                    continue; // 场外 = 真空
+                }
+                use vxl_phys_core::interop::MediumField as _;
+                let m = f.sample(p);
+                if m.density <= 0.0 {
+                    continue;
+                }
+                let v_rel = self.bodies.linvel[i] - m.velocity;
+                let sp = v_rel.length();
+                if sp < 1e-6 {
+                    continue;
+                }
+                let a = cross_section_area(&self.bodies.shape[i]);
+                if a <= 0.0 {
+                    continue;
+                }
+                self.bodies.force[i] += v_rel * (-0.5 * m.density * DRAG_CD * a * sp);
+            }
+        }
+    }
+
     fn substep(&mut self, dt: f32) {
-        // 1) 力场（重力在 World::new 注入注册表）。
+        // 1) 力场（重力在 World::new 注入注册表）+ 介质耦合（喷溅场作介质）。
         let t0 = std::time::Instant::now();
         self.fields.apply(&mut self.bodies);
+        self.medium_pass();
         self.timings.fields_us += t0.elapsed().as_micros() as u64;
         // 2) 速度积分。
         let t0 = std::time::Instant::now();
@@ -946,6 +1009,47 @@ mod tests {
         // 停在等值面之上（盒半长 0.4 + 顶面 ≈ 1.6 ⇒ 中心 ≈ 2.0）
         assert!(y > 1.5 && y < 2.6, "y = {y}");
         assert!(w.health().is_clean());
+    }
+
+    /// **介质耦合（喷溅域第三层）**：稀薄喷溅云（σ < iso ⇒ 不产生接触）作介质
+    /// ⇒ 落体被二次阻力减速；介质密度 0 时为纯自由落体（对照）。
+    /// 口径：两条 run 仅差 `medium_density`，其余位姿/初始条件完全相同。
+    #[test]
+    fn splat_medium_drag_slows_falling_body() {
+        let run = |medium_density: f32| -> (f32, f32) {
+            let mut w = World::new(PhysConfig::default());
+            let mut f = vxl_phys_splat::GaussianSplatField::new(4.0); // iso 高 ⇒ 纯介质、无接触
+            for k in 0..16 {
+                f.push(vxl_phys_splat::Splat::isotropic(
+                    Vec3::new(0.0, 1.0 + k as f32 * 0.5, 0.0),
+                    0.45,
+                    0.6,
+                ));
+            }
+            f.medium_density = medium_density;
+            f.medium_velocity = Vec3::ZERO;
+            w.add_splat_field(f);
+            let b = w.add_dynamic(
+                Shape::Box {
+                    half: Vec3::splat(0.3),
+                },
+                Vec3::new(0.0, 9.0, 0.0),
+                Quat::IDENTITY,
+                1.0,
+            );
+            for _ in 0..90 {
+                w.step();
+            }
+            (
+                w.bodies.position[b as usize].y,
+                w.bodies.linvel[b as usize].y,
+            )
+        };
+        let (y_free, v_free) = run(0.0);
+        let (y_drag, v_drag) = run(6.0);
+        println!("free: y={y_free:.3} v={v_free:.3} | drag: y={y_drag:.3} v={v_drag:.3}");
+        assert!(y_drag > y_free + 0.2, "介质应显著减速：free y={y_free} drag y={y_drag}");
+        assert!(v_drag > v_free + 0.5, "末速应更高（落得更慢）：{v_free} vs {v_drag}");
     }
 
     /// M2 provider 通道扩到**球**：球经 SDF 解析接触（`depth = r − sdf(c)`）

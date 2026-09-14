@@ -79,6 +79,13 @@ pub struct GaussianSplatField {
     grid: Option<Grid>,
     /// 建网格的门槛（核数少时全扫更快；0 = 总是建）。
     pub grid_min_splats: usize,
+    /// **介质参数**（`MediumField` 通道；ROUTE §3.1 第三层）：每单位 σ 的质量密度
+    /// （kg/m³）。0 = 该场只作碰撞提供者、不作介质（零成本，压缩为不采样）。
+    pub medium_density: f32,
+    /// 介质黏性系数（Pa·s / σ 单位；单侧耦合用不到，供下游求解器消费）。
+    pub medium_viscosity: f32,
+    /// 介质自身的流速（风/水流；阻力按相对速度算）。
+    pub medium_velocity: Vec3,
 }
 
 /// 建网格的格数上限（超限不建，退回全扫；防内存灾难）。
@@ -98,6 +105,9 @@ impl GaussianSplatField {
             cut: 9.0,
             grid: None,
             grid_min_splats: 64,
+            medium_density: 0.0,
+            medium_viscosity: 0.0,
+            medium_velocity: Vec3::ZERO,
         }
     }
 
@@ -394,6 +404,37 @@ impl ProviderColliders for GaussianSplatField {
         });
         true
     }
+}
+
+impl vxl_phys_core::interop::MediumField for GaussianSplatField {
+    /// 采样：密度 ∝ σ(p)（每单位 σ 的 `medium_density`）、速度 = 场流速、
+    /// 占用率 = σ/iso 钳到 0..1（iso 外为自由空间）。
+    /// `medium_density == 0` 时直接返回真空（零成本短路）。
+    fn sample(&self, x: Vec3) -> vxl_phys_core::interop::MediumSample {
+        use vxl_phys_core::interop::MediumSample;
+        if self.medium_density <= 0.0 || self.splats.is_empty() {
+            return MediumSample::VACUUM;
+        }
+        let (sigma, _) = self.density_grad(x);
+        if sigma <= 0.0 {
+            return MediumSample::VACUUM;
+        }
+        MediumSample {
+            density: sigma * self.medium_density,
+            velocity: self.medium_velocity,
+            viscosity: sigma * self.medium_viscosity,
+            temperature: 0.0,
+            occupied: if self.iso > 0.0 {
+                (sigma / self.iso).clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+        }
+    }
+
+    /// 沉积：**当前为单向耦合**（介质不因受力而改变——喷溅场是静态隐式场）。
+    /// 双向耦合（把动量沉积回核、驱动场演化）见 ROUTE §3.1 待办。
+    fn deposit(&mut self, _x: Vec3, _momentum: Vec3, _mass: f32, _pressure_work: f32) {}
 }
 
 /// **渲染桥**：导出喷溅参数（中心/尺度/姿态/透明度/颜色）——不经物理表示往返。

@@ -120,3 +120,10 @@
 - **vxl-phys-terrain**：新增 `contacts_point_voxel`（点查询：`depth = skin − sdf`）与
   `VoxelVolume::dims/origin/step` 访问器。
 - **interop**：`ProviderColliders::contacts_point`（默认 false = 不支持）。
+
+## 2026-09-14 追加（二）
+
+- **vxl-phys-splat（介质层）**：实现 `MediumField`（`sample` 密度/流速/黏性/占用率；
+  `deposit` = 单向耦合占位）。`medium_density = 0` ⇒ 短路（不作介质的场零成本）。
+- **vxl-phys 门面**：`medium_pass`（力场 → 介质阻力 → 速度积分），二次阻力
+  `F = −½ρCdA|v_rel|v_rel`；`cross_section_area` 形状迎风面积估计。
