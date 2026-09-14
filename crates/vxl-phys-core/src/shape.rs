@@ -28,6 +28,12 @@ pub enum Shape {
     /// **外部碰撞提供者体**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）：
     /// id 索引 `interop::ProviderColliders`。静态 Marker 体，AABB 由提供者给。
     Provider(ProviderId),
+    /// **凸体外壳**（多边形域）：`hull` 索引窄相 `HullStore`（点云在窄相自持，
+    /// `Shape` 保持 Copy）；`half` = 点云局部 AABB 半长（宽相 + 惯量近似用）。
+    ConvexHull {
+        hull: u32,
+        half: Vec3,
+    },
 }
 
 use crate::math::Vec3;
@@ -42,6 +48,7 @@ impl Shape {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
+            Shape::ConvexHull { half, .. } => half.length(),
             Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
         }
     }
@@ -53,6 +60,7 @@ impl Shape {
             Shape::Cylinder { .. } => "cylinder",
             Shape::HeightField(_) => "heightfield",
             Shape::Provider(_) => "provider",
+            Shape::ConvexHull { .. } => "hull",
         }
     }
 }

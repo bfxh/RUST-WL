@@ -175,6 +175,20 @@ pub trait ProviderColliders: Send + Sync {
 
     /// 「球 vs provider(id)」的接触（世界系）。SDF 类提供者可解析求解
     /// （`depth = r − sdf(center)`、法线取 SDF 梯度）；默认实现返回 false
+    /// **点查询**（探针半径 = `skin`）：`depth = skin − sdf(p)`；外壳顶点采样用。
+    /// 返回值 = **是否支持**点查询（不在接触带内也算支持、只是不推接触）；
+    /// 默认不支持（false）⇒ 调用方整体不产出接触。
+    fn contacts_point(
+        &self,
+        id: u32,
+        p: Vec3,
+        skin: f32,
+        out: &mut Vec<InteropContact>,
+    ) -> bool {
+        let _ = (id, p, skin, out);
+        false
+    }
+
     /// （未支持 ⇒ 该形状对不产生接触）。
     fn contacts_sphere(
         &self,

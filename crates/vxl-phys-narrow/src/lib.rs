@@ -4,7 +4,8 @@
 //! - 凸-凸：SAT（面法线 + 棱叉积轴）+ 参考面 Sutherland–Hodgman 裁剪 → ≤4 点流形；
 //! - 球：解析（球-球 / 球-凸体最近点）；
 //! - 高度场：列采样特化（§2.4「列裁剪 + 局部采样」的 M0 版）；
-//! - GJK/EPA 通用路径在 M1 接入（`NarrowPhase` trait 不变）。
+//! - GJK/EPA 通用凸路径：**凸体外壳 × {盒|球|外壳}**（`gjk.rs`，多点流形由外壳面顶点细化）；
+//!   **外壳 × 提供者**走顶点采样（逐顶点 SDF 解析）。
 //!
 //! 流形法线约定：`normal` 从 a 指向 b；求解器把 +n 冲量施加给 b、−n 施加给 a。
 //! skin = speculative margin（§4.3）：分离距离 ≤ skin 仍生成「预期接触」。
@@ -13,6 +14,7 @@
 // unsafe；SAFETY 注释见该模块），其余代码仍 `deny`（模块级 `allow` 仅限那里）。
 #![deny(unsafe_code)]
 
+pub mod gjk;
 pub mod heightfield;
 pub mod polytope;
 
@@ -22,7 +24,7 @@ use heightfield::HeightField;
 use polytope::ConvexPolytope;
 mod simd;
 
-use vxl_phys_core::{JobSystem, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
+use vxl_phys_core::{JobSystem, Mat3, Quat, Shape, Vec3, CYLINDER_SEGMENTS};
 
 /// 单个接触点：世界坐标 + 穿透深度（可为小的负值 = 预期接触，供 warm starting 续接）。
 #[derive(Clone, Copy, Debug, Default)]
@@ -236,6 +238,8 @@ impl WorldPoly {
 /// 默认窄相（SAT + 解析球 + 高度场采样）。工作缓冲全程复用（无逐步分配）。
 #[derive(Clone)]
 pub struct DefaultNarrowPhase {
+    /// 凸体外壳仓库（多边形域；点云注册后由 shape 引用）。
+    hulls: HullStore,
     skin: f32,
     /// 接触点空间去重最小间距（m）：2×skin，且 ≥ 1 cm。
     min_point_sep: f32,
@@ -385,9 +389,178 @@ fn closest_point_on_poly(poly: &WorldPoly, p: Vec3) -> (Vec3, f32, bool, Vec3) {
     (best, best_d2, inside, max_plane_n)
 }
 
+/// **凸体外壳仓库**（多边形域；窄相自持 ⇒ 零签名改动）。
+///
+/// 外壳点云注册后由 `Shape::ConvexHull { hull, .. }` 引用；查询按 id 直取。
+/// 点云顺序即特征序（流形 `feature = 顶点序号+1`，跨帧稳定 ⇒ warm 缓存可续接）。
+#[derive(Clone, Default)]
+pub struct HullStore {
+    hulls: Vec<gjk::ConvexHull>,
+}
+
+impl HullStore {
+    /// 注册一个外壳（点云，局部坐标）；返回 id。点云顺序决定确定性（不去重）。
+    pub fn add(&mut self, points: Vec<Vec3>) -> u32 {
+        let id = self.hulls.len() as u32;
+        self.hulls.push(gjk::ConvexHull::new(points));
+        id
+    }
+
+    #[inline]
+    pub fn get(&self, id: u32) -> Option<&gjk::ConvexHull> {
+        self.hulls.get(id as usize)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.hulls.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.hulls.is_empty()
+    }
+
+    /// 局部 AABB 半长（宽相/惯量近似用；空壳返回 ZERO）。
+    pub fn half_extents(&self, id: u32) -> Vec3 {
+        let Some(h) = self.get(id) else {
+            return Vec3::ZERO;
+        };
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for p in &h.points {
+            lo = lo.min(*p);
+            hi = hi.max(*p);
+        }
+        (hi - lo) * 0.5
+    }
+}
+
 impl DefaultNarrowPhase {
+    /// 注册凸体外壳（点云，局部坐标）→ id；配 `Shape::ConvexHull { hull, .. }` 使用。
+    pub fn add_hull(&mut self, points: Vec<Vec3>) -> u32 {
+        self.hulls.add(points)
+    }
+
+    /// 外壳点云 → 局部 AABB 半长（门面构 `Shape::ConvexHull` 用）。
+    pub fn hull_half_extents(&self, id: u32) -> Vec3 {
+        self.hulls.half_extents(id)
+    }
+
+    /// **凸体 Voronoi 预断裂**：原壳 ✕ 种子 ⇒ 逐格点云（凸、互斥、并集 = 原体）。
+    /// 局部坐标（种子也给局部坐标）。`None` = 外壳 id 无效。
+    pub fn fracture_hull(&self, id: u32, seeds: &[Vec3]) -> Option<Vec<Vec<Vec3>>> {
+        self.hulls
+            .get(id)
+            .map(|h| gjk::fracture_voronoi_hull(h, seeds))
+    }
+
+    /// 形状 → 支撑体（不支持的形状返回 None）。
+    fn support_of(&self, shape: &Shape, pos: Vec3, rot: Quat) -> Option<gjk::ShapeSupport<'_>> {
+        match *shape {
+            Shape::ConvexHull { hull, .. } => self.hulls.get(hull).map(|h| {
+                gjk::ShapeSupport::Hull(gjk::HullSupport {
+                    hull: h,
+                    pos,
+                    rot: Mat3::from_quat(rot),
+                })
+            }),
+            Shape::Box { half } => Some(gjk::ShapeSupport::Box(gjk::BoxSupport {
+                half,
+                pos,
+                rot: Mat3::from_quat(rot),
+            })),
+            Shape::Sphere { radius } => Some(gjk::ShapeSupport::Sphere(gjk::SphereSupport {
+                radius,
+                pos,
+            })),
+            _ => None,
+        }
+    }
+
+    /// **外壳 × {盒|球|外壳}**：GJK/EPA 求穿透 → 用**外壳近接触面顶点**细化成多点流形。
+    ///
+    /// - 法线一次求解（EPA，轴对齐退化时退 6 轴 SAT 解析）；
+    /// - 流形点 = 外壳点云中落在对方支撑面 `plane ± skin` 带内的顶点，
+    ///   逐点深度 `plane − n̂·v`（n̂ = 对方 → 外壳）；取最深 4 点。
+    /// - `feature = 顶点序号 + 1`（点云序稳定 ⇒ 跨帧可续接）。
+    /// - 外壳 × 高度场：暂不受理（列裁剪对任意凸壳未实现，见 ROUTE §3）。
+    fn hull_pair(
+        &self,
+        a: u32,
+        b: u32,
+        sa: &Shape,
+        sb: &Shape,
+        pa: Vec3,
+        ra: Quat,
+        pb: Vec3,
+        rb: Quat,
+        out: &mut Vec<Manifold>,
+    ) {
+        let hull_a = match *sa {
+            Shape::ConvexHull { hull, .. } => Some(hull),
+            _ => None,
+        };
+        let hull_b = match *sb {
+            Shape::ConvexHull { hull, .. } => Some(hull),
+            _ => None,
+        };
+        let (Some(ua), Some(ub)) = (self.support_of(sa, pa, ra), self.support_of(sb, pb, rb)) else {
+            return; // 对方形状不受理（如高度场）
+        };
+        let Some((n_p, _depth, _p)) = gjk::epa(&ua, &ub, 32) else {
+            return; // 未相交（宽相 fat 边距会给出近邻对）
+        };
+        // 供点体 = 外壳侧（优先 a）；hu_a 为假则 hu_b 为真（调用点保证）
+        let (hull_id, hpos, hrot, n) = if hull_a.is_some() {
+            (hull_a.unwrap(), pa, ra, n_p)
+        } else {
+            (hull_b.unwrap(), pb, rb, -n_p)
+        };
+        let Some(h) = self.hulls.get(hull_id) else {
+            return;
+        };
+        let other: &dyn gjk::Support = if hull_a.is_some() { &ub } else { &ua };
+        let plane = n.dot(other.support(n));
+        let hm = Mat3::from_quat(hrot);
+        let mut cand: Vec<(f32, usize, Vec3)> = Vec::new();
+        for (i, lp) in h.points.iter().enumerate() {
+            let w = hpos + hm.mul_vec3(*lp);
+            let d = plane - n.dot(w);
+            if d > -self.skin {
+                cand.push((d, i, w));
+            }
+        }
+        if cand.is_empty() {
+            return;
+        }
+        // 最深 4 点（深度降序；并列按顶点序 ⇒ 确定性）
+        cand.sort_by(|x, y| {
+            y.0.partial_cmp(&x.0)
+                .unwrap_or(core::cmp::Ordering::Equal)
+                .then(x.1.cmp(&y.1))
+        });
+        cand.truncate(4);
+        let pts: Vec<ContactPoint> = cand
+            .iter()
+            .map(|&(d, i, w)| ContactPoint {
+                point: w,
+                depth: d,
+                feature: (i as u32) + 1,
+            })
+            .collect();
+        out.push(Manifold {
+            a,
+            b,
+            normal: -n_p, // 流形约定：a → b
+            points: ContactPoints::from_slice(&pts),
+        });
+    }
+
+
     pub fn new(skin: f32) -> Self {
         Self {
+            hulls: HullStore::default(),
             skin,
             min_point_sep: (skin * 2.0).max(0.01),
             polys: Vec::new(),
@@ -1086,10 +1259,24 @@ impl DefaultNarrowPhase {
                 Shape::Sphere { radius } => {
                     providers.contacts_sphere(id, bpos, radius, band, &mut buf)
                 }
+                // 外壳 vs 提供者：**顶点采样**（逐顶点按 SDF 解析求深度/法线；
+                // 多点 ⇒ 面接触稳定）。顶点序即特征序之外的 provider 特征由各点给。
+                Shape::ConvexHull { hull, .. } => {
+                    let Some(h) = self.hulls.get(hull) else {
+                        return;
+                    };
+                    let m = vxl_phys_core::Mat3::from_quat(brot);
+                    let mut supported = false;
+                    for p in h.points.iter() {
+                        let w = bpos + m.mul_vec3(*p);
+                        supported |= providers.contacts_point(id, w, band, &mut buf);
+                    }
+                    supported
+                }
                 _ => false, // 其余形状 vs provider：待专用查询
             };
-            if !ok {
-                return;
+            if !ok || buf.is_empty() {
+                return; // 不支持 / 全部顶点都不在接触带内
             }
             let sgn = if pr_is_a { 1.0 } else { -1.0 };
             // 流形法线 = **点数最多的法线组**（量化 0.1 同向；并列取最深）。
@@ -1144,6 +1331,13 @@ impl DefaultNarrowPhase {
             return;
         }
 
+        // **凸体外壳参与的对**（多边形域）：外壳 × {盒|球|外壳} → GJK/EPA。
+        // 与提供者的组合已在上面的 provider 分支处理；与高度场暂不受理。
+        if matches!(*sa, Shape::ConvexHull { .. }) || matches!(*sb, Shape::ConvexHull { .. }) {
+            self.hull_pair(a, b, sa, sb, pa, ra, pb, rb, out);
+            return;
+        }
+
         // 高度场参与的对。
         let hf_a = match sa {
             Shape::HeightField(id) => Some(*id as usize),
@@ -1175,7 +1369,9 @@ impl DefaultNarrowPhase {
                     };
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
-                Shape::HeightField(_) | Shape::Provider(_) => return,
+                Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => {
+                    return
+                }
             };
             if !ok {
                 return;

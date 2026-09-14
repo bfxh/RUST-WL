@@ -653,6 +653,38 @@ pub fn contacts_sphere_voxel(
     true
 }
 
+/// **点查询**（探针半径 = skin）：`depth = skin − sdf(p)`；法线 = SDF 梯度。
+/// 供外壳顶点采样（多点面接触）。`p` 在表面外 `> 2·skin` 时返回 false（不生成接触）。
+pub fn contacts_point_voxel(
+    v: &VoxelVolume,
+    p: Vec3,
+    skin: f32,
+    out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+) -> bool {
+    let d = v.sdf(p);
+    let depth = skin - d;
+    if depth < -skin {
+        return true; // 支持查询，但该点不在接触带内（无接触）
+    }
+    let e = v.step * 0.5;
+    let gx = v.sdf(p + Vec3::new(e, 0.0, 0.0)) - v.sdf(p - Vec3::new(e, 0.0, 0.0));
+    let gy = v.sdf(p + Vec3::new(0.0, e, 0.0)) - v.sdf(p - Vec3::new(0.0, e, 0.0));
+    let gz = v.sdf(p + Vec3::new(0.0, 0.0, e)) - v.sdf(p - Vec3::new(0.0, 0.0, e));
+    let g = Vec3::new(gx, gy, gz);
+    let n = if g.length_squared() > 1e-12 {
+        g.normalize()
+    } else {
+        Vec3::Y
+    };
+    out.push(vxl_phys_core::interop::InteropContact {
+        point: p - n * d,
+        normal: n,
+        depth,
+        feature: 0,
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

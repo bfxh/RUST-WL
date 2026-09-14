@@ -84,6 +84,19 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         }
     }
 
+    fn contacts_point(
+        &self,
+        id: u32,
+        p: Vec3,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.vols.get(id as usize) {
+            Some(v) => vxl_phys_terrain::voxel::contacts_point_voxel(v, p, skin, out),
+            None => false,
+        }
+    }
+
     fn contacts_sphere(
         &self,
         id: u32,
@@ -439,6 +452,44 @@ impl World {
         total
     }
 
+    /// 注册凸体外壳（点云，局部坐标）→ hull id。
+    pub fn add_hull(&mut self, points: Vec<Vec3>) -> u32 {
+        self.narrow.add_hull(points)
+    }
+
+    /// **凸体预断裂**（「更一般的凸体/网格切割」的凸体侧）：原壳 ✕ 种子 ⇒
+    /// 逐格生成凸碎块体（tiling 原体，局部坐标；缺口 = 种子在体外）。
+    /// 典型用法：装载期把完整壳换成一堆碎块体，撞击即自然散架。
+    pub fn spawn_hull_pieces(
+        &mut self,
+        hull: u32,
+        seeds: &[Vec3],
+        pos: Vec3,
+        rot: Quat,
+        density: f32,
+    ) -> Vec<u32> {
+        let Some(cells) = self.narrow.fracture_hull(hull, seeds) else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(cells.len());
+        for cell in cells {
+            if cell.len() < 4 {
+                continue; // 退化格（无体积）
+            }
+            let id = self.narrow.add_hull(cell);
+            out.push(self.spawn_hull_body(id, pos, rot, density));
+        }
+        out
+    }
+
+    /// 生成**凸体外壳动态体**（多边形域）：点云已在 `add_hull` 注册。
+    /// 半长取点云局部 AABB（宽相/惯量近似）；质量按 AABB 盒密度。
+    pub fn spawn_hull_body(&mut self, hull: u32, pos: Vec3, rot: Quat, density: f32) -> u32 {
+        let half = self.narrow.hull_half_extents(hull);
+        self.bodies
+            .push_dynamic(Shape::ConvexHull { hull, half }, pos, rot, density.max(1e-3))
+    }
+
     /// 提供者集合只读视图（体素体诊断/可视化用）。
     pub fn providers(&self) -> &Providers {
         &self.providers
@@ -659,6 +710,19 @@ impl World {
 mod tests {
     use super::*;
 
+    /// 立方体点云（外壳测试用；顶点序固定 ⇒ 确定性）。
+    fn cube_hull_points(half: f32) -> Vec<Vec3> {
+        let mut pts = Vec::new();
+        for &x in &[-half, half] {
+            for &y in &[-half, half] {
+                for &z in &[-half, half] {
+                    pts.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        pts
+    }
+
     fn ground_world() -> World {
         let mut w = World::new(PhysConfig::default());
         let hf = HeightField::flat(-20.0, -20.0, 41, 41, 1.0, 0.0);
@@ -713,6 +777,59 @@ mod tests {
         assert!(w.health().is_clean());
         // marker 体（provider）保持静止：位置零漂移。
         assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+    }
+
+    /// **M3 多边形域**：凸体外壳落在体素地面上（外壳 × 提供者 = 顶点采样多点流形）。
+    #[test]
+    fn hull_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0)); // 顶面 y = 1.0
+        w.add_voxel(vol);
+        let hull = w.add_hull(cube_hull_points(0.5));
+        let b = w.spawn_hull_body(hull, Vec3::new(0.1, 2.5, -0.1), Quat::IDENTITY, 1.0);
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在体素顶面（y=1.0）上方：外壳半长 0.5 ⇒ y ≈ 1.5
+        assert!(y > 1.42 && y < 1.70, "y = {y}");
+        assert!(!w.bodies.awake[b as usize], "外壳应已入睡");
+        assert!(w.health().is_clean());
+    }
+
+    /// **M3 凸体切割**：立方体外壳 ✕ 8 种子 ⇒ 8 个凸碎块，逐个落在体素地面上。
+    #[test]
+    fn fractured_hull_pieces_rest_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0));
+        w.add_voxel(vol);
+        let hull = w.add_hull(cube_hull_points(0.5));
+        let seeds: Vec<Vec3> = [
+            Vec3::new(-0.3, -0.25, -0.35),
+            Vec3::new(-0.3, -0.25, 0.25),
+            Vec3::new(-0.3, 0.35, -0.35),
+            Vec3::new(-0.3, 0.35, 0.25),
+            Vec3::new(0.3, -0.25, -0.35),
+            Vec3::new(0.3, -0.25, 0.25),
+            Vec3::new(0.3, 0.35, -0.35),
+            Vec3::new(0.3, 0.35, 0.25),
+        ]
+        .to_vec();
+        let pieces = w.spawn_hull_pieces(hull, &seeds, Vec3::new(0.0, 2.2, 0.0), Quat::IDENTITY, 1.0);
+        assert_eq!(pieces.len(), 8, "应有 8 块");
+        for _ in 0..900 {
+            w.step();
+        }
+        // 全体落到地面带内且干净
+        for &p in &pieces {
+            let y = w.bodies.position[p as usize].y;
+            assert!(y > 0.9 && y < 2.0, "碎块 y = {y} 不在带内");
+        }
+        assert!(w.health().is_clean());
     }
 
     /// M2 provider 通道扩到**球**：球经 SDF 解析接触（`depth = r − sdf(c)`）

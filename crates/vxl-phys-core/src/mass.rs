@@ -53,6 +53,21 @@ pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
                 local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
             }
         }
+        // 凸体外壳：按局部 AABB 盒惯量近似（点云实惯量待 M1 复合体）。
+        Shape::ConvexHull { half, .. } => {
+            let ex = 2.0 * half.x.max(1e-4);
+            let ey = 2.0 * half.y.max(1e-4);
+            let ez = 2.0 * half.z.max(1e-4);
+            let m = density * ex * ey * ez;
+            let ix = m / 12.0 * (ey * ey + ez * ez);
+            let iy = m / 12.0 * (ex * ex + ez * ez);
+            let iz = m / 12.0 * (ex * ex + ey * ey);
+            MassProps {
+                mass: m,
+                inv_mass: 1.0 / m,
+                local_inv_inertia: Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / iz),
+            }
+        }
         // 高度场 / 外部 provider 只作为静态地形存在，不参与质量属性。
         Shape::HeightField(_) | Shape::Provider(_) => MassProps {
             mass: 0.0,
