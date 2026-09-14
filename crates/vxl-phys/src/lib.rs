@@ -26,6 +26,65 @@ pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
 
+/// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
+#[derive(Default)]
+pub struct Providers {
+    vols: Vec<vxl_phys_terrain::voxel::VoxelVolume>,
+}
+
+impl Providers {
+    /// 注册体素体，返回其 id（= 注册序）。
+    pub fn push(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> u32 {
+        let id = self.vols.len() as u32;
+        self.vols.push(vol);
+        id
+    }
+
+    pub fn len(&self) -> usize {
+        self.vols.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.vols.is_empty()
+    }
+
+    /// provider(id) 的世界包围盒（宽相 AABB 供给；与 `CollisionProvider::bounds` 同义）。
+    pub fn bounds(&self, id: u32) -> Option<Aabb> {
+        use vxl_phys_core::interop::CollisionProvider;
+        self.vols.get(id as usize).map(|v| v.bounds())
+    }
+
+    pub fn voxel(&self, id: u32) -> Option<&vxl_phys_terrain::voxel::VoxelVolume> {
+        self.vols.get(id as usize)
+    }
+
+    pub fn voxel_mut(&mut self, id: u32) -> Option<&mut vxl_phys_terrain::voxel::VoxelVolume> {
+        self.vols.get_mut(id as usize)
+    }
+}
+
+impl vxl_phys_core::interop::ProviderColliders for Providers {
+    fn bounds(&self, id: u32) -> Option<Aabb> {
+        use vxl_phys_core::interop::CollisionProvider;
+        self.vols.get(id as usize).map(|v| v.bounds())
+    }
+
+    fn contacts_box(
+        &self,
+        id: u32,
+        half: Vec3,
+        pos: Vec3,
+        rot: Quat,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.vols.get(id as usize) {
+            Some(v) => vxl_phys_terrain::voxel::contacts_box_voxel(v, half, pos, rot, skin, out),
+            None => false,
+        }
+    }
+}
+
 /// 帧级相位暂存（§0.1 #10：相内 bump，相末 reset，全帧零 free）。
 ///
 /// M0 已接入的消费者 = 帧末状态哈希的规范化缓冲（每次哈希 alloc→打包→reset，
@@ -114,6 +173,9 @@ pub struct World {
     manifolds: Vec<Manifold>,
     ccd_manifolds: Vec<Manifold>,
     hf_bounds: Vec<Aabb>,
+    /// 外部碰撞提供者集合（体素/网格…；ROUTE §2.1 兼容轴）与其 AABB。
+    providers: Providers,
+    provider_bounds: Vec<Aabb>,
     timings: PhaseTimings,
 }
 
@@ -152,6 +214,8 @@ impl World {
             manifolds: Vec::new(),
             ccd_manifolds: Vec::new(),
             hf_bounds: Vec::new(),
+            providers: Providers::default(),
+            provider_bounds: Vec::new(),
             timings: PhaseTimings::default(),
         }
     }
@@ -191,6 +255,29 @@ impl World {
         self.hf_bounds.push(bounds);
         let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
         self.bodies.push_static(Shape::HeightField(id), pos, rot)
+    }
+
+    /// 注册一个**体素体**为碰撞提供者（新域接入的第一条路径，ROUTE §3/§5）：
+    /// 加入提供者集合 + 静态 Marker 体 `Shape::Provider(id)`；宽相 AABB 由
+    /// 提供者的 bounds 供给（与高度场同机制）。返回 marker 体 id。
+    pub fn add_voxel(&mut self, vol: vxl_phys_terrain::voxel::VoxelVolume) -> BodyId {
+        let id = self.providers.push(vol);
+        self.provider_bounds.push(
+            self.providers
+                .bounds(id)
+                .expect("just inserted provider bounds"),
+        );
+        let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
+        self.bodies.push_static(Shape::Provider(id), pos, rot)
+    }
+
+    /// 提供者数据变化（如体素挖洞）后刷新宽相 AABB（确定性：按 id 序全量重算）。
+    pub fn refresh_provider_bounds(&mut self) {
+        for id in 0..self.providers.len() as u32 {
+            if let Some(b) = self.providers.bounds(id) {
+                self.provider_bounds[id as usize] = b;
+            }
+        }
     }
 
     pub fn add_field(&mut self, field: Box<dyn ForceField>) {
@@ -243,7 +330,12 @@ impl World {
         self.broad.set_step(dt);
         let pairs = self
             .broad
-            .compute_pairs(&self.bodies, &self.hf_bounds, self.jobs.as_ref())
+            .compute_pairs(
+                &self.bodies,
+                &self.hf_bounds,
+                &self.provider_bounds,
+                self.jobs.as_ref(),
+            )
             .to_vec();
         self.timings.broadphase_us += t0.elapsed().as_micros() as u64;
         // 4) 窄相。
@@ -252,6 +344,7 @@ impl World {
             &self.bodies,
             &pairs,
             self.terrain.slice(),
+            &self.providers,
             &mut self.manifolds,
             self.jobs.as_ref(),
         );
@@ -329,6 +422,7 @@ impl World {
                     &self.bodies,
                     &pairs,
                     self.terrain.slice(),
+                    &self.providers,
                     &mut self.ccd_manifolds,
                     self.jobs.as_ref(),
                 );
@@ -410,6 +504,35 @@ mod tests {
         // 静置在 y ≈ 0.5 + 少许穿透修正余量。
         assert!(y > 0.45 && y < 0.62, "y = {y}");
         assert!(w.health().is_clean());
+    }
+
+    /// **M2 贯通切片**（ROUTE §7）：**刚体 ↔ 体素**——盒经 `Shape::Provider` 路径
+    /// 落在体素地面上并入睡（跨域唯一通道 `ProviderColliders` 的第一条端到端用例）。
+    #[test]
+    fn box_falls_and_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
+        vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0)); // 顶面 y = 1.0
+        let marker = w.add_voxel(vol);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.0, 2.5, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        for _ in 0..600 {
+            w.step();
+        }
+        let y = w.bodies.position[b as usize].y;
+        // 静置在体素顶面（y=1.0）上方：y ≈ 1.5 + 少许穿透修正余量。
+        assert!(y > 1.42 && y < 1.60, "y = {y}");
+        assert!(!w.bodies.awake[b as usize], "盒应已入睡（静置 10s）");
+        assert!(w.health().is_clean());
+        // marker 体（provider）保持静止：位置零漂移。
+        assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
     }
 
     #[test]

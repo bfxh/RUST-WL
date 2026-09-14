@@ -23,7 +23,7 @@ pub fn min_half_extent(shape: &Shape) -> f32 {
             half_height,
             radius,
         } => half_height.min(radius),
-        Shape::HeightField(_) => f32::INFINITY,
+        Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
     }
 }
 

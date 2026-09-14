@@ -113,6 +113,7 @@ pub trait NarrowPhase {
         bodies: &vxl_phys_core::BodySet,
         pairs: &[(u32, u32)],
         heightfields: &[HeightField],
+        providers: &dyn vxl_phys_core::interop::ProviderColliders,
         out: &mut Vec<Manifold>,
         jobs: &dyn JobSystem,
     );
@@ -971,6 +972,7 @@ impl NarrowPhase for DefaultNarrowPhase {
         bodies: &vxl_phys_core::BodySet,
         pairs: &[(u32, u32)],
         heightfields: &[HeightField],
+        providers: &dyn vxl_phys_core::interop::ProviderColliders,
         out: &mut Vec<Manifold>,
         jobs: &dyn JobSystem,
     ) {
@@ -985,7 +987,7 @@ impl NarrowPhase for DefaultNarrowPhase {
         // scratch），结果按块序拼接 = pair 序（§5 确定性契约）。
         if threads <= 1 || pairs.len() < 2048 {
             for &(a, b) in pairs {
-                self.process_pair(a, b, bodies, heightfields, out);
+                self.process_pair(a, b, bodies, heightfields, providers, out);
             }
             return;
         }
@@ -1011,7 +1013,7 @@ impl NarrowPhase for DefaultNarrowPhase {
                     let range = oi * chunk..((oi + 1) * chunk).min(pairs.len());
                     let mut np = this.clone();
                     for &(a, b) in &pairs[range] {
-                        np.process_pair(a, b, bodies, heightfields, co);
+                        np.process_pair(a, b, bodies, heightfields, providers, co);
                     }
                 }
             },
@@ -1033,6 +1035,7 @@ impl DefaultNarrowPhase {
         b: u32,
         bodies: &vxl_phys_core::BodySet,
         heightfields: &[HeightField],
+        providers: &dyn vxl_phys_core::interop::ProviderColliders,
         out: &mut Vec<Manifold>,
     ) {
         let (sa, sb) = (&bodies.shape[a as usize], &bodies.shape[b as usize]);
@@ -1043,6 +1046,59 @@ impl DefaultNarrowPhase {
         // 盒对专用路径开关：每对先复位（非盒对 / 圆柱对一律走通用路径）。
         self.box_axes_a = None;
         self.box_axes_b = None;
+
+        // **外部碰撞提供者参与的对**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）。
+        // 只有「盒 vs provider」走此路径（其余形状待 provider 专用解法补齐）；
+        // 法线约定与高度场一致：provider 在 a → +n_s（外向）；在 b → −n_s。
+        let pr_a = match sa {
+            Shape::Provider(id) => Some(*id),
+            _ => None,
+        };
+        let pr_b = match sb {
+            Shape::Provider(id) => Some(*id),
+            _ => None,
+        };
+        if pr_a.is_some() || pr_b.is_some() {
+            if pr_a.is_some() && pr_b.is_some() {
+                return; // provider-provider 暂不支持（需要 provider 对偶解法）
+            }
+            let (body_shape, bpos, brot, pr_is_a) = if pr_a.is_some() {
+                (sb, pb, rb, true)
+            } else {
+                (sa, pa, ra, false)
+            };
+            let half = match *body_shape {
+                Shape::Box { half } => half,
+                _ => return, // 非盒形状 vs provider：暂不支持
+            };
+            let id = pr_a.or(pr_b).unwrap();
+            let mut buf: Vec<vxl_phys_core::interop::InteropContact> = Vec::new();
+            if !providers.contacts_box(id, half, bpos, brot, self.skin, &mut buf) {
+                return;
+            }
+            let sgn = if pr_is_a { 1.0 } else { -1.0 };
+            let normal = if let Some(c0) = buf.first() {
+                c0.normal * sgn
+            } else {
+                Vec3::Y
+            };
+            let pts: Vec<ContactPoint> = buf
+                .iter()
+                .take(4)
+                .map(|c| ContactPoint {
+                    point: c.point,
+                    depth: c.depth,
+                    feature: c.feature,
+                })
+                .collect();
+            out.push(Manifold {
+                a,
+                b,
+                normal,
+                points: ContactPoints::from_slice(&pts),
+            });
+            return;
+        }
 
         // 高度场参与的对。
         let hf_a = match sa {
@@ -1075,7 +1131,7 @@ impl DefaultNarrowPhase {
                     };
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
-                Shape::HeightField(_) => return,
+                Shape::HeightField(_) | Shape::Provider(_) => return,
             };
             if !ok {
                 return;
@@ -1271,7 +1327,14 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        np.collide(b, &pairs, hf, &mut out, &SerialJobSystem);
+        np.collide(
+            b,
+            &pairs,
+            hf,
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &SerialJobSystem,
+        );
         out
     }
 

@@ -152,6 +152,49 @@ pub trait CollisionProvider {
     }
 }
 
+/// 外部碰撞提供者集合（体素/网格/喷溅场…）：**窄相的查询面**。
+///
+/// 窄相（`vxl-phys-narrow`）只依赖 `vxl-phys-core`，因此不能直接持有域类型；
+/// 由门面/域 crate 实现本 trait 并在 `collide` 时传入（见 ROUTE §5 依赖纪律）。
+pub trait ProviderColliders: Send + Sync {
+    /// `id` 的世界包围盒（宽相 AABB 用；`None` = 该 id 未注册）。
+    fn bounds(&self, id: u32) -> Option<Aabb>;
+
+    /// 「盒形包络 vs provider(id)」的接触（世界系；追加进 `out`；返回是否产出）。
+    /// 约定与 [`CollisionProvider::contacts_box`] 相同：只保留 `depth ≥ −skin` 的点，
+    /// 法线为 provider 表面**外向**法线。
+    fn contacts_box(
+        &self,
+        id: u32,
+        half: Vec3,
+        pos: Vec3,
+        rot: Quat,
+        skin: f32,
+        out: &mut Vec<InteropContact>,
+    ) -> bool;
+}
+
+/// 空提供者集合（未注册任何 provider 时的默认）。
+pub struct NoProviders;
+
+impl ProviderColliders for NoProviders {
+    fn bounds(&self, _id: u32) -> Option<Aabb> {
+        None
+    }
+
+    fn contacts_box(
+        &self,
+        _id: u32,
+        _half: Vec3,
+        _pos: Vec3,
+        _rot: Quat,
+        _skin: f32,
+        _out: &mut Vec<InteropContact>,
+    ) -> bool {
+        false
+    }
+}
+
 /// 介质场：域之间的**唯一**双向通道（液体/气体/颗粒的采样与反作用沉积）。
 pub trait MediumField {
     /// 采样 `x` 处的介质状态（只读；无介质处返回 [`MediumSample::VACUUM`]）。

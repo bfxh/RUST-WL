@@ -33,7 +33,14 @@ pub use vxl_phys_core::Aabb;
 
 /// 形状 → 世界 AABB（含 margin 膨胀）。
 /// 高度场体的包围盒由调用方经 `hf_bounds[id]` 提供（高度场数据在 narrow/terrain 层）。
-pub fn shape_aabb(shape: &Shape, pos: Vec3, rot: Quat, margin: f32, hf_bounds: &[Aabb]) -> Aabb {
+pub fn shape_aabb(
+    shape: &Shape,
+    pos: Vec3,
+    rot: Quat,
+    margin: f32,
+    hf_bounds: &[Aabb],
+    provider_bounds: &[Aabb],
+) -> Aabb {
     let half = match *shape {
         Shape::Box { half } => {
             // 精确：|R|·half（旋转矩阵逐元素绝对值作用于半长）。
@@ -68,6 +75,17 @@ pub fn shape_aabb(shape: &Shape, pos: Vec3, rot: Quat, margin: f32, hf_bounds: &
                 max: b.max + Vec3::splat(margin),
             };
         }
+        // 外部碰撞提供者体（体素/网格…）：AABB 由提供者给（静态 Marker 语义）。
+        Shape::Provider(id) => {
+            let b = provider_bounds.get(id as usize).copied().unwrap_or(Aabb {
+                min: Vec3::splat(0.0),
+                max: Vec3::splat(0.0),
+            });
+            return Aabb {
+                min: b.min - Vec3::splat(margin),
+                max: b.max + Vec3::splat(margin),
+            };
+        }
     };
     Aabb {
         min: pos - half - Vec3::splat(margin),
@@ -81,6 +99,7 @@ pub trait BroadPhase {
         &mut self,
         bodies: &BodySet,
         hf_bounds: &[Aabb],
+        provider_bounds: &[Aabb],
         jobs: &dyn JobSystem,
     ) -> &[(u32, u32)];
 
@@ -173,8 +192,12 @@ impl BroadPhase for GridBroadPhase {
         &mut self,
         bodies: &BodySet,
         hf_bounds: &[Aabb],
+        provider_bounds: &[Aabb],
         _jobs: &dyn JobSystem,
     ) -> &[(u32, u32)] {
+        // 网格宽相对外部 provider 体无特化；仅保证签名一致（其 AABB 走
+        // `shape_aabb` 的 Provider 分支，由 provider_bounds 供给）。
+        let _ = provider_bounds;
         self.cells_static.clear();
         self.cells_dynamic.clear();
         self.pairs.clear();
@@ -189,6 +212,7 @@ impl BroadPhase for GridBroadPhase {
                 bodies.rot(i),
                 self.skin,
                 hf_bounds,
+                provider_bounds,
             );
             self.aabbs.push(aabb);
         }
@@ -382,6 +406,7 @@ impl BroadPhase for BvhBroadPhase {
         &mut self,
         bodies: &BodySet,
         hf_bounds: &[Aabb],
+        provider_bounds: &[Aabb],
         jobs: &dyn JobSystem,
     ) -> &[(u32, u32)] {
         let t_aabb = std::time::Instant::now();
@@ -458,6 +483,7 @@ impl BroadPhase for BvhBroadPhase {
                             bodies_ref.rot(i),
                             skin,
                             hfs,
+                            provider_bounds,
                         );
                     }
                 },
@@ -708,8 +734,8 @@ mod tests {
                     b.position[i].y -= frame as f32 * 0.09;
                 }
             }
-            let p_grid = grid.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
-            let p_bvh = bvh.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+            let p_grid = grid.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
+            let p_bvh = bvh.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
             assert_eq!(p_grid, p_bvh, "frame {frame}");
             let _ = &mut b;
         }
@@ -740,7 +766,7 @@ mod tests {
         // 小索引体入睡（大索引体保持清醒）。
         b.awake[small as usize] = false;
         let mut bp = BvhBroadPhase::new(0.01);
-        let pairs = bp.compute_pairs(&b, &[], &SerialJobSystem);
+        let pairs = bp.compute_pairs(&b, &[], &[], &SerialJobSystem);
         assert_eq!(pairs, &[(small.min(big), small.max(big))]);
     }
 
@@ -789,7 +815,7 @@ mod tests {
                 b.position[i].y -= if i % 2 == 0 { 0.002 } else { 0.02 };
                 b.awake[i] = !(frame % 3 == 0 && i % 5 == 0);
             }
-            let got = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+            let got = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
             // 暴力参照：i<j 精确 AABB 重叠（与宽相同规则——**至少一侧为
             // 「动态且清醒」**：沉睡体不查询、静-静不产对 ⇒ 静×睡与睡×睡
             // 均无对；清醒×睡/清醒×静由清醒侧查询命中）。
@@ -842,7 +868,7 @@ mod tests {
             1.0,
         );
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        let pairs = bp.compute_pairs(&b, &[], &SerialJobSystem);
+        let pairs = bp.compute_pairs(&b, &[], &[], &SerialJobSystem);
         assert_eq!(pairs, &[(d.min(g), d.max(g))]);
         assert!(pairs.iter().all(|&p| p.1 != far && p.0 != far));
     }
@@ -865,7 +891,7 @@ mod tests {
             Quat::IDENTITY,
         );
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        assert!(bp.compute_pairs(&b, &[], &SerialJobSystem).is_empty());
+        assert!(bp.compute_pairs(&b, &[], &[], &SerialJobSystem).is_empty());
     }
 
     #[test]
@@ -882,8 +908,8 @@ mod tests {
             );
         }
         let mut bp = GridBroadPhase::new(2.0, 0.01);
-        let p1 = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
-        let p2 = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+        let p1 = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
+        let p2 = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
         assert_eq!(p1, p2);
     }
 }
