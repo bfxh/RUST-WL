@@ -37,6 +37,19 @@ struct WarmPoint {
     depth0: f32,
 }
 
+impl WarmPoint {
+    /// 零点哨兵（定长数组初始化用）。
+    const EMPTY: WarmPoint = WarmPoint {
+        pn: 0.0,
+        pt1: 0.0,
+        pt2: 0.0,
+        feature: 0,
+        la: Vec3::ZERO,
+        lb: Vec3::ZERO,
+        depth0: 0.0,
+    };
+}
+
 /// 接触回收半径（m；超过则锚点重烘焙）。**0.01**（收窄自 Rapier 的 0.05）：
 /// 累计漂移更小 ⇒ 回拉修正更小、各场景代价大降（门槛场景末态 38→7 体醒、
 /// p50 9.1→0.95 ms；塔 600 tick 0.28、2000 tick 全程平静；col45 末态
@@ -75,12 +88,29 @@ const FB_DEPTH_MIN: f32 = 0.0;
 /// 「深度变化快于 ~1.5 cm/s」的接触拒配，与睡眠阈（4 cm/s）同量级。
 const FB_DEPTH_JUMP: f32 = 0.00025;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct WarmManifold {
     normal: Vec3,
-    points: Vec<WarmPoint>,
+    /// 点数据**定长内联**（流形点 ≤4，窄相已截断）——此前是 `Vec<WarmPoint>`，
+    /// 每 tick 22 万次小 Vec 的分配 + 释放实测 ≈11.4ms（泄漏探针）；内联后零堆。
+    points: [WarmPoint; 4],
+    n: u8,
     /// 求解印章（本 solve 调用是否刷新过；剪枝用，见 `warm 槽位表` 注）。
     seen: u32,
+}
+
+impl WarmManifold {
+    const EMPTY: WarmManifold = WarmManifold {
+        normal: Vec3::ZERO,
+        points: [WarmPoint::EMPTY; 4],
+        n: 0,
+        seen: 0,
+    };
+
+    #[inline]
+    fn pts(&self) -> &[WarmPoint] {
+        &self.points[..self.n as usize]
+    }
 }
 
 /// 死槽键（槽位表空洞哨兵）。
@@ -792,7 +822,7 @@ fn build_constraint(
     let mut warm_world = [Vec3::ZERO; 4];
     let mut warm_n = 0usize;
     if let Some(wm) = warmm {
-        for w in wm.points.iter().take(4) {
+        for w in wm.pts() {
             warm_world[warm_n] =
                 (pos_a + rot_a.mul_vec3(w.la) + pos_b + rot_b.mul_vec3(w.lb)) * 0.5;
             warm_n += 1;
@@ -1164,10 +1194,11 @@ fn solve_island_group(
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
         for c in cbuf.iter() {
-            let pts = c
-                .points
-                .iter()
-                .map(|p| WarmPoint {
+            let mut wm = WarmManifold::EMPTY;
+            wm.normal = c.normal;
+            wm.n = c.points.len() as u8;
+            for (k, p) in c.points.iter().enumerate().take(4) {
+                wm.points[k] = WarmPoint {
                     pn: p.pn,
                     pt1: p.pt1,
                     pt2: p.pt2,
@@ -1175,17 +1206,9 @@ fn solve_island_group(
                     la: p.la,
                     lb: p.lb,
                     depth0: p.depth0,
-                })
-                .collect();
-            warm_out.push((
-                c.warm_slot,
-                (c.a, c.b),
-                WarmManifold {
-                    normal: c.normal,
-                    points: pts,
-                    seen: 0,
-                },
-            ));
+                };
+            }
+            warm_out.push((c.warm_slot, (c.a, c.b), wm));
         }
     }
 }
