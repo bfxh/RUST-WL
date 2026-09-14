@@ -285,6 +285,25 @@ impl World {
         self.bodies.push_static(Shape::Provider(id), pos, rot)
     }
 
+    /// **破坏（M3 第一块）**：把体素体盒域内的占据格转为**刚体碎块**
+    /// （贪心合并成盒 → 逐个动态体），并从体素体里移除。返回碎块数。
+    /// 确定性：提取顺序 = 固定扫描序（见 `VoxelVolume::extract_boxes`）；
+    /// 碎块质量 = `density × 8·hx·hy·hz`。
+    pub fn spawn_box_debris(&mut self, id: u32, min: Vec3, max: Vec3, density: f32) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let boxes = vol.extract_boxes(min, max);
+        let n = boxes.len();
+        for (c, h) in boxes {
+            let mass = density * 8.0 * h.x * h.y * h.z;
+            self.bodies
+                .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
     /// 提供者数据变化（如体素挖洞）后刷新宽相 AABB（确定性：按 id 序全量重算）。
     pub fn refresh_provider_bounds(&mut self) {
         for id in 0..self.providers.len() as u32 {
@@ -572,6 +591,39 @@ mod tests {
         assert!(y > 1.32 && y < 1.50, "y = {y}");
         assert!(!w.bodies.awake[b as usize], "球应已入睡");
         assert!(w.health().is_clean());
+    }
+
+    /// **M3 破坏切片**：体素柱被「切掉顶部」⇒ 顶部转成刚体碎块，落在余柱上停驻；
+    /// 余柱（仍在体素体里）与碎块共同构成确定性可继续推进的场景。
+    #[test]
+    fn carve_top_spawns_debris_resting_on_column() {
+        let mut w = World::new(PhysConfig::default());
+        // 柱：X/Z ∈ [−0.5,0.5]、Y ∈ [0,4)，格边长 0.5（8 层 × 2×2）
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-2.0, 0.0, -2.0), 0.5, 8, 8, 8);
+        vol.fill_box(Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 4.0, 0.5));
+        w.add_voxel(vol);
+        // 切掉顶部 1m（Y ∈ [3,4)）⇒ 碎块（2×2×2 格 ⇒ 贪心合并为 1 个 1m 立方）
+        let n = w.spawn_box_debris(
+            0,
+            Vec3::new(-0.5, 3.0, -0.5),
+            Vec3::new(0.5, 4.0, 0.5),
+            1000.0,
+        );
+        assert_eq!(n, 1, "顶部 8 格应合并为 1 个碎块盒");
+        for _ in 0..600 {
+            w.step();
+        }
+        let h = w.health();
+        assert!(h.is_clean(), "无 NaN / 无深穿透");
+        // 碎块落在余柱顶面（y=3.0）上方：中心 ≈ 3.5
+        let mut top = 0.0f32;
+        for i in 0..w.bodies.len() {
+            if w.bodies.is_dynamic(i) {
+                top = top.max(w.bodies.position[i].y);
+            }
+        }
+        assert!(top > 3.3 && top < 3.7, "碎块应停在余柱上，实际 top={top}");
     }
 
     #[test]

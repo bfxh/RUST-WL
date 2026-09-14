@@ -1083,13 +1083,42 @@ impl DefaultNarrowPhase {
                 return;
             }
             let sgn = if pr_is_a { 1.0 } else { -1.0 };
-            let normal = if let Some(c0) = buf.first() {
-                c0.normal * sgn
-            } else {
-                Vec3::Y
+            // 流形法线 = **点数最多的法线组**（量化 0.1 同向；并列取最深）。
+            // provider 查询会同时给出「面接触」（同向、多点）与「棱/角接触」
+            // （斜向、少点）——取多数派 = 主导接触面。实测教训：用「第一个接触
+            // 点」的法线会让盒沿柱角斜法线滑走（角点先入缓冲）。
+            let quant = |v: Vec3| -> (i32, i32, i32) {
+                (
+                    (v.x * 10.0).round() as i32,
+                    (v.y * 10.0).round() as i32,
+                    (v.z * 10.0).round() as i32,
+                )
             };
+            let mut best_key = (0i32, 0i32, 0i32);
+            let mut best_count = 0usize;
+            let mut best_depth = f32::NEG_INFINITY;
+            let mut best_normal = Vec3::Y;
+            for c in &buf {
+                let key = quant(c.normal);
+                let mut count = 0usize;
+                let mut deepest = f32::NEG_INFINITY;
+                for c2 in &buf {
+                    if quant(c2.normal) == key {
+                        count += 1;
+                        deepest = deepest.max(c2.depth);
+                    }
+                }
+                if count > best_count || (count == best_count && deepest > best_depth) {
+                    best_count = count;
+                    best_depth = deepest;
+                    best_key = key;
+                    best_normal = c.normal * sgn;
+                }
+            }
+            let normal = best_normal;
             let pts: Vec<ContactPoint> = buf
                 .iter()
+                .filter(|c| quant(c.normal) == best_key)
                 .take(4)
                 .map(|c| ContactPoint {
                     point: c.point,

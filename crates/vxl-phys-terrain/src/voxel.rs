@@ -182,6 +182,78 @@ impl VoxelVolume {
         best
     }
 
+    /// **破坏提取**（M3 第一块）：把盒域内的占据格合并成若干**轴对齐盒**
+    /// （贪心：先沿 +X 拉长，再沿 +Y、+Z 按整行/整片匹配），并从体积里清除。
+    /// 返回 `(中心, 半长)` 列表——供门面转成刚体碎块。
+    ///
+    /// 确定性：扫描序固定 `(iz, iy, ix)`、扩展方向固定；提取顺序 = 扫描序。
+    /// 注意：占据包围盒只增不减 ⇒ 提取后 `bounds()` 可能偏保守（宽相多做工作，
+    /// 不影响正确性；需要紧盒时调用方重建体积或加紧盒接口）。
+    pub fn extract_boxes(&mut self, min: Vec3, max: Vec3) -> Vec<(Vec3, Vec3)> {
+        let mut out = Vec::new();
+        let lo = self.grid_of(min);
+        let hi = self.grid_of(max);
+        let x0 = lo.0.max(0);
+        let y0 = lo.1.max(0);
+        let z0 = lo.2.max(0);
+        let x1 = hi.0.min(self.nx as i32 - 1);
+        let y1 = hi.1.min(self.ny as i32 - 1);
+        let z1 = hi.2.min(self.nz as i32 - 1);
+        if x0 > x1 || y0 > y1 || z0 > z1 {
+            return out;
+        }
+        for iz in z0..=z1 {
+            for iy in y0..=y1 {
+                for ix in x0..=x1 {
+                    if !self.get(ix as u32, iy as u32, iz as u32) {
+                        continue;
+                    }
+                    // +X 连续
+                    let mut ex = ix;
+                    while ex < x1 && self.get((ex + 1) as u32, iy as u32, iz as u32) {
+                        ex += 1;
+                    }
+                    // +Y 整行匹配
+                    let mut ey = iy;
+                    'ey: while ey < y1 {
+                        for kx in ix..=ex {
+                            if !self.get(kx as u32, (ey + 1) as u32, iz as u32) {
+                                break 'ey;
+                            }
+                        }
+                        ey += 1;
+                    }
+                    // +Z 整片匹配
+                    let mut ez = iz;
+                    'ez: while ez < z1 {
+                        for ky in iy..=ey {
+                            for kx in ix..=ex {
+                                if !self.get(kx as u32, ky as u32, (ez + 1) as u32) {
+                                    break 'ez;
+                                }
+                            }
+                        }
+                        ez += 1;
+                    }
+                    // 消费（清除）+ 记录盒
+                    for kz in iz..=ez {
+                        for ky in iy..=ey {
+                            for kx in ix..=ex {
+                                self.set(kx as u32, ky as u32, kz as u32, false);
+                            }
+                        }
+                    }
+                    let bmin = self.grid_center(ix as u32, iy as u32, iz as u32)
+                        - Vec3::splat(self.step * 0.5);
+                    let bmax = self.grid_center(ex as u32, ey as u32, ez as u32)
+                        + Vec3::splat(self.step * 0.5);
+                    out.push(((bmin + bmax) * 0.5, (bmax - bmin) * 0.5));
+                }
+            }
+        }
+        out
+    }
+
     /// SDF 的最小格（用于测试/诊断）。
     pub fn occupied_bounds(&self) -> Option<Aabb> {
         if !self.any {
@@ -229,8 +301,14 @@ impl CollisionProvider for VoxelVolume {
     }
 }
 
-/// 盒形包络的体素专用接触（比默认角点采样更准：底面 4 角 + 各面中心共 6 点，
-/// 覆盖「盒落在体素地面上」与「盒撞体素墙」两类主情形）。
+/// 盒形包络的体素专用接触（**按盒的面聚合**，标准「参考面」做法）。
+///
+/// 采样 = 6 个面的面中心 + 4 角（每面 5 点，共 30 点）。**主导面** = skin 带内
+/// 采样数最多的面（并列取最深的）；法线取**该面翻转**（= 表面外向法线；平面
+/// 接触精确，斜面/棱边站立时是标准近似——球路径仍用精确 SDF 梯度）。
+///
+/// 实测教训：早先版本按「采样点的 SDF 梯度」逐点出法线，块体对齐落在柱顶时
+/// 4 个角都落在柱角上 ⇒ 梯度是斜向的 ⇒ 窄相取到斜法线，盒沿斜向滑走。
 pub fn contacts_box_voxel(
     v: &VoxelVolume,
     half: Vec3,
@@ -240,7 +318,7 @@ pub fn contacts_box_voxel(
     out: &mut Vec<vxl_phys_core::interop::InteropContact>,
 ) -> bool {
     let m = vxl_phys_core::Mat3::from_quat(rot);
-    // 6 个面中心（局部系）：±X/±Y/±Z
+    // 6 个面（局部轴向外法线）：±X/±Y/±Z
     let dirs = [
         Vec3::new(-1.0, 0.0, 0.0),
         Vec3::new(1.0, 0.0, 0.0),
@@ -249,39 +327,103 @@ pub fn contacts_box_voxel(
         Vec3::new(0.0, 0.0, -1.0),
         Vec3::new(0.0, 0.0, 1.0),
     ];
-    let mut any = false;
-    for (k, d) in dirs.iter().enumerate() {
-        // 面中心的 4 个角（沿另两轴取 ±half）
+    let h = [half.x, half.y, half.z];
+    let d3 = [
+        [
+            dirs[0].x, dirs[1].x, dirs[2].x, dirs[3].x, dirs[4].x, dirs[5].x,
+        ],
+        [
+            dirs[0].y, dirs[1].y, dirs[2].y, dirs[3].y, dirs[4].y, dirs[5].y,
+        ],
+        [
+            dirs[0].z, dirs[1].z, dirs[2].z, dirs[3].z, dirs[4].z, dirs[5].z,
+        ],
+    ];
+    // 每面：(skin 带内采样数, 最深 signed_dist)
+    let mut count = [0usize; 6];
+    let mut deepest = [f32::INFINITY; 6];
+    // 逐面采样（面中心 + 4 角）
+    for k in 0..6 {
+        let (fcx, fcy, fcz) = (d3[0][k] * h[0], d3[1][k] * h[1], d3[2][k] * h[2]);
         let axes = match k {
             0 | 1 => [1usize, 2],
             2 | 3 => [0, 2],
             _ => [0, 1],
         };
+        // 采样点（局部）：中心 + 4 角
+        let mut samples: [(f32, f32, f32); 5] = [(fcx, fcy, fcz); 5];
         for (ci, (su, sv)) in [(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
             .into_iter()
             .enumerate()
         {
-            // 面中心 ± 另两轴的 ±half（分量数组构造；Vec3 无索引）
-            let h = [half.x, half.y, half.z];
-            let dd = [d.x, d.y, d.z];
-            let mut l = [dd[0] * h[0], dd[1] * h[1], dd[2] * h[2]];
+            let mut l = [fcx, fcy, fcz];
             l[axes[0]] = su * h[axes[0]];
             l[axes[1]] = sv * h[axes[1]];
-            let local = Vec3::new(l[0], l[1], l[2]);
-            let p = pos + m.mul_vec3(local);
-            if let Some(hit) = v.closest_point(p) {
-                if hit.signed_dist < skin {
-                    out.push(vxl_phys_core::interop::InteropContact {
-                        point: hit.point,
-                        normal: hit.normal,
-                        depth: hit.depth(),
-                        // 面号(1..6)×16 + 角号(0..3)：跨帧稳定，供 warm 匹配
-                        feature: (k as u32 + 1) * 16 + ci as u32,
-                    });
-                    any = true;
-                }
+            samples[ci + 1] = (l[0], l[1], l[2]);
+        }
+        for s in &samples {
+            let p = pos + m.mul_vec3(Vec3::new(s.0, s.1, s.2));
+            let d = v.sdf(p);
+            if d < skin {
+                count[k] += 1;
+                deepest[k] = deepest[k].min(d);
             }
         }
+    }
+    // 主导面：skin 带内采样数最多 → 并列取最深
+    let mut best = usize::MAX;
+    for k in 0..6 {
+        if count[k] == 0 {
+            continue;
+        }
+        if best == usize::MAX
+            || count[k] > count[best]
+            || (count[k] == count[best] && deepest[k] < deepest[best])
+        {
+            best = k;
+        }
+    }
+    if best == usize::MAX {
+        return false;
+    }
+    // 表面法线（world）= 主导面翻转
+    let n_world = m.mul_vec3(dirs[best] * -1.0);
+    // 该面的有效采样点（skin 带内）→ 接触
+    let (fcx, fcy, fcz) = (d3[0][best] * h[0], d3[1][best] * h[1], d3[2][best] * h[2]);
+    let axes = match best {
+        0 | 1 => [1usize, 2],
+        2 | 3 => [0, 2],
+        _ => [0, 1],
+    };
+    let mut any = false;
+    for ci in 0..5usize {
+        let (lx, ly, lz) = if ci == 0 {
+            (fcx, fcy, fcz)
+        } else {
+            let (su, sv) = match ci {
+                1 => (-1.0f32, -1.0f32),
+                2 => (-1.0, 1.0),
+                3 => (1.0, -1.0),
+                _ => (1.0, 1.0),
+            };
+            let mut l = [fcx, fcy, fcz];
+            l[axes[0]] = su * h[axes[0]];
+            l[axes[1]] = sv * h[axes[1]];
+            (l[0], l[1], l[2])
+        };
+        let p = pos + m.mul_vec3(Vec3::new(lx, ly, lz));
+        let d = v.sdf(p);
+        if d >= skin {
+            continue;
+        }
+        out.push(vxl_phys_core::interop::InteropContact {
+            point: p,
+            normal: n_world,
+            depth: -d,
+            // 面号(1..6)×16 + 采样号(0 = 中心, 1..4 = 角)：跨帧稳定，供 warm 匹配
+            feature: (best as u32 + 1) * 16 + ci as u32,
+        });
+        any = true;
     }
     any
 }
@@ -376,18 +518,16 @@ mod tests {
             &mut out,
         );
         assert!(any);
-        // 底面（面号 3 ⇒ feature 48..51）恰 4 点、穿透 ≈ 0.1
-        let floor_hits: Vec<_> = out
-            .iter()
-            .filter(|c| (48..52).contains(&c.feature))
-            .collect();
-        assert_eq!(floor_hits.len(), 4, "底面 4 角应命中；out={}", out.len());
-        for c in floor_hits {
+        // **只出主导面**（贴地面）：面号 3 ⇒ feature 48..52（中心 + 4 角共 5 点）、
+        // 穿透 ≈ 0.1、法线 = +Y（面翻转）
+        assert_eq!(out.len(), 5, "只应产出主导面的 5 点；out={}", out.len());
+        for c in &out {
+            assert!((48..53).contains(&c.feature), "feature={}", c.feature);
             assert!((c.depth - 0.1).abs() < 1e-4, "depth={}", c.depth);
             assert!((c.normal.y - 1.0).abs() < 1e-4, "normal={:?}", c.normal);
         }
-        // 侧面下部角点同样真穿透（0.1）⇒ 总接触数 ≥ 12（6 面 × 4 角中触地者）
-        assert!(out.len() >= 12, "out={}", out.len());
+        // 面中心点（feature 48）也应在（对齐落面时中心才给得出正确法线语义）
+        assert!(out.iter().any(|c| c.feature == 48));
         // 提升到 y=2.5（远离表面）⇒ 无接触
         let mut out2 = Vec::new();
         assert!(!contacts_box_voxel(
