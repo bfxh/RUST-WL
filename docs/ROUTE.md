@@ -142,6 +142,12 @@
 1. **写接口**（`vxl-phys-core` 新增 `interop` 模块）：`CollisionProvider` /
    `MediumField` / `StateBridge` / `ConstraintElement` 的 trait 草案 + 文档级示例；
    现有窄相（SAT/高度场）与地形账本**先包一层 provider 实现**（不改行为，哈希守门）。
+   - **状态（2026-09-14）**：✅ 四 trait 草案落位 `vxl-phys-core::interop`；`Aabb`
+     下移 core（broad 再导出，调用点零改动）；首个真实实现
+     `impl CollisionProvider for HeightField` 已落地（含 6 项测试）；
+     哈希逐位不变（纯新增）。见 ADR 0008。
+   - **未做**：现役窄相/地形「经 provider 路径」的迁移（M2 工作项，要求逐位不变）；
+     `ConstraintElement` 的状态视图待 M2 与求解器接口一并定案。
 2. **刚体侧继续**：warm 缓存槽位化（DESIGN-staged-solver §10）→ 复测 →
    再谈结构换挡/P4 岛内并行染色。
 3. **体素域先起**（它同时是 provider 与破坏载体）：稀疏体素 + SDF provider +

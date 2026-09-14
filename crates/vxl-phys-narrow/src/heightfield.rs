@@ -130,3 +130,88 @@ mod tests {
         assert!(hf.sample(100.0, 0.0).is_none());
     }
 }
+
+// ——————————————————————————————————————————————————————————————
+// 互操作层（见 `docs/ROUTE.md` §2.1/§5 与 `vxl_phys_core::interop`）：
+// 高度场作为**第一个 CollisionProvider 实现**（不改行为——本 impl 不接既有管线，
+// 仅提供跨域接口能力；引擎既有高度场窄相路径保持不变）。
+// ——————————————————————————————————————————————————————————————
+
+impl vxl_phys_core::interop::CollisionProvider for HeightField {
+    fn bounds(&self) -> vxl_phys_core::Aabb {
+        // XZ 覆盖范围 × 高度极值（列扫描；调用频率低）。
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for &h in &self.heights {
+            lo = lo.min(h);
+            hi = hi.max(h);
+        }
+        if !lo.is_finite() {
+            lo = 0.0;
+            hi = 0.0;
+        }
+        vxl_phys_core::Aabb {
+            min: Vec3::new(self.origin_x, lo, self.origin_z),
+            max: Vec3::new(
+                self.origin_x + self.width_x(),
+                hi,
+                self.origin_z + self.width_z(),
+            ),
+        }
+    }
+
+    /// 表面最近点：`sample` 给高度与解析法线；有向距离取竖直差在法线上的投影
+    /// （斜坡一阶近似，与窄相竖直列采样同族；专用最优解留给 provider 专项优化）。
+    fn closest_point(&self, p: Vec3) -> Option<vxl_phys_core::interop::SurfaceHit> {
+        let (h, n) = self.sample(p.x, p.z)?;
+        let surface = Vec3::new(p.x, h, p.z);
+        Some(vxl_phys_core::interop::SurfaceHit {
+            point: surface,
+            normal: n,
+            signed_dist: (p - surface).dot(n),
+        })
+    }
+}
+
+#[cfg(test)]
+mod interop_tests {
+    use super::*;
+    use vxl_phys_core::interop::CollisionProvider;
+
+    #[test]
+    fn flat_field_closest_point_and_box_contacts() {
+        let hf = HeightField::flat(-10.0, -10.0, 21, 21, 1.0, 0.5);
+        let hit = hf.closest_point(Vec3::new(0.25, 1.0, -0.25)).unwrap();
+        assert!((hit.point.y - 0.5).abs() < 1e-6);
+        assert!((hit.signed_dist - 0.5).abs() < 1e-6);
+        assert!((hit.normal - Vec3::new(0.0, 1.0, 0.0)).length() < 1e-6);
+        // 盒（半 0.5）落在 y=0.9 ⇒ 底面 4 角穿透 0.1
+        let mut out = Vec::new();
+        let any = hf.contacts_box(
+            Vec3::splat(0.5),
+            Vec3::new(0.0, 0.9, 0.0),
+            vxl_phys_core::Quat::IDENTITY,
+            0.02,
+            &mut out,
+        );
+        assert!(any);
+        assert_eq!(out.len(), 4);
+        for c in &out {
+            assert!((c.depth - 0.1).abs() < 1e-5, "depth={}", c.depth);
+        }
+        assert!(hf.closest_point(Vec3::new(99.0, 1.0, 0.0)).is_none());
+    }
+
+    #[test]
+    fn ramp_normal_points_downhill_outward() {
+        let mut hf = HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0);
+        for iz in 0..11u32 {
+            for ix in 0..11u32 {
+                hf.set_height(ix, iz, ix as f32);
+            }
+        }
+        let hit = hf.closest_point(Vec3::new(2.5, 3.0, 0.0)).unwrap();
+        assert!(hit.normal.x < -0.5, "法线应逆坡：{:?}", hit.normal);
+        assert!(hit.normal.y > 0.5);
+    }
+}
