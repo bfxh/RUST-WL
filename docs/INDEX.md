@@ -61,3 +61,6 @@
   —— 复现：`cargo run --release -p vxl-phys --example showcase` 后
   `python scripts/render_demo.py`；对照：`cd gold-sample && cargo run --release -- pile5 200`。
 - **ADR 0010**：凸体外壳与高斯喷溅的接入方式（HullStore/点查询/隐式场/预断裂）。
+- **同屏对照**：`docs/demo/compare_full.gif`（左 vxl-phys / 右 rapier，同场景同相机）
+  —— 复现：`cd gold-sample && cargo run --release -- col45 240 16 0.01 4 3.0 30 1 "../out/compare.bin"`
+  然后 `python scripts/render_compare.py`。

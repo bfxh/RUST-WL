@@ -1,7 +1,12 @@
 //! T5 金样对拍（提前做）：同场景双引擎行为对照——首要问题：25 层留缝塔的
 //! 坍塌是物理还是数值？（Rapier 0.35 默认 = TGS-Soft 软接触 4 迭代）。
 //!
-//! 用法：cargo run --release -- [scene] [ticks] [vxl_iters]
+//! 用法：cargo run --release -- [scene] [ticks] [vxl_iters] [skin] [inner] [maxcorr]
+//!        [freq] [substeps] [dump.bin]
+//!   dump.bin（可选）：逐帧（每 2 tick）写两侧引擎位姿 + 各自 step 墙钟
+//!   ⇒ `scripts/render_compare.py` 生成同屏对照 GIF（docs/demo/compare_full.gif）。
+//!   「活跃 tick 口径」：入睡后 step 近似空转 ⇒ 全期均值会被稀释（教训：首版得出
+//!   rapier 0.01 ms/tick 的假数据），故同时报「活跃 tick 均值」。
 //!   scene: tower25 = 25 层 × 10×10 | pile5 = 5 层 × 20×20 | col45 = 5 层 × 3×3
 //!   （均：盒 0.5、密度 1000、μ 0.5、e 0、缝 2cm、盒地板）
 //! 输出：逐 50 tick 双引擎汇总（|v|max / KE / 入睡数 / 最深穿透 / 高度带）
@@ -221,6 +226,8 @@ fn main() {
     let maxcorr: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3.0);
     let freq: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30.0);
     let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // 可选：逐帧转储路径（同屏可视化对比用；空 = 不转储）
+    let dump_path = args.next();
     let s = scene_of(&scene_name);
 
     let (mut vw, vids) = build_vxl(&s, vxl_iters, skin, inner, maxcorr, freq, substeps);
@@ -234,6 +241,18 @@ fn main() {
         vids.len()
     );
     println!("tick | 引擎 | |v|max | KE(J) | 入睡 | 最深 | y 带");
+    // 转储头：magic + 每帧 tick 数 + 盒半长（场景统一 0.5）
+    let mut dump: Option<std::io::BufWriter<std::fs::File>> = match &dump_path {
+        Some(dp) => {
+            let mut f = std::io::BufWriter::new(std::fs::File::create(dp).expect("dump 打开失败"));
+            use std::io::Write as _;
+            f.write_all(b"VXLC").unwrap();
+            f.write_all(&2u32.to_le_bytes()).unwrap(); // 每帧 2 tick
+            f.write_all(&0.5f32.to_le_bytes()).unwrap(); // 半长
+            Some(f)
+        }
+        None => None,
+    };
     // SPEC §3 稳定性判据实测：「休眠体被重复唤醒 < 1 次/秒/体」——统计每体的
     // asleep→awake 反转次数（本跑 ticks tick ⇒ 合规线 = ticks/60 次/体）。
     let mut prev_awake: Vec<bool> = vids.iter().map(|&i| vw.bodies.awake[i]).collect();
@@ -264,6 +283,34 @@ fn main() {
                 flips[k] += 1;
             }
             prev_awake[k] = vw.bodies.awake[i];
+        }
+        // 逐帧转储（每 2 tick 一帧；两侧引擎位姿 + 各自 step 墙钟）
+        if dump_path.is_some() {
+            if t % 2 == 0 {
+                if let Some(f) = dump.as_mut() {
+                    use std::io::Write as _;
+                    f.write_all(&(t as u32).to_le_bytes()).unwrap();
+                    f.write_all(&((dt_vxl as f32) / 1e6).to_le_bytes()).unwrap();
+                    f.write_all(&((dt_rap as f32) / 1e6).to_le_bytes()).unwrap();
+                    let n = vids.len() as u32;
+                    f.write_all(&n.to_le_bytes()).unwrap();
+                    for &i in &vids {
+                        let p = vw.bodies.position[i];
+                        let q = vw.bodies.rot(i);
+                        for v in [p.x, p.y, p.z, q.x, q.y, q.z, q.w] {
+                            f.write_all(&v.to_le_bytes()).unwrap();
+                        }
+                    }
+                    for &h in &rhs {
+                        let b = rw.bodies.get(h).expect("body");
+                        let p = b.translation();
+                        let q = b.rotation();
+                        for v in [p.x, p.y, p.z, q.x, q.y, q.z, q.w] {
+                            f.write_all(&v.to_le_bytes()).unwrap();
+                        }
+                    }
+                }
+            }
         }
         if t % 50 == 0 || t == ticks {
             let a = summary_vxl(&vw, &vids);
@@ -309,7 +356,11 @@ fn main() {
         );
     }
         {
-        let timed = ticks as f64;
+        if let Some(f) = dump.as_mut() {
+        use std::io::Write as _;
+        f.flush().unwrap();
+    }
+    let timed = ticks as f64;
         let v_ms = vxl_ns as f64 / timed / 1e6;
         let r_ms = rapier_ns as f64 / timed / 1e6;
         let v_act = vxl_active.max(1) as f64;

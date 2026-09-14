@@ -211,3 +211,7 @@
 | 网格（任意三角网） | ⏳ | 需 trimesh 提供者（BVH + 点/面查询）；凸壳点云已覆盖凸体通路 |
 | 液体 / 软体 / 布 | ⏳ | crate 骨架在（`vxl-phys-fluid` / `vxl-phys-soft`），求解器待接 |
 | 体素→粒子（沙/尘） | ⏳ | M3 残留（下一个自然切片） |
+
+**可视化对照**（2026-09-14 追加）：`gold-sample` 支持逐帧转储（第 9 个参数 = dump 路径），
+`scripts/render_compare.py` 渲染左右同屏（同场景/同相机/同 tick，底栏各自 ms/FPS）⇒
+`docs/demo/compare_full.gif`；速度口径与结论见 EXPERIMENTS「双引擎对照」节。
