@@ -290,6 +290,19 @@ impl World {
     /// 确定性：提取顺序 = 固定扫描序（见 `VoxelVolume::extract_boxes`）；
     /// 碎块质量 = `density × 8·hx·hy·hz`。
     pub fn spawn_box_debris(&mut self, id: u32, min: Vec3, max: Vec3, density: f32) -> usize {
+        self.spawn_box_debris_vel(id, min, max, density, Vec3::ZERO)
+    }
+
+    /// 同 [`spawn_box_debris`](Self::spawn_box_debris)，但碎块带初速 `vel`
+    /// （冲击破坏用：碎块继承部分冲击速度 ⇒ 与冲击体的相对速度被压低）。
+    pub fn spawn_box_debris_vel(
+        &mut self,
+        id: u32,
+        min: Vec3,
+        max: Vec3,
+        density: f32,
+        vel: Vec3,
+    ) -> usize {
         let Some(vol) = self.providers.voxel_mut(id) else {
             return 0;
         };
@@ -297,11 +310,83 @@ impl World {
         let n = boxes.len();
         for (c, h) in boxes {
             let mass = density * 8.0 * h.x * h.y * h.z;
-            self.bodies
-                .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+            let b =
+                self.bodies
+                    .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+            self.bodies.linvel[b as usize] = vel;
         }
         self.refresh_provider_bounds();
         n
+    }
+
+    /// **冲击破坏（M3）**：扫描最近一次检测的流形，对「动体 × provider(id)」的
+    /// **高速接触**在接触点处挖出并转为碎块（挖出半径随冲击速度增长）。
+    /// 返回本次产生的碎块总数。确定性：按流形序处理、挖域为轴对齐盒、
+    /// 提取顺序固定（见 `extract_boxes`）。
+    ///
+    /// `speed_threshold` = 触发阈值（m/s，取动体速度）；`density` = 碎块密度。
+    pub fn apply_impact_destruction(
+        &mut self,
+        id: u32,
+        speed_threshold: f32,
+        density: f32,
+    ) -> usize {
+        // 先在只读扫描里收集「挖点」（按流形序），再逐个挖 —— 保持确定性。
+        let mut digs: Vec<(Vec3, f32, Vec3)> = Vec::new();
+        for m in &self.manifolds {
+            let (sa, sb) = (
+                self.bodies.shape[m.a as usize],
+                self.bodies.shape[m.b as usize],
+            );
+            let (other, prov) = match (sa, sb) {
+                (Shape::Provider(p), _) => (m.b, p),
+                (_, Shape::Provider(p)) => (m.a, p),
+                _ => continue,
+            };
+            if prov != id || !self.bodies.is_dynamic(other as usize) {
+                continue;
+            }
+            let v = self.bodies.linvel[other as usize];
+            let sp = v.length();
+            if sp < speed_threshold {
+                continue;
+            }
+            // 接触点 = 流形点均值（确定性）
+            let n = m.points.len().max(1) as f32;
+            let mut c = Vec3::ZERO;
+            for p in m.points.iter() {
+                c += p.point;
+            }
+            digs.push((c * (1.0 / n), sp, v));
+        }
+        let mut total = 0usize;
+        for (c, sp, v) in digs {
+            // 挖出半径随**实际冲击速度**增长（钳到 0.25..0.9 m）
+            let r = (0.2 + 0.06 * sp).clamp(0.25, 0.9);
+            // 挖域沿**冲击方向**前推 r：碎块生成在墙体内、避开冲击体本体
+            // （否则与冲击体深度重叠 ⇒ 分离冲量注入能量，实测 KE 异常增长）。
+            let dir = if v.length_squared() > 1e-9 {
+                v.normalize()
+            } else {
+                Vec3::ZERO
+            };
+            let center = c + dir * r;
+            // 碎块**静止生成**（初速留给调用方用 `spawn_box_debris_vel` 显式给；
+            // 引擎不凭空造动量——「继承半速」实测是能量源，已否）。
+            total += self.spawn_box_debris_vel(
+                id,
+                center - Vec3::splat(r),
+                center + Vec3::splat(r),
+                density,
+                Vec3::ZERO,
+            );
+        }
+        total
+    }
+
+    /// 提供者集合只读视图（体素体诊断/可视化用）。
+    pub fn providers(&self) -> &Providers {
+        &self.providers
     }
 
     /// 提供者数据变化（如体素挖洞）后刷新宽相 AABB（确定性：按 id 序全量重算）。
@@ -624,6 +709,51 @@ mod tests {
             }
         }
         assert!(top > 3.3 && top < 3.7, "碎块应停在余柱上，实际 top={top}");
+    }
+
+    /// **M3 冲击破坏**：高速盒撞体素墙 ⇒ 接触点处挖洞并产出碎块；墙体素减少、
+    /// 场景干净，且**整轮可复现**（同一构造两次 → 碎块数/末态哈希一致）。
+    #[test]
+    fn impact_carves_wall_and_spawns_debris() {
+        let run = || -> (usize, usize, usize, u128) {
+            let mut w = World::new(PhysConfig::default());
+            // 地板（整幅 1 层）+ 墙（X ∈ [0,0.5]、Y ∈ [0.5,2.5)、Z ∈ [−2,2)）
+            let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
+                Vec3::new(-4.0, 0.0, -4.0),
+                0.5,
+                16,
+                16,
+                16,
+            );
+            vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 0.5, 4.0));
+            vol.fill_box(Vec3::new(0.0, 0.5, -2.0), Vec3::new(0.5, 2.5, 2.0));
+            let filled0 = vol.filled_count();
+            w.add_voxel(vol);
+            // 炮弹：半 0.4 的盒，以 12 m/s 冲墙
+            let bullet = w.add_dynamic(
+                Shape::Box {
+                    half: Vec3::splat(0.4),
+                },
+                Vec3::new(-3.0, 1.0, 0.0),
+                Quat::IDENTITY,
+                2000.0,
+            );
+            w.bodies.linvel[bullet as usize] = Vec3::new(12.0, 0.0, 0.0);
+            let mut debris_total = 0usize;
+            for _ in 0..240 {
+                w.step();
+                debris_total += w.apply_impact_destruction(0, 3.0, 1000.0);
+            }
+            let filled1 = w.providers.voxel(0).unwrap().filled_count();
+            let bodies = w.bodies.len();
+            (debris_total, filled0 - filled1, bodies, w.state_hash())
+        };
+        let (debris, carved, _bodies, hash1) = run();
+        assert!(debris > 0, "应触发冲击破坏（产出碎块）");
+        assert!(carved > 0, "墙体素应减少（挖洞）carved={carved}");
+        let (debris2, carved2, _b, hash2) = run();
+        assert_eq!((debris, carved), (debris2, carved2), "破坏应可复现（计数）");
+        assert_eq!(hash1, hash2, "破坏应可复现（末态哈希逐位一致）");
     }
 
     #[test]
