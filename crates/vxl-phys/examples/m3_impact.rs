@@ -15,15 +15,15 @@ use vxl_phys_core::{PhysConfig, Quat, Shape, Vec3};
 fn main() {
     let mut args = std::env::args().skip(1);
     let ticks: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(300);
-    let speed: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(12.0);
+    let speed: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8.0);
+    // 触发阈值（m/s）：低阈值 ⇒ 碎块自己落地也触发 ⇒ 级联挖穿地板（实测教训）
+    let threshold: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(8.0);
 
-    // 打开选择性 CCD（默认关）：12 m/s 的弹体每 tick 走 0.2 m，不扫掠会隧穿
-    // 体素皮肤带（实测瞬时最深 0.42 m ⇒ 穿透解算注入能量）。阈值 5 m/s。
-    let cfg = PhysConfig {
-        ccd_speed_threshold: 5.0,
-        ..PhysConfig::default()
-    };
-    let mut w = World::new(cfg);
+    // **CCD 默认关**（保持引擎默认）：已实测「CCD × 静止接触」会互相打架——
+    // 贴地滑行的体每个扫描采样都判定为命中 ⇒ 被钳回起点、原地锁死（真 bug，
+    // 判据需细化为「只对**新出现的/更深的**接触钳位」）。因此本例默认速度取
+    // 8 m/s（0.13 m/tick < 皮肤带 × 格边距 ⇒ 无隧穿），无需 CCD 也能跑干净。
+    let mut w = World::new(PhysConfig::default());
     // 地板（整幅 1 层）+ 墙（1 格厚、4 格高、8 格深）
     let mut vol =
         vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 16, 16);
@@ -45,7 +45,7 @@ fn main() {
     w.bodies.linvel[bullet as usize] = Vec3::new(speed, 0.0, 0.0);
 
     println!(
-        "场景：体素墙 {} 格（初始）| 炮弹 {speed} m/s | {ticks} tick | 阈值 3 m/s",
+        "场景：体素墙 {} 格（初始）| 炮弹 {speed} m/s | {ticks} tick | 阈值 {threshold} m/s",
         filled0
     );
     println!("tick | 墙体素 | 碎块累计 | 动态体 | KE(J) | 清醒 | 最深");

@@ -332,7 +332,7 @@ impl World {
         density: f32,
     ) -> usize {
         // 先在只读扫描里收集「挖点」（按流形序），再逐个挖 —— 保持确定性。
-        let mut digs: Vec<(Vec3, f32, Vec3)> = Vec::new();
+        let mut digs: Vec<(Vec3, f32, Vec3, f32)> = Vec::new();
         for m in &self.manifolds {
             let (sa, sb) = (
                 self.bodies.shape[m.a as usize],
@@ -357,29 +357,37 @@ impl World {
             for p in m.points.iter() {
                 c += p.point;
             }
-            digs.push((c * (1.0 / n), sp, v));
+            // 冲击体沿冲击方向的半径（保守：包围球半径）——挖域从它之外开始
+            let reach = self.bodies.shape[other as usize]
+                .bounding_sphere_radius()
+                .min(2.0);
+            digs.push((c * (1.0 / n), sp, v, reach));
         }
         let mut total = 0usize;
-        for (c, sp, v) in digs {
+        for (c, sp, v, reach) in digs {
             // 挖出半径随**实际冲击速度**增长（钳到 0.25..0.9 m）
             let r = (0.2 + 0.06 * sp).clamp(0.25, 0.9);
-            // 挖域沿**冲击方向**前推 r：碎块生成在墙体内、避开冲击体本体
-            // （否则与冲击体深度重叠 ⇒ 分离冲量注入能量，实测 KE 异常增长）。
             let dir = if v.length_squared() > 1e-9 {
                 v.normalize()
             } else {
                 Vec3::ZERO
             };
-            let center = c + dir * r;
+            // **挖域 = 冲击体之后的一段板**（从「接触点 + 冲击体半径之外」起、
+            // 沿冲击方向延伸 2r；截面半径 r）。构造上不与冲击体重叠 ⇒ 不会被
+            // 位置修正挤出（此前「接触点周围的盒」会让碎块与弹体重叠 ⇒ 挤出 +
+            // 隧道逃逸，实测「逃逸」计数与 KE 异常增长）。
+            let near = c + dir * (reach + 0.05);
+            let far = near + dir * (2.0 * r);
+            let (mn, mx) = if dir.dot(Vec3::X) >= 0.0 {
+                (near, far)
+            } else {
+                (far, near)
+            };
+            let lo = Vec3::new(mn.x.min(mx.x) - r, mn.y.min(mx.y) - r, mn.z.min(mx.z) - r);
+            let hi = Vec3::new(mn.x.max(mx.x) + r, mn.y.max(mx.y) + r, mn.z.max(mx.z) + r);
             // 碎块**静止生成**（初速留给调用方用 `spawn_box_debris_vel` 显式给；
             // 引擎不凭空造动量——「继承半速」实测是能量源，已否）。
-            total += self.spawn_box_debris_vel(
-                id,
-                center - Vec3::splat(r),
-                center + Vec3::splat(r),
-                density,
-                Vec3::ZERO,
-            );
+            total += self.spawn_box_debris_vel(id, lo, hi, density, Vec3::ZERO);
         }
         total
     }

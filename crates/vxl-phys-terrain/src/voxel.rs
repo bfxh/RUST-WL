@@ -105,10 +105,18 @@ impl VoxelVolume {
         }
     }
 
-    /// 填充世界系盒域内的格（`min`/`max` 为世界坐标）。
+    /// 填充世界系盒域内的格（`min`/`max` 为世界坐标；**max 侧开区间**：
+    /// 只填完全落在 `[min, max)` 内的格——`max = 1.5` 且格边长 0.5 时填到
+    /// 顶面 1.5，而不是把 [1.5,2.0) 也填上。闭区间语义曾让场景「地板比预期
+    /// 厚一格」（实测：炮弹开局嵌在地板里、tick 1 就触发破坏）。
     pub fn fill_box(&mut self, min: Vec3, max: Vec3) {
         let lo = self.grid_of(min);
-        let hi = self.grid_of(max);
+        let inv = 1.0 / self.step;
+        let hi = (
+            ((max.x - self.origin.x) * inv).ceil() as i32 - 1,
+            ((max.y - self.origin.y) * inv).ceil() as i32 - 1,
+            ((max.z - self.origin.z) * inv).ceil() as i32 - 1,
+        );
         for iz in lo.2.max(0)..=hi.2.min(self.nz as i32 - 1) {
             for iy in lo.1.max(0)..=hi.1.min(self.ny as i32 - 1) {
                 for ix in lo.0.max(0)..=hi.0.min(self.nx as i32 - 1) {
@@ -538,6 +546,26 @@ mod tests {
             0.02,
             &mut out2
         ));
+    }
+
+    #[test]
+    fn box_fully_embedded_reports_contact() {
+        // 回归：盒**完全嵌入**体积内部时也必须报接触——否则碎块会「自由落体
+        // 穿地」（实测逃逸机制：体素挖出的碎块嵌在残余结构里却拿不到接触）。
+        let v = floor_volume(); // 顶面 y=1.0
+        let mut out = Vec::new();
+        let any = contacts_box_voxel(
+            &v,
+            Vec3::splat(0.5),
+            Vec3::new(0.25, 0.75, 0.25), // 底 0.25、顶 1.25 ⇒ 完全在体内
+            Quat::IDENTITY,
+            0.02,
+            &mut out,
+        );
+        assert!(any, "完全嵌入的盒必须报接触（out={}）", out.len());
+        assert!(!out.is_empty());
+        // 深度应为正（穿透）
+        assert!(out[0].depth > 0.0, "depth={}", out[0].depth);
     }
 
     #[test]
