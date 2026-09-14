@@ -300,6 +300,91 @@ impl VoxelVolume {
         out
     }
 
+    /// **体素 Voronoi 分区（预断裂）**：把 `[min, max]` 域内的占据格按「距最近种子」
+    /// 归属到 `seeds` 的某一格，逐种子提取成碎块盒（贪心同 `extract_where`）。
+    /// 返回 `(种子序号, 碎块盒列表)`（顺序 = 种子序；无格的种子不出现）。
+    ///
+    /// **确定性**：归属判据 = 格心到种子的平方距离，**并列取序号小的种子**；
+    /// 提取顺序 = 种子序，内部扫描序固定。**守恒**：分区是对域内占据格的**划分**
+    /// （每格恰好被提取一次）⇒ 提取总格数 = 域内原占据格数（测试守门）。
+    pub fn fracture_voronoi(
+        &mut self,
+        min: Vec3,
+        max: Vec3,
+        seeds: &[Vec3],
+    ) -> Vec<(usize, Vec<(Vec3, Vec3)>)> {
+        if seeds.is_empty() {
+            return Vec::new();
+        }
+        let (origin, step) = (self.origin, self.step);
+        let mut out = Vec::new();
+        for (si, &seed) in seeds.iter().enumerate() {
+            let boxes = self.extract_where(min, max, |ix, iy, iz| {
+                let c =
+                    origin + Vec3::new(ix as f32 + 0.5, iy as f32 + 0.5, iz as f32 + 0.5) * step;
+                let d_me = (c - seed).length_squared();
+                // 并列取序号小者：只有「更近」或「并列且序号更小」才归我
+                for (sj, &other) in seeds.iter().enumerate() {
+                    if sj == si {
+                        continue;
+                    }
+                    let d_o = (c - other).length_squared();
+                    if d_o < d_me || (d_o == d_me && sj < si) {
+                        return false;
+                    }
+                }
+                true
+            });
+            if !boxes.is_empty() {
+                out.push((si, boxes));
+            }
+        }
+        out
+    }
+
+    /// **确定性抖动种子**（Voronoi 预断裂用）：`n` 个种子按立方根网格铺开 + 整数
+    /// 哈希抖动（无外部 RNG；同参数 ⇒ 同结果）。`jitter` ∈ [0,1] 为格内抖动比例。
+    pub fn seeds_jittered(min: Vec3, max: Vec3, n: usize, jitter: f32) -> Vec<Vec3> {
+        let n = n.max(1);
+        let side = (n as f64).cbrt().ceil().max(1.0) as usize;
+        let inv = 1.0 / side as f32;
+        let mut out = Vec::with_capacity(side * side * side);
+        let mut k = 0usize;
+        for iz in 0..side {
+            for iy in 0..side {
+                for ix in 0..side {
+                    if out.len() >= n {
+                        break;
+                    }
+                    // 整数哈希（确定性；splitmix 尾步）
+                    let mut h = (k as u64)
+                        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        .wrapping_add(0x1234_5678_9ABC_DEF0);
+                    h ^= h >> 30;
+                    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                    h ^= h >> 27;
+                    let jx = ((h & 0xFFFF) as f32 / 65535.0 - 0.5) * jitter;
+                    let jy = (((h >> 16) & 0xFFFF) as f32 / 65535.0 - 0.5) * jitter;
+                    let jz = (((h >> 32) & 0xFFFF) as f32 / 65535.0 - 0.5) * jitter;
+                    let t = Vec3::new(
+                        (ix as f32 + 0.5 + jx) * inv,
+                        (iy as f32 + 0.5 + jy) * inv,
+                        (iz as f32 + 0.5 + jz) * inv,
+                    );
+                    // 分量式：`Vec3` 无逐分量乘法
+                    out.push(Vec3::new(
+                        min.x + (max.x - min.x) * t.x,
+                        min.y + (max.y - min.y) * t.y,
+                        min.z + (max.z - min.z) * t.z,
+                    ));
+                    k += 1;
+                }
+            }
+        }
+        out.truncate(n);
+        out
+    }
+
     /// SDF 的最小格（用于测试/诊断）。
     pub fn occupied_bounds(&self) -> Option<Aabb> {
         if !self.any {
@@ -713,6 +798,33 @@ mod tests {
         // 球外的角点仍在
         assert!(v.get(0, 0, 0));
         assert!(v.get(7, 7, 7));
+    }
+
+    #[test]
+    fn voronoi_fracture_tiles_region_exactly() {
+        // 守恒：Voronoi 分区是对域内占据格的**划分** ⇒ 提取总格数 = 原占据格数
+        let mut v = VoxelVolume::new(Vec3::ZERO, 0.5, 8, 8, 8);
+        v.fill_box(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0));
+        let filled0 = v.filled_count();
+        let seeds =
+            VoxelVolume::seeds_jittered(Vec3::new(0.5, 0.5, 0.5), Vec3::new(3.5, 3.5, 3.5), 8, 0.6);
+        assert_eq!(seeds.len(), 8);
+        let cells = v.fracture_voronoi(Vec3::ZERO, Vec3::new(4.0, 4.0, 4.0), &seeds);
+        assert!(!cells.is_empty(), "应至少产出一个碎块簇");
+        // 守恒：提取到的格数（按盒体积折算）× 全部 = 原格数
+        let mut removed = 0usize;
+        for (_, boxes) in &cells {
+            for (_, h) in boxes {
+                // 盒体积 / 格体积 = 覆盖格数（贪心合并的盒都是整格并集）
+                removed += ((2.0 * h.x / 0.5).round()
+                    * (2.0 * h.y / 0.5).round()
+                    * (2.0 * h.z / 0.5).round()) as usize;
+            }
+        }
+        assert_eq!(removed, filled0, "Voronoi 分区必须恰好覆盖域内全部占据格");
+        assert_eq!(v.filled_count(), 0, "域内应被全部提取");
+        // 种子数 ≥ 2 时通常至少 2 个非空簇（8 个种子 + 抖动 ⇒ 必然多簇）
+        assert!(cells.len() >= 2, "多种子应产出多个簇；实际 {}", cells.len());
     }
 
     #[test]

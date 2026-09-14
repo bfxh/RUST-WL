@@ -336,6 +336,35 @@ impl World {
         n
     }
 
+    /// **Voronoi 预断裂（M3）**：把域内体素按「距最近种子」分块（划分，守恒），
+    /// 每块提取为刚体碎块并移除。`seeds` 由调用方给（可用
+    /// `vxl_phys_terrain::voxel::VoxelVolume::seeds_jittered` 生成确定性抖动种子）。
+    /// 返回碎块总数。
+    pub fn fracture_voronoi(
+        &mut self,
+        id: u32,
+        min: Vec3,
+        max: Vec3,
+        seeds: &[Vec3],
+        density: f32,
+    ) -> usize {
+        let Some(vol) = self.providers.voxel_mut(id) else {
+            return 0;
+        };
+        let cells = vol.fracture_voronoi(min, max, seeds);
+        let mut n = 0usize;
+        for (_si, boxes) in cells {
+            for (c, h) in boxes {
+                let mass = density * 8.0 * h.x * h.y * h.z;
+                self.bodies
+                    .push_dynamic(Shape::Box { half: h }, c, Quat::IDENTITY, mass.max(1e-3));
+                n += 1;
+            }
+        }
+        self.refresh_provider_bounds();
+        n
+    }
+
     /// **冲击破坏（M3）**：扫描最近一次检测的流形，对「动体 × provider(id)」的
     /// **高速接触**在接触点处挖出并转为碎块（挖出半径随冲击速度增长）。
     /// 返回本次产生的碎块总数。确定性：按流形序处理、挖域为轴对齐盒、
