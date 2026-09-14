@@ -42,6 +42,7 @@ def parse():
     with open(path, "rb") as f:
         assert f.read(4) == b"VXLD", "magic 不符"
         ver, ticks, tpf, dt = struct.unpack("<IIIf", f.read(16))
+        assert ver in (1, 2), f"版本不支持：{ver}"
         nx, ny, nz = struct.unpack("<III", f.read(12))
         ox, oy, oz, step = struct.unpack("<4f", f.read(16))
         (nsplat,) = struct.unpack("<I", f.read(4))
@@ -52,6 +53,14 @@ def parse():
             (op,) = struct.unpack("<f", f.read(4))
             col = struct.unpack("<3f", f.read(12))
             splats.append((c, s, op, col))
+        meshes = []
+        if ver >= 2:
+            (nmesh,) = struct.unpack("<I", f.read(4))
+            for _ in range(nmesh):
+                nv, nt = struct.unpack("<II", f.read(8))
+                verts = [struct.unpack("<3f", f.read(12)) for _ in range(nv)]
+                tris = [struct.unpack("<3I", f.read(12)) for _ in range(nt)]
+                meshes.append((verts, tris))
         frames = []
         nbits = (nx * ny * nz + 7) // 8
         while True:
@@ -78,7 +87,7 @@ def parse():
             frames.append((tick, ms, bodies, bits))
     return dict(
         ticks=ticks, tpf=tpf, dt=dt, dims=(nx, ny, nz),
-        origin=(ox, oy, oz), step=step, splats=splats, frames=frames,
+        origin=(ox, oy, oz), step=step, splats=splats, meshes=meshes, frames=frames,
     )
 
 
@@ -261,6 +270,23 @@ def main():
             prims.append((sum(s[2] for s in scr) / 4, "poly",
                           [(s[0], s[1]) for s in scr], shade(col, n)))
 
+        # ---- 三角网（静态薄壳面；背面剔除，防双面条纹）----
+        for (verts, tris) in data["meshes"]:
+            for (a, b, c) in tris:
+                pa, pb, pc = verts[a], verts[b], verts[c]
+                ctr = ((pa[0] + pb[0] + pc[0]) / 3, (pa[1] + pb[1] + pc[1]) / 3,
+                       (pa[2] + pb[2] + pc[2]) / 3)
+                n = norm(cross(sub(pb, pa), sub(pc, pa)))
+                view = norm(sub(cam.eye, ctr))
+                if dot(n, view) <= 0.0:
+                    continue
+                scr = [cam.project(p) for p in (pa, pb, pc)]
+                if any(s is None for s in scr):
+                    continue
+                prims.append((sum(s[2] for s in scr) / 3, "poly",
+                              [(s[0], s[1]) for s in scr],
+                              shade((0.55, 0.60, 0.85), n)))
+
         # ---- 喷溅（软光斑）----
         for (c, s, op, col) in splats:
             scr = cam.project(c)
@@ -348,7 +374,7 @@ def main():
         fps = 1000.0 / ms if ms > 0 else 0
         dr.rectangle([0, 0, W, 22], fill=(10, 12, 16, 200))
         dr.text((8, 4), "vxl-phys", font=fontb, fill=(120, 220, 255))
-        dr.text((86, 5), "体素 · 多边形 · 高斯喷溅 · 刚体（四域同场）",
+        dr.text((86, 5), "体素 · 多边形 · 高斯喷溅 · 三角网 · 刚体（五域同场）",
                 font=font, fill=(200, 210, 225))
         dr.text((8, H - 18),
                 f"tick {tick}  |  {ms:.2f} ms/tick  |  {fps:.0f} FPS  |  体 {len(bodies)}",

@@ -4,13 +4,15 @@
 //! 运行：`cargo run --release -p vxl-phys --example showcase [ticks] [out.bin]`
 //! 默认 600 tick（每帧 2 tick ⇒ 30 fps × 10 s）。
 //!
-//! 场景（四个域同屏，ROUTE §3）：
+//! 场景（五个域同屏，ROUTE §3）：
 //! - 体素：地板 + 墙体；炮弹冲击 ⇒ 挖洞 + 碎块（破坏管线）；
 //! - 多边形：立方体外壳 Voronoi 预断裂 ⇒ 8 个凸碎块落地；
 //! - 高斯喷溅：球状云 ⇒ 盒堆落在隐式场等值面上；
+//! - 三角网：波浪台面（TriMesh 薄壳 + 均匀网格加速）⇒ 盒/球落在任意三角面上；
 //! - 刚体盒：自由堆积（宽相/求解器负载）。
 //!
 //! 转储格式（小端）：见 `write_header`/`write_frame` 注释（渲染器逐字节对应）。
+//! 版本 2 = 头部在喷溅节后追加三角网节（张数 + 每张顶点/三角形表）。
 
 use std::io::Write;
 use vxl_phys::*;
@@ -19,7 +21,7 @@ use vxl_phys_core::{PhysConfig, Quat, Shape, Vec3};
 const KIND_BOX: u8 = 0;
 const KIND_SPHERE: u8 = 1;
 const KIND_HULL: u8 = 2;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -118,6 +120,31 @@ fn main() {
         ));
     }
 
+    // ---- 三角网：波浪台面（x,z ∈ [4,8]，架在体素地板上方）----
+    let (mn, mstep) = (9usize, 0.5f32);
+    let mut mesh_verts: Vec<Vec3> = Vec::new();
+    for i in 0..mn {
+        for j in 0..mn {
+            let u = i as f32 * mstep;
+            let v = j as f32 * mstep;
+            let y = 1.55 + 0.225 * (1.0 + (0.9 * u).sin() * (0.9 * v).sin());
+            mesh_verts.push(Vec3::new(4.0 + u, y, -7.5 + v));
+        }
+    }
+    let mut mesh_tris: Vec<[u32; 3]> = Vec::new();
+    for i in 0..mn - 1 {
+        for j in 0..mn - 1 {
+            let a = (i * mn + j) as u32;
+            let b = ((i + 1) * mn + j) as u32;
+            let c = ((i + 1) * mn + j + 1) as u32;
+            let d = (i * mn + j + 1) as u32;
+            mesh_tris.push([a, d, b]); // 绕序使面法线朝 +y
+            mesh_tris.push([b, d, c]);
+        }
+    }
+    let mesh_pid = w.providers().len() as u32; // push_mesh 追加 ⇒ provider id = 注册前长度
+    let _mesh_body = w.add_mesh(vxl_phys_terrain::mesh::TriMesh::new(mesh_verts, mesh_tris));
+
     // ---- 炮弹（冲击体素墙）----
     let bullet = w.add_dynamic(
         Shape::Sphere { radius: 0.35 },
@@ -126,6 +153,29 @@ fn main() {
         3000.0,
     );
     w.bodies.linvel[bullet as usize] = Vec3::new(11.0, -0.5, 0.0);
+
+    // ---- 落在波浪台面上的盒与球 ----
+    let mut mesh_boxes = Vec::new();
+    for i in 0..5 {
+        mesh_boxes.push(w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.24),
+            },
+            Vec3::new(
+                4.6 + (i % 3) as f32 * 0.6,
+                4.0 + (i / 3) as f32 * 0.55,
+                -5.3 + (i / 3) as f32 * 0.7,
+            ),
+            Quat::IDENTITY,
+            750.0,
+        ));
+    }
+    let _mesh_ball = w.add_dynamic(
+        Shape::Sphere { radius: 0.3 },
+        Vec3::new(6.2, 4.6, -4.1),
+        Quat::IDENTITY,
+        700.0,
+    );
 
     // ---- 转储 ----
     std::fs::create_dir_all("out").ok();
@@ -161,6 +211,22 @@ fn main() {
         }
         for c in s.color {
             f.write_all(&c.to_le_bytes()).unwrap();
+        }
+    }
+
+    // 三角网（静态一次）：张数 + 每张（顶点数 + 三角形数 + 顶点 3f + 三角形 3×u32）
+    let mesh = w.providers().mesh(mesh_pid).unwrap();
+    f.write_all(&1u32.to_le_bytes()).unwrap(); // 场景内网格张数
+    f.write_all(&(mesh.verts().len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(mesh.tris().len() as u32).to_le_bytes()).unwrap();
+    for p in mesh.verts() {
+        for v in [p.x, p.y, p.z] {
+            f.write_all(&v.to_le_bytes()).unwrap();
+        }
+    }
+    for t in mesh.tris() {
+        for ix in t {
+            f.write_all(&ix.to_le_bytes()).unwrap();
         }
     }
 
@@ -253,12 +319,13 @@ fn main() {
     let frames = ticks / 2;
     println!(
         "转储完成：{out_path}（{frames} 帧 | {ticks} tick）\n\
-         体素 {} 格 | 外壳碎块 {} | 盒 {} | 云上盒 {} | 喷溅 {} 颗\n\
+         体素 {} 格 | 外壳碎块 {} | 盒 {} | 云上盒 {} | 台面上盒 {} + 球 1 | 喷溅 {} 颗\n\
          单 tick 均值 {:.2} ms（{:.0} FPS）| 峰值 {:.2} ms",
         w.providers().voxel(voxel_id).unwrap().filled_count(),
         pieces.len(),
         boxes.len(),
         cloud_boxes.len(),
+        mesh_boxes.len() + 1,
         w.providers().splat(splat_id).unwrap().len(),
         ms_sum / ticks as f64,
         1000.0 / (ms_sum / ticks as f64),
