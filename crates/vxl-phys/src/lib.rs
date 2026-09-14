@@ -564,8 +564,15 @@ impl World {
                 if let Some(m) = self.ccd_manifolds.first() {
                     // 法线 a→b；换算成「推离表面、指向动体」的方向。
                     let n_into_body = if m.a == i as u32 { -m.normal } else { m.normal };
-                    hit = Some((t, n_into_body));
-                    break;
+                    // **只有「正在接近表面」的采样才算命中**（命中判据细化，本轮修复）：
+                    // 贴地滑行/静置的体在每个采样都天生有接触，按「有接触即命中」会
+                    // 把它钳回起点、原地锁死（实测：弹体滑到墙前 0.1 m 停住）。
+                    // 接近判据：法线指向动体 ⇒ 速度沿它 < 0 即压向表面。
+                    let closing = n_into_body.dot(v) < 0.0;
+                    if closing {
+                        hit = Some((t, n_into_body));
+                        break;
+                    }
                 }
             }
             if let Some((t_hit, n_into_body)) = hit {
@@ -771,6 +778,36 @@ mod tests {
         let (debris2, carved2, _b, hash2) = run();
         assert_eq!((debris, carved), (debris2, carved2), "破坏应可复现（计数）");
         assert_eq!(hash1, hash2, "破坏应可复现（末态哈希逐位一致）");
+    }
+
+    /// **CCD 回归**（本轮修复）：开启 CCD 后，**贴地滑行**的体不得被锁死。
+    /// 修前：每个扫描采样都有地面接触 ⇒ 判「命中」⇒ 钳回起点、原地停住。
+    /// 修后：只有「沿法向接近」的采样才算命中 ⇒ 切向滑行不受影响。
+    #[test]
+    fn ccd_does_not_lock_sliding_body() {
+        let cfg = PhysConfig {
+            ccd_speed_threshold: 5.0,
+            ..PhysConfig::default()
+        };
+        let mut w = World::new(cfg);
+        let hf = HeightField::flat(-20.0, -20.0, 41, 41, 1.0, 0.0);
+        w.add_heightfield(hf);
+        // 贴地盒（底面 y=0.5 略上方）以 8 m/s 沿 +X 滑行（超过 CCD 阈值 5）
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            Vec3::new(0.0, 0.55, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        w.bodies.linvel[b as usize] = Vec3::new(8.0, 0.0, 0.0);
+        for _ in 0..60 {
+            w.step();
+        }
+        let x = w.bodies.position[b as usize].x;
+        // 摩擦会减速，但绝不该「原地不动」：修前 x ≈ 0，修后应有明显位移
+        assert!(x > 2.0, "CCD 不应锁死滑行体：x = {x}");
     }
 
     #[test]
