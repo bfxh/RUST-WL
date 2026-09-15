@@ -184,7 +184,13 @@ impl TriMesh {
 
     /// 最近面查询：返回 `(距离, 面上最近点, 面法线, 三角形序号)`；空网格返回 None。
     /// 有网格时只搜查询点所在桶的 3×3×3 邻域（覆盖「覆盖点」与「近而不覆盖」两类面）。
-    fn closest(&self, p: Vec3) -> Option<(f32, Vec3, Vec3, usize)> {
+    ///
+    /// **桶级距离剪枝**（2026-09-15）：`max_d` = 调用方关心的最大距离——桶 AABB 到
+    /// 查询点超过它则整桶跳过。两个调用方（点/球）本就丢弃 `depth < −skin`
+    /// （等价 `dist > max_d`），故剪枝不改变语义；实测大网格（bin ≈3.75 m、
+    /// 3×3×3 ≈100 三角形/查询）下窄相耗时大幅下降。`f32::INFINITY` = 不剪枝
+    /// （测试里的精确对照用）。
+    fn closest(&self, p: Vec3, max_d: f32) -> Option<(f32, Vec3, Vec3, usize)> {
         let mut best: Option<(f32, Vec3, Vec3, usize)> = None;
         let consider = |ti: usize, best: &mut Option<(f32, Vec3, Vec3, usize)>| {
             let t = self.tris[ti];
@@ -224,6 +230,28 @@ impl TriMesh {
                                 continue;
                             }
                             let i = ((x * g.dims.1 + y) * g.dims.2 + z) as usize;
+                            if g.bins[i].is_empty() {
+                                continue;
+                            }
+                            // 桶级剪枝：桶 AABB 到查询点的距离 > max_d ⇒ 整桶跳过
+                            // （桶内任一三角形只会更远）。
+                            if max_d.is_finite() {
+                                let lo = Vec3::new(
+                                    g.origin.x + x as f32 * g.bin,
+                                    g.origin.y + y as f32 * g.bin,
+                                    g.origin.z + z as f32 * g.bin,
+                                );
+                                let hi = lo + Vec3::splat(g.bin);
+                                let d2 = Vec3::new(
+                                    (lo.x - p.x).max(p.x - hi.x).max(0.0),
+                                    (lo.y - p.y).max(p.y - hi.y).max(0.0),
+                                    (lo.z - p.z).max(p.z - hi.z).max(0.0),
+                                )
+                                .length_squared();
+                                if d2 > max_d * max_d {
+                                    continue;
+                                }
+                            }
                             for &ti in &g.bins[i] {
                                 consider(ti as usize, &mut best);
                             }
@@ -292,7 +320,7 @@ impl ProviderColliders for TriMesh {
 
     /// 点查询：`depth = skin − dist`；法线 = 面法线。
     fn contacts_point(&self, _id: u32, p: Vec3, skin: f32, out: &mut Vec<InteropContact>) -> bool {
-        let Some((d, q, n, ti)) = self.closest(p) else {
+        let Some((d, q, n, ti)) = self.closest(p, skin) else {
             return true;
         };
         let depth = skin - d;
@@ -317,7 +345,7 @@ impl ProviderColliders for TriMesh {
         skin: f32,
         out: &mut Vec<InteropContact>,
     ) -> bool {
-        let Some((d, q, n, ti)) = self.closest(center) else {
+        let Some((d, q, n, ti)) = self.closest(center, radius + skin) else {
             return true;
         };
         let depth = radius - d;
@@ -428,8 +456,8 @@ mod tests {
             st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let u = (st >> 8) as f32 / (1u32 << 24) as f32;
             let p = Vec3::new(t * 2.4 - 1.2, t * 0.6 - 0.2, u * 2.4 - 1.2);
-            let (d1, q1, _, t1) = with_grid.closest(p).unwrap();
-            let (d2, q2, _, t2) = brute.closest(p).unwrap();
+            let (d1, q1, _, t1) = with_grid.closest(p, f32::INFINITY).unwrap();
+            let (d2, q2, _, t2) = brute.closest(p, f32::INFINITY).unwrap();
             assert!((d1 - d2).abs() < 1e-4, "距离不一致 {d1} vs {d2} @ {p:?}");
             assert!((q1 - q2).length() < 1e-3, "最近点不一致 @ {p:?}");
             let _ = (t1, t2); // 等距多面时序号可能不同（并列），只比几何量
@@ -472,6 +500,6 @@ mod tests {
             vec![[0, 1, 2], [0, 1, 9]], // 第二个索引越界 ⇒ 丢弃
         );
         assert_eq!(m.tris().len(), 1);
-        assert!(m.closest(Vec3::Y).is_some());
+        assert!(m.closest(Vec3::Y, f32::INFINITY).is_some());
     }
 }

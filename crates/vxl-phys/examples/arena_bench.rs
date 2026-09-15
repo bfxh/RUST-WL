@@ -413,6 +413,78 @@ fn scene_wall_provider(cfg: PhysConfig) {
     }
 }
 
+/// PhysArena 三角网地形（90 m × 24 段高度场 + 200 体混合几何）复刻：
+/// 定位「三角网原生路径」的相位分解（arena 实测 22 ms，其它引擎 0.36–11 ms）。
+fn scene_trimesh_terrain(cfg: PhysConfig) -> World {
+    let mut w = World::new(cfg);
+    let size = 90.0f32;
+    let seg = 24usize;
+    let step = size / seg as f32;
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    let h = |x: f32, z: f32| {
+        (x * 0.13).sin() * 1.6 + (z * 0.11).cos() * 1.4 + ((x + z) * 0.05).sin() * 1.1
+    };
+    for iz in 0..=seg {
+        for ix in 0..=seg {
+            let x = -size / 2.0 + ix as f32 * step;
+            let z = -size / 2.0 + iz as f32 * step;
+            verts.push(Vec3::new(x, h(x, z), z));
+        }
+    }
+    let row = (seg + 1) as u32;
+    for iz in 0..seg as u32 {
+        for ix in 0..seg as u32 {
+            let a = iz * row + ix;
+            let b = a + 1;
+            let c = a + row;
+            let d = c + 1;
+            tris.push([a, c, b]);
+            tris.push([b, c, d]);
+        }
+    }
+    w.add_mesh(vxl_phys_terrain::mesh::TriMesh::new(verts, tris));
+    let mut r = rng_lcg(131);
+    let n = 200usize;
+    let m = mat(&mut w, 0.6, 0.05);
+    for i in 0..n {
+        let x = (r() - 0.5) * 30.0;
+        let z = (r() - 0.5) * 30.0;
+        let y = 14.0 + (i % 12) as f32 * 1.2 + r() * 0.5;
+        match i % 3 {
+            0 => add_sphere(&mut w, Vec3::new(x, y, z), 0.36, m, 1000.0),
+            1 => add_box(&mut w, Vec3::new(x, y, z), Vec3::splat(0.32), m, 1000.0),
+            _ => {
+                // 复刻 arena 的 cylinder→凸包 降级（16 段双环 + 端心 ≈34 顶点）：
+                // 验证「provider 逐顶点查询」的成本随顶点数线性增长。
+                let (r, hh) = (0.3f32, 0.34f32);
+                let mut pts: Vec<Vec3> = Vec::new();
+                for ring in [-1.0f32, 1.0] {
+                    for k in 0..16 {
+                        let a = k as f32 / 16.0 * std::f32::consts::TAU;
+                        pts.push(Vec3::new(a.cos() * r, ring * hh, a.sin() * r));
+                    }
+                }
+                pts.push(Vec3::new(0.0, -hh, 0.0));
+                pts.push(Vec3::new(0.0, hh, 0.0));
+                let hull = w.add_hull(pts);
+                let bi = w.spawn_hull_body(hull, Vec3::new(x, y, z), vxl_phys_core::Quat::IDENTITY, 1000.0);
+                w.bodies.set_material(bi as usize, m);
+            }
+        }
+    }
+    w
+}
+
+/// 与 PhysArena `sunnyrng` 等价的线性同余（复刻场景用；非确定性要求，仅占位）。
+fn rng_lcg(seed: u32) -> impl FnMut() -> f32 {
+    let mut a = seed;
+    move || {
+        a = a.wrapping_mul(1664525).wrapping_add(1013904223);
+        (a >> 8) as f32 / 16777216.0
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let which = args.next().unwrap_or_else(|| "pyramid".to_string());
@@ -474,6 +546,7 @@ fn main() {
             "pyramid" => scene_pyramid(cfg.clone()),
             "wall" => scene_wall(cfg.clone()),
             "ballpit" => scene_ballpit(cfg.clone()),
+            "trimesh" => scene_trimesh_terrain(cfg.clone()),
             other => {
                 eprintln!("未知场景 {other}（pyramid / wall / ballpit / all）");
                 return;
