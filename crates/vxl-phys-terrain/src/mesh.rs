@@ -318,12 +318,19 @@ impl ProviderColliders for TriMesh {
         Some(self.world_bounds())
     }
 
-    /// 点查询：`depth = skin − dist`；法线 = 面法线。
+    /// 点查询：`depth = skin − sd`（**带符号**面距离：外侧 sd>0、面里侧 sd<0）。
+    /// 法线 = 面法线。
+    ///
+    /// **符号修正**（2026-09-15）：旧式用无符号距离 `d`，体穿到面里侧时 `depth = skin − d`
+    /// 仍为**负**（被求解器当间隙）⇒ 单向屏障失效、体一路下沉（实测 arena 三角网场景
+    /// 穿透 0.17 m）。改用 `sd = (p − q)·n`：外侧与旧式仅差舍入（最近点内部时两者等价），
+    /// 内侧变正 ⇒ 正常顶出。
     fn contacts_point(&self, _id: u32, p: Vec3, skin: f32, out: &mut Vec<InteropContact>) -> bool {
-        let Some((d, q, n, ti)) = self.closest(p, skin) else {
+        let Some((_, q, n, ti)) = self.closest(p, skin) else {
             return true;
         };
-        let depth = skin - d;
+        let sd = (p - q).dot(n);
+        let depth = skin - sd;
         if depth < -skin {
             return true; // 支持查询；不在带内
         }
@@ -336,7 +343,7 @@ impl ProviderColliders for TriMesh {
         true
     }
 
-    /// 球查询：`depth = r − dist(球心)`（球心最近面 + 面法线）。
+    /// 球查询：`depth = r − sd(球心)`（**带符号**面距离；同点查询的符号修正）。
     fn contacts_sphere(
         &self,
         _id: u32,
@@ -345,10 +352,11 @@ impl ProviderColliders for TriMesh {
         skin: f32,
         out: &mut Vec<InteropContact>,
     ) -> bool {
-        let Some((d, q, n, ti)) = self.closest(center, radius + skin) else {
+        let Some((_, q, n, ti)) = self.closest(center, radius + skin) else {
             return true;
         };
-        let depth = radius - d;
+        let sd = (center - q).dot(n);
+        let depth = radius - sd;
         if depth < -skin {
             return true;
         }

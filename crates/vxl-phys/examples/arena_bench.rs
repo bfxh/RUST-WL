@@ -485,6 +485,54 @@ fn rng_lcg(seed: u32) -> impl FnMut() -> f32 {
     }
 }
 
+/// **网格静置保真度**：盒轻放到水平三角网（y=0）上，打印静置高度轨迹。
+/// 期望：停在 **面 + skin 量级**（≈0.52）且 600 步不持续下沉——薄壳语义的
+/// 「单向屏障」要求体一旦压进面内侧就被顶出（符号距离修正的直接检验）。
+fn scene_mesh_land(cfg: PhysConfig) {
+    let mut w = World::new(cfg);
+    let n = 10usize;
+    let step = 1.0f32;
+    let mut verts: Vec<Vec3> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for iz in 0..=n {
+        for ix in 0..=n {
+            verts.push(Vec3::new(
+                -(n as f32) / 2.0 + ix as f32 * step,
+                0.0,
+                -(n as f32) / 2.0 + iz as f32 * step,
+            ));
+        }
+    }
+    let row = (n + 1) as u32;
+    for iz in 0..n as u32 {
+        for ix in 0..n as u32 {
+            let a = iz * row + ix;
+            let b = a + 1;
+            let c = a + row;
+            let d = c + 1;
+            tris.push([a, c, b]);
+            tris.push([b, c, d]);
+        }
+    }
+    w.add_mesh(vxl_phys_terrain::mesh::TriMesh::new(verts, tris));
+    let m = mat(&mut w, 0.6, 0.0);
+    add_box(&mut w, Vec3::new(0.0, 0.52, 0.0), Vec3::splat(0.5), m, 1000.0);
+    println!("mesh_land: 盒（半 0.5）轻放水平网格（面 y=0；期望静置 y≈0.52）：");
+    let mut min_y = f32::INFINITY;
+    for t in 0..600 {
+        w.step();
+        let y = w.bodies.position[1].y;
+        min_y = min_y.min(y);
+        if t < 5 || (t + 1) % 60 == 0 {
+            println!("  t={:>4}  y={y:>8.4}  vy={:>8.4}", t + 1, w.bodies.linvel[1].y);
+        }
+    }
+    println!(
+        "  末态 y={:.4}（≈0.52 为正常；持续下降 = 单向屏障失效）  最低 y={min_y:.4}",
+        w.bodies.position[1].y
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let which = args.next().unwrap_or_else(|| "pyramid".to_string());
@@ -539,6 +587,10 @@ fn main() {
         }
         if s == "wall_provider" {
             scene_wall_provider(cfg.clone());
+            continue;
+        }
+        if s == "mesh_land" {
+            scene_mesh_land(cfg.clone());
             continue;
         }
         let serial = rest.iter().any(|a| a == "--serial");
