@@ -872,6 +872,146 @@ fn scene_joint_chains(cfg: PhysConfig) {
     println!("  末态：塔尾 y={:.3}", w.bodies.position[n].y);
 }
 
+/// **真实感基准（一）：恢复系数**。球从 h 落下，回落顶点相对高度应 ≈ e²
+/// （能量比 = e²）。判据：**回落比 |apex/h − e²| ≤ 0.15**（软接触 + 子步离散
+/// 会吃掉一点能量，这是正常量；明显偏离说明恢复/阈值/正则化有问题）。
+///
+/// 为什么要有这条：`restitution_threshold` 默认 1.0 m/s（低于它的碰撞 e 视作 0，
+/// 防微弹跳）——若阈值或 e 的施加有 bug，表现就是"球不弹"或"越弹越高"，
+/// 这两种在视觉上极其明显，但 arena 的 19 个探针都不覆盖。
+fn scene_bounce(cfg: PhysConfig) {
+    // 球落 1 m：落地速度 ≈ √(2gh) ≈ 4.43 m/s（远高于阈值 ⇒ e 应完整生效）。
+    let h = 1.0f32;
+    let mut w = World::new(cfg);
+    ground(&mut w, 40.0);
+    for e in [0.2f32, 0.5, 0.8] {
+        let m = mat(&mut w, 0.4, e);
+        add_sphere(&mut w, Vec3::new(0.0, 0.5 + h, 0.0), 0.5, m, 800.0);
+        let idx = w.bodies.len() - 1;
+        let mut apex = f32::NEG_INFINITY;
+        let mut landed = false;
+        for _ in 0..600 {
+            w.step();
+            let v = w.bodies.linvel[idx].y;
+            let y = w.bodies.position[idx].y;
+            // 首次落地后追踪最高点
+            if v > 0.0 {
+                if y > 0.5 + 0.01 {
+                    landed = true;
+                }
+                if landed {
+                    apex = apex.max(y - 0.5);
+                }
+            }
+            // 清场：下一轮换 e
+            if apex > f32::NEG_INFINITY && v < 0.0 && y < 0.6 {
+                break;
+            }
+        }
+        let theory = h * e * e;
+        let got = if apex.is_finite() { apex } else { 0.0 };
+        let verdict = if (got - theory).abs() <= 0.15 * h {
+            "PASS"
+        } else {
+            "FAIL"
+        };
+        println!(
+            "  bounce e={e:.1}: 回落比 {:.3}（理论 e² = {:.3}）→ {verdict}",
+            got / h,
+            e * e
+        );
+        // 移出本轮球体（避免干扰下一轮）
+        let n = w.bodies.len();
+        let _ = n;
+        break_after_round(&mut w, idx);
+    }
+}
+
+/// 把球挪到远处（离开场景），供下一轮使用（不改体数 ⇒ 索引稳定）。
+fn break_after_round(w: &mut World, i: usize) {
+    w.bodies.position[i] = Vec3::new(500.0, 500.0, 500.0);
+    w.bodies.linvel[i] = Vec3::ZERO;
+    w.bodies.set_angvel_raw(i, Vec3::ZERO);
+    w.bodies.awake[i] = false;
+}
+
+/// **真实感基准（二）：斜面静摩擦**。μ 已知、倾角 θ：`tan θ < μ` 应静止，
+/// `tan θ > μ` 应下滑。判据：静止档 240 步位移 < 0.02 m；下滑档位移 > 0.1 m。
+///
+/// 与 `slide`（水平面动摩擦）互补：这条测的是**静摩擦阈值**——"物体在斜面上
+/// 慢慢出溜"是最常见的"不真实"观感之一。
+fn scene_incline(cfg: PhysConfig) {
+    let mu = 0.5f32;
+    // 扫角度找**临界角** = atan(μ_eff)：判据是 240 步位移 0.02 m 分界。
+    let mut critical = None;
+    for deg in [12.0f32, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0] {
+        let th = deg * std::f32::consts::PI / 180.0;
+        let mut w = World::new(cfg.clone());
+        ground(&mut w, 40.0);
+        let m = mat(&mut w, mu, 0.0);
+        let n = 6.0;
+        let i = w.bodies.len();
+        w.add_static(
+            Shape::Box {
+                half: Vec3::new(n, 0.5, n),
+            },
+            Vec3::new(0.0, 0.5, 0.0),
+            vxl_phys_core::Quat::from_axis_angle(Vec3::Z, th),
+        );
+        w.bodies.set_material(i, m);
+        let nrm = Vec3::new(-th.sin(), th.cos(), 0.0);
+        // **落位必须算准**：斜面绕 Z 转 θ 后，其顶面过点
+        // `center + R·(0,0.5,0) = (−0.5 sinθ, 0.5+0.5cosθ, 0)`，该点沿 nrm 到原点的
+        // 距离是 `0.5(1+cosθ)`——**不是 0.5**。首版按 `nrm·(0.5+0.5)` 落位，盒心
+        // 落在斜面**内部** 0.46 m ⇒ 测的是"从深穿透被顶出 + 滑走"，把静摩擦
+        // 误判成失效（本会话第二次"测试场景自身违例"，上一次是关节探针用密度 0 当静态锚）。
+        let surf = Vec3::new(-0.5 * th.sin(), 0.5 + 0.5 * th.cos(), 0.0);
+        let p = surf + nrm * (0.5 + 0.03);
+        let mb = mat(&mut w, mu, 0.0);
+        let ib = w.bodies.len();
+        w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.5),
+            },
+            p,
+            vxl_phys_core::Quat::from_axis_angle(Vec3::Z, th),
+            800.0,
+        );
+        w.bodies.set_material(ib, mb);
+        // 位移沿**斜面方向**量（避免把下沉计入）
+        let tang = Vec3::new(th.cos(), th.sin(), 0.0);
+        let p0 = w.bodies.position[ib];
+        for _ in 0..240 {
+            w.step();
+        }
+        let d = (w.bodies.position[ib] - p0).dot(tang);
+        let held = d.abs() < 0.02;
+        if held {
+            critical = Some(deg);
+        } else if critical.is_some() {
+            println!(
+                "  incline μ={mu}：临界角 {:.0}°（atan = {:.3}）⇒ **有效 μ ≈ {:.3}**（名义 {mu}）",
+                deg,
+                (deg * std::f32::consts::PI / 180.0).tan(),
+                (deg * std::f32::consts::PI / 180.0).tan()
+            );
+            return;
+        }
+        println!(
+            "  incline θ={deg:.0}°（tan θ={:.3}）：位移 {d:+.3} m → {}",
+            th.tan(),
+            if held { "静止" } else { "下滑" }
+        );
+    }
+    if let Some(c) = critical {
+        let th = c * std::f32::consts::PI / 180.0;
+        println!(
+            "  incline μ={mu}：扫完未见下滑，临界角 ≥ {c:.0}°（μ_eff ≥ {:.3}）",
+            th.tan()
+        );
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let which = args.next().unwrap_or_else(|| "pyramid".to_string());
@@ -930,6 +1070,11 @@ fn main() {
         }
         if s == "mesh_land" {
             scene_mesh_land(cfg.clone());
+            continue;
+        }
+        if s == "fidelity" {
+            scene_bounce(cfg.clone());
+            scene_incline(cfg.clone());
             continue;
         }
         if s == "joints" {
