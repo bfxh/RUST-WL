@@ -1041,6 +1041,21 @@ fn build_constraint(
 /// （对称扫掠，配合外层正/反交替 ≈ ρ²）。
 #[inline]
 #[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
+/// 收敛早退阈值（速度级残差，m/s）：一次外层扫掠内**最大速度修正**低于它即视
+/// 该岛已收敛、停止剩余外层迭代。标定与判据见 EXPERIMENTS「求解预算标定」：
+/// 安静堆叠期 12 次外层是纯浪费；判据是状态的纯函数（同状态 ⇒ 同退出点），
+/// 不引入任何时序/线程依赖，串并行逐位一致仍成立。0 = 关闭（等价纯定档）。
+fn early_exit_eps() -> f32 {
+    0.002
+}
+
+/// 早退前至少跑满的外层迭代数（堆叠建立期不早退；须为偶数以保持正/反扫掠对称）。
+fn early_min_iters() -> u32 {
+    6
+}
+
+/// 顺序冲量解算一条约束；返回本次扫掠施加的**最大速度级修正**（m/s，
+/// 法向 + 摩擦通道的最大值），供收敛早退判据使用。
 fn solve_constraint(
     c: &mut ContactConstraint,
     lv: &mut [Vec3],
@@ -1049,10 +1064,11 @@ fn solve_constraint(
     bodies: &BodySet,
     rev: bool,
     inner: u32,
-) {
+) -> f32 {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let normal = c.normal;
     let npts = c.points.len();
+    let mut resid = 0.0f32;
 
     // —— 歧管内层扫掠（法向 + 摩擦两通道一起）——
     for _ in 0..inner.max(1) {
@@ -1067,6 +1083,8 @@ fn solve_constraint(
             let dl = new_pn - p.pn;
             p.pn = new_pn;
             if dl != 0.0 {
+                // 速度级残差：冲量增量 × 有效质量 = 该点速度修正（m/s）。
+                resid = resid.max((dl * p.nmass).abs());
                 let imp = normal * dl;
                 group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
                 group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
@@ -1106,6 +1124,7 @@ fn solve_constraint(
                     let d1 = a1 - old1;
                     let d2 = a2 - old2;
                     if d1 != 0.0 || d2 != 0.0 {
+                        resid = resid.max((d1 * p.tmass1).abs()).max((d2 * p.tmass2).abs());
                         let imp = p.t1 * d1 + p.t2 * d2;
                         group_apply(lv, av, local_of, ai, p.ra, imp, true, bodies);
                         group_apply(lv, av, local_of, bi, p.rb, imp, false, bodies);
@@ -1114,6 +1133,7 @@ fn solve_constraint(
             }
         }
     }
+    resid
 }
 
 /// 解算一组清醒岛（组内岛串行；岛间体集合不相交）。速度读写走组内 scratch
@@ -1173,15 +1193,26 @@ fn solve_island_group(
         // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留可观
         // （重堆实测微抖永不入睡）；正/反交替后收敛率 ≈ ρ²。
         // 确定性：方向仅由迭代序决定。
+        //
+        // **收敛早退**（2026-09-15 标定）：每次扫掠累计"最大速度级修正"残差，
+        // 跑满 `early_min_iters` 后残差 < eps 即提前结束剩余外层迭代——安静
+        // 堆叠期（金字塔/砖墙的稳态段）12 次外层纯属浪费；判据只依赖状态，
+        // 同状态必在同一迭代退出 ⇒ 确定性不受影响。
+        let eps = early_exit_eps();
+        let min_iters = early_min_iters();
         for it in 0..iters {
+            let mut resid = 0.0f32;
             if it % 2 == 0 {
                 for c in cbuf.iter_mut() {
-                    solve_constraint(c, lv, av, local_of, bodies, false, normal_inner);
+                    resid = resid.max(solve_constraint(c, lv, av, local_of, bodies, false, normal_inner));
                 }
             } else {
                 for c in cbuf.iter_mut().rev() {
-                    solve_constraint(c, lv, av, local_of, bodies, true, normal_inner);
+                    resid = resid.max(solve_constraint(c, lv, av, local_of, bodies, true, normal_inner));
                 }
+            }
+            if it + 1 >= min_iters && resid < eps {
+                break;
             }
         }
         // 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
@@ -1190,7 +1221,7 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                solve_constraint(c, lv, av, local_of, bodies, true, normal_inner);
+                let _ = solve_constraint(c, lv, av, local_of, bodies, true, normal_inner);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。

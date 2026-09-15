@@ -40,21 +40,31 @@ impl FrictionModel {
     }
 }
 
-/// 主配置。`Default` = 规格书默认档（迭代 16、子步 1、skin 0.01）。
+/// 主配置。`Default` = 规格书默认档（迭代 12×内层 2、子步 1、skin 0.02；
+/// 2026-09-15 按实测标定，见 `velocity_iterations` 字段注释）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysConfig {
     /// 基础步长，固定 60 Hz（§5）。
     pub dt: f32,
     /// §4.2 每 60Hz 帧子步 ∈ {1,2,4,8,16}。
     pub substeps: u32,
-    /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 16。
+    /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 12。
+    ///
+    /// 默认档 12×2（外层 12 × 法向内层 2 = 24 扫掠）为 2026-09-15 实测标定
+    /// （`examples/arena_bench` 三场景 × 长跑 900 步判据，见 EXPERIMENTS）：
+    /// 相对旧的 16×4（64 扫掠）——金字塔 210 体 13.5→4.1 ms/步、墙 8.7→3.4、
+    /// 球坑 2.2→1.4，且**收敛质量更好**（金字塔长跑堆高 19.409 vs 19.402、
+    /// 残留 Σv² 0.39 vs 1.17；墙 0.52 vs 5.03）。扫掠总量低于 ≈24 会失稳
+    /// （8×2=16 时 210 体金字塔在 900 步后垮塌：堆顶 19.4→3.5）。
     pub velocity_iterations: u32,
     /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
     /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
     /// 3 自由度）+ 强转动耦合，单向 GS 的慢模正在歧管内部——内层 K 遍把歧管内
     /// 收敛等价提到 ≈K×外层。实测（45 盒最小沸腾档）：16 次外层残留 ≈15% 重力
     /// 增量（微抖 |v|≈0.03 永不入睡，角点接触下升级沸腾），内层 4 遍后入睡。
-    /// 1 = 关闭（M0 行为）；默认 4。代价 ≈ 仅法向通道 ×K。
+    /// 1 = 关闭（M0 行为）；默认 2（2026-09-15 标定：**总扫掠预算**才是决定量，
+    /// 外层 12 × 内层 2 = 24 优于旧的 16×4 = 64，速度 3.3×、长跑收敛更好；
+    /// 详见 `velocity_iterations` 注释与 EXPERIMENTS）。代价 ≈ 仅法向通道 ×K。
     pub normal_inner: u32,
     /// 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
     /// 主迭代后再**反序**过一遍全部约束，把底层承载沿约束图反向传播一次——
@@ -121,8 +131,9 @@ impl Default for PhysConfig {
         Self {
             dt: 1.0 / 60.0,
             substeps: 1,
-            velocity_iterations: 16,
-            normal_inner: 4,
+            // 2026-09-15 标定：总扫掠预算 24（12×2）——见字段注释与 EXPERIMENTS。
+            velocity_iterations: 12,
+            normal_inner: 2,
             shock_iterations: 0,
             contact_skin: 0.02,
             gjk_tolerance: 1e-5,
@@ -215,7 +226,10 @@ mod tests {
     #[test]
     fn default_is_spec_default() {
         let c = PhysConfig::default();
-        assert_eq!(c.velocity_iterations, 16);
+        // 2026-09-15 标定：总扫掠预算 24（12×2）——见 `velocity_iterations`
+        // 字段注释；EXPECTATIONS 记录的旧默认 16×4 已由 arena_bench 长跑判据替换。
+        assert_eq!(c.velocity_iterations, 12);
+        assert_eq!(c.normal_inner, 2);
         assert_eq!(c.sleep_linear, 0.04);
         assert_eq!(c.sleep_angular, 0.05);
         assert_eq!(c.sleep_time, 0.5);
