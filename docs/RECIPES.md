@@ -23,11 +23,16 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 
 ## 行为门（三命令四哈希）
 
-| 场景 | 命令 | 基线（2026-09-15，6 扫掠档 + 世界逆惯量预积 + 关节族） |
+| 场景 | 命令 | 基线（2026-09-15，参与式降点档） |
 |---|---|---|
-| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x4dcf5d460298e316ede2a846391c1990`、末态活跃 0、PASS；压力 `0x1e855f89f30fe8e40ae1ccbff98bc4a6`（report-only） |
-| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x3a8c778ebaf76a9a2be25bc1f95857de`（10 轮逐位一致） |
-| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 3.95–4.80×，随时机）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6219d1866b20c002d806d3d699a487ff`、末态活跃 0、PASS；压力 `0x63e5eb35b71b8c84ade4a053aeecb900`（report-only） |
+| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0xd8601988ad7989ffb58ba8b956c2f8db`（10 轮逐位一致） |
+| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.39×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+
+**2026-09-15 参与式降点换代**（`vxl_phys_solver::point_reduce_after = 3`）：
+`0x6219d186…` / `0x63e5eb35…` / `0xd8601988…`（当前）←
+`0x4dcf5d46…` / `0x1e855f89…` / `0x3a8c778e…`（旧世代；把 `point_reduce_after`
+改回 0 可逐位复现，A/B 对照用）。**旧世代回退法**：常函数改 0 → 重建 → 三哈希应逐位复现。
 
 **关节族落地（2026-09-15，M2 首切片）三个门哈希未变**（关节不参与这些场景，
 `PhysConfig` 新增 `joint_iterations` 字段对它们零影响）——哈希**不变**与换代一样要记录。

@@ -1118,6 +1118,36 @@ fn early_min_iters() -> u32 {
     4
 }
 
+/// **参与式降点**的起始轮次（0 = 关闭）。从第 N 轮外层扫掠起，跳过"至今零冲量
+/// 的浅缝接触点"（`pn == 0 && pt1 == 0 && pt2 == 0 && cfm < 1.0`）。
+///
+/// 动机（实测，见 EXPERIMENTS「零冲量点占比」）：解算末态有 **22–35% 的接触点
+/// 法向冲量为 0**（金字塔 2233 点里 784 个），而它们在每个扫掠里都要付"法向 +
+/// 摩擦"两段迭代（扫掠占帧 ≈50%）。前几轮全点参与、之后跳过零冲量点 ⇒ 理论上
+/// 省下这部分空转。
+///
+/// 保守设计（为什么不是硬删点）：
+/// - 只跳**浅缝/软接触**点（`cfm < 1.0` ⇒ speculative，非穿透硬投影）：穿透接触
+///   承载刚性与抗转，绝不跳；
+/// - 前 `N-1` 轮全点参与：需要承载的点已经在早期轮次载上（4 点冗余约束的
+///   抗转刚度在早期建立）；
+/// - 点仍在 warm 槽表里、`pn/pt1/pt2` 保留 ⇒ 下一帧若被 feature 匹配回来，
+///   起点仍是它的历史值，不会"复活式弹跳"。
+///
+/// 确定性：判据只依赖本帧已累积的冲量与轮次序号（纯状态的函数），不引入时序/线程
+/// 依赖 ⇒ 串并行逐位一致仍成立。
+///
+/// **默认 3（实测落地，2026-09-15）**：金字塔交错 A/B 三轮 p50
+/// 1.528/1.525/1.491 → **1.397/1.414/1.403 ms（−7.3%）**；三道保真门都过——
+/// 金样 col45 与关闭态**完全一致**（45/45 入睡、最深 0.000）、pile5 **更好**
+/// （1735/2000 入睡 vs 1690、|v| 0.075 vs 0.096）、tower25 |v| 0.224（关闭态 0.200，
+/// 两者都优于记录基线 0.236）；长跑 3000 步堆顶 19.426（关闭态 19.407）、末态动能
+/// **1.47 vs 1.74（更稳）**。换代哈希：`0x6219d186…` / `0x63e5eb35…` / `0xd8601988…`。
+/// 0 = 关闭（回到旧行为，逐位复现旧世代哈希）。
+fn point_reduce_after() -> u32 {
+    3
+}
+
 /// 顺序冲量解算一条约束；返回本次扫掠施加的**最大速度级修正**（m/s，
 /// 法向 + 摩擦通道的最大值），供收敛早退判据使用。
 #[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
@@ -1130,6 +1160,7 @@ fn solve_constraint(
     bodies: &BodySet,
     rev: bool,
     inner: u32,
+    reduce: bool,
 ) -> f32 {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let normal = c.normal;
@@ -1141,6 +1172,10 @@ fn solve_constraint(
         for k in 0..npts {
             let idx = if rev { npts - 1 - k } else { k };
             let p = &mut c.points[idx];
+            // 参与式降点：后期轮次跳过"至今零冲量的浅缝点"（见 `point_reduce_after`）。
+            if reduce && p.pn == 0.0 && p.pt1 == 0.0 && p.pt2 == 0.0 && p.cfm < 1.0 {
+                continue;
+            }
             // —— 法向（M1 软接触）：λ ← cfm·(λ + m·(rhs − vn))，钳 ≥ 0 ——
             let va = group_vel(lv, av, local_of, ai, p.ra);
             let vb = group_vel(lv, av, local_of, bi, p.rb);
@@ -1293,8 +1328,13 @@ fn solve_island_group(
         let t_it = vxl_phys_core::probe::start();
         let eps = early_exit_eps();
         let min_iters = early_min_iters();
+        let reduce_after = point_reduce_after();
         for it in 0..iters {
             let mut resid = 0.0f32;
+            // **参与式降点**：从第 `reduce_after` 轮起，跳过"至今零冲量"的浅缝接触点
+            // （判据见 `point_reduce_after`）。前几轮全点参与 ⇒ 需要承载的点已经
+            // 载上，之后跳过它们只是省下空转。
+            let reduce = reduce_after > 0 && it + 1 >= reduce_after;
             if it % 2 == 0 {
                 for c in cbuf.iter_mut() {
                     resid = resid.max(solve_constraint(
@@ -1306,6 +1346,7 @@ fn solve_island_group(
                         bodies,
                         false,
                         normal_inner,
+                        reduce,
                     ));
                 }
             } else {
@@ -1319,6 +1360,7 @@ fn solve_island_group(
                         bodies,
                         true,
                         normal_inner,
+                        reduce,
                     ));
                 }
             }
@@ -1332,8 +1374,17 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                let _ =
-                    solve_constraint(c, lv, av, local_of, inv_i_world, bodies, true, normal_inner);
+                let _ = solve_constraint(
+                    c,
+                    lv,
+                    av,
+                    local_of,
+                    inv_i_world,
+                    bodies,
+                    true,
+                    normal_inner,
+                    false,
+                );
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
