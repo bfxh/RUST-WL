@@ -233,6 +233,83 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
     );
 }
 
+/// **摩擦保真度**：静置地面上的盒以 12 m/s 滑行，打印速度轨迹与减速比
+/// （实测减速度 / 理论 μ·g）。物理上 μ=0.7 时减速度 ≈6.9 m/s²（0.115 m/s/tick）。
+/// 用途：定位/验证「摩擦界含偏置冲量」（EXPERIMENTS 2026-09-15 第二轮）。
+fn scene_slide(cfg: PhysConfig, ticks: usize) {
+    let dt = cfg.dt;
+    let mut w = World::new(cfg);
+    ground(&mut w, 120.0);
+    let m = mat(&mut w, 0.7, 0.0);
+    // 半 0.4 的盒，底面贴地（y=0.4），初速 +12 m/s。
+    add_box(&mut w, Vec3::new(0.0, 0.4, 0.0), Vec3::splat(0.4), m, 1000.0);
+    w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
+    let mu = 0.7f32;
+    let ideal = mu * 9.81 * dt; // 每 tick 理论减速（m/s）
+    println!("slide: μ={mu} 理论减速 {ideal:.4} m/s/tick；实测轨迹（tick: vx / 累计比）");
+    let mut last_v = 12.0f32;
+    let mut last_t = 0usize;
+    for t in 0..ticks {
+        w.step();
+        if t == 0 || (t + 1) % 10 == 0 {
+            let v = w.bodies.linvel[1].x;
+            let dt_ticks = (t + 1 - last_t) as f32;
+            let measured = (last_v - v) / dt_ticks;
+            let ratio = measured / ideal;
+            println!(
+                "  t={:>4}  vx={v:>7.3}  区间减速 {measured:>7.4} m/s/tick  比理论 ×{ratio:>6.2}",
+                t + 1
+            );
+            last_v = v;
+            last_t = t + 1;
+        }
+    }
+}
+
+/// **接触响应刚度**：12 m/s 的盒冲向静态薄墙，打印"最小表面间距"轨迹——
+/// 物理上盒面应先贴近到 skin 量级再被拦住；若停在明显间距外，说明去穿透
+/// （ERP）目标速度把接触做成了弹簧/保险杠（子步把 dt 减半时 ERP 会变硬）。
+/// 指标：末态表面间距（期望 ≈ skin 0.02）与"是否发生真实接近"。
+fn scene_approach(cfg: PhysConfig) {
+    let dt = cfg.dt;
+    let sub = cfg.substeps.max(1) as f32;
+    let mut w = World::new(cfg);
+    // 静态薄墙：x ∈ [0, 0.1]，高度足够。
+    let mw = mat(&mut w, 0.5, 0.0);
+    let wall = w.bodies.len();
+    w.add_static(
+        Shape::Box {
+            half: Vec3::new(0.05, 3.0, 3.0),
+        },
+        Vec3::new(0.05, 0.0, 0.0),
+        vxl_phys_core::Quat::IDENTITY,
+    );
+    w.bodies.set_material(wall, mw);
+    // 仅静态墙 + 弹体（无地板）：排除摩擦/支撑干扰，直测接触响应。
+    let mb = mat(&mut w, 0.3, 0.0);
+    add_box(&mut w, Vec3::new(-3.0, 0.0, 0.0), Vec3::splat(0.4), mb, 1000.0);
+    w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
+    println!(
+        "approach: 12 m/s 撞 0.1 m 薄墙（substeps={sub}，子步 dt={:.5}）；表面间距轨迹：",
+        dt / sub
+    );
+    let mut min_gap = f32::INFINITY;
+    for t in 0..90 {
+        w.step();
+        let x = w.bodies.position[1].x;
+        let gap = 0.0 - (x + 0.4); // 墙左面(x=0) − 盒右面
+        min_gap = min_gap.min(gap);
+        if t < 20 || (t + 1) % 15 == 0 {
+            println!(
+                "  t={:>3}  x={x:>7.3}  vx={:>7.3}  表面间距 {gap:>7.4}",
+                t + 1,
+                w.bodies.linvel[1].x
+            );
+        }
+    }
+    println!("  最小表面间距 {min_gap:.4} m（≈ 0 表示贴合；>0.05 说明被挡在弹性层外）");
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let which = args.next().unwrap_or_else(|| "pyramid".to_string());
@@ -272,6 +349,15 @@ fn main() {
         vec![which.as_str()]
     };
     for s in scenes {
+        // slide / approach 是"打印轨迹"型基准，不走 bench() 的统计口径。
+        if s == "slide" {
+            scene_slide(cfg.clone(), 120);
+            continue;
+        }
+        if s == "approach" {
+            scene_approach(cfg.clone());
+            continue;
+        }
         let serial = rest.iter().any(|a| a == "--serial");
         let mut w = match s {
             "pyramid" => scene_pyramid(cfg.clone()),
