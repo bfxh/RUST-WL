@@ -28,6 +28,14 @@ mod imp {
     pub fn us(s: Stamp) -> u64 {
         s.elapsed().as_micros() as u64
     }
+
+    /// 起点到现在的纳秒数。**逐次计时亚微秒区段必须用它**：`us` 会把每次
+    /// 亚微秒区间截断成 0（实测：盒对裁剪单次 ≈200 ns，逐次取 µs 后累计
+    /// 只剩"2.7 µs / 1361 次 = 窄相 1%"的假象；真值要用 ns 累计）。
+    #[inline]
+    pub fn ns(s: Stamp) -> u64 {
+        s.elapsed().as_nanos() as u64
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -47,9 +55,15 @@ mod imp {
     pub fn us(_s: Stamp) -> u64 {
         0
     }
+
+    /// 起点到现在的纳秒数（wasm：恒为 0）。
+    #[inline]
+    pub fn ns(_s: Stamp) -> u64 {
+        0
+    }
 }
 
-pub use imp::{start, us, Stamp};
+pub use imp::{ns, start, us, Stamp};
 
 #[cfg(test)]
 mod tests {
