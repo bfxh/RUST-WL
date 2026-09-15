@@ -249,6 +249,18 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         min_sep,
     );
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
+    let dd = w.solver.last_detail_us;
+    let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;
+    println!(
+        "  求解细分/步：建岛 {:>6.1} µs  约束构建 {:>6.1} µs（{:>4.0}%）  热启动预施加 {:>6.1} µs（{:>4.0}%）  迭代扫掠 {:>6.1} µs（{:>4.0}%）",
+        dd[0] as f64 / MEASURE as f64,
+        dd[1] as f64 / MEASURE as f64,
+        100.0 * dd[1] as f64 / dd_sum,
+        dd[2] as f64 / MEASURE as f64,
+        100.0 * dd[2] as f64 / dd_sum,
+        dd[3] as f64 / MEASURE as f64,
+        100.0 * dd[3] as f64 / dd_sum,
+    );
     println!(
         "  求解器内部：岛构建 {:>7.1} µs（{:>4.0}%） 迭代 {:>8.1} µs（{:>4.0}%） 休眠 {:>6.1} µs（{:>4.0}%）",
         d_island as f64 / MEASURE as f64,

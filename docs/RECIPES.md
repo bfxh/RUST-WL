@@ -48,6 +48,32 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 ——**第 4 个位置参数（substeps）必须是 4**，这是塔能站住的配方，勿改。
 三场景：`col45` / `pile5` / `tower25`。
 
+## 求解成本定位（每点开销）
+
+```bash
+# 1) 固定/每扫掠两半分离：扫掠 = 2×iters（金字塔 phase 读数做线性拟合）
+for k in 1 2 3 6; do cargo run --release -q -p vxl-phys --example arena_bench pyramid --iters $k; done
+#    参考：2 扫掠 1010.6 µs / 4 → 1382.6 / 6 → 1664.9 / 12 → 2253.4 ⇒ 每扫掠 ≈124 µs、固定 ≈762 µs
+# 2) 固定部分落在哪：读 `求解细分/步` 行（ImpulseSolver::last_detail_us = 建岛/约束构建/热启动/扫掠）
+cargo run --release -q -p vxl-phys --example arena_bench pyramid
+```
+
+**改动级证据只用同进程交错 A/B**（跨时间点的绝对值差会被会话降频污染——本轮实测
+同一份代码 40 分钟内从"构建 392 µs"漂到"490 µs"）：
+
+```bash
+cd /d/开发/physarena
+npm run build:vxl && cp public/vendor/vxl/vxl_phys_wasm.wasm out/new.wasm   # 新构建
+cd "/d/开发/RUST WL" && git stash push -- crates/vxl-phys-solver/src/lib.rs crates/vxl-phys/examples/arena_bench.rs
+cd /d/开发/physarena && npm run build:vxl && cp public/vendor/vxl/vxl_phys_wasm.wasm out/old.wasm  # 旧构建
+cd "/d/开发/RUST WL" && git stash pop
+cd /d/开发/physarena && node scripts/vxl-simd-ab.mjs out/old.wasm out/new.wasm   # 3 轮交替 + 位指纹
+```
+
+要点：`git stash push -- <文件>` 只暂存这几个文件（别全 stash）；A/B 跑完必须
+`npm run build:vxl && npm run build` 把 `public/` 与 `dist/` 都刷成当前构建
+（否则浏览器测的是旧 wasm——本轮与上一轮都踩过）。
+
 ## 关节族（M2 首切片）自检
 
 ```bash

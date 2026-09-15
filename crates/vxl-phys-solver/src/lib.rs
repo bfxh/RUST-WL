@@ -21,7 +21,7 @@ use vxl_phys_core::{BodySet, JobSystem, Mat3, PhysConfig};
 use vxl_phys_narrow::Manifold;
 
 /// 单接触点的已求解冲量缓存（warm starting + 接触回收）。
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 struct WarmPoint {
     pn: f32,
     pt1: f32,
@@ -123,6 +123,7 @@ type WarmOutEntry = (u32, (u32, u32), WarmManifold);
 use vxl_phys_core::Vec3;
 
 /// 单接触点约束（预计算质量项与软接触目标/正则化）。
+#[derive(Clone, Copy, Debug, Default)]
 struct PointConstraint {
     ra: Vec3,
     rb: Vec3,
@@ -215,7 +216,13 @@ struct ContactConstraint {
     normal: Vec3,
     /// warm 槽号（`u32::MAX` = 本 tick 新接触；回写按此**原位写**，零哈希）。
     warm_slot: u32,
-    points: Vec<PointConstraint>,
+    /// 点数据**定长内联**（流形点 ≤4，窄相已截断）：`Vec<PointConstraint>` 时
+    /// 每流形一次 `with_capacity(4)` 堆分配 + 释放——金字塔实测每帧 1140 次
+    /// （570 流形 × 2 子步），是构建相位的固定开销之一。内联后零堆。
+    /// 与 `WarmManifold.points` 同一课（那次是 22 万次小 Vec ≈11.4 ms）。
+    points: [PointConstraint; 4],
+    /// 本流形实际点数（≤4）。
+    npts: u8,
 }
 
 /// 顺序冲量求解器。
@@ -250,6 +257,10 @@ pub struct ImpulseSolver {
     local_of: Vec<u32>,
     /// 诊断：上一帧内部阶段耗时（µs）=(岛构建, 约束构建+迭代, 休眠/其他, 保留)。
     pub last_phase_us: (u64, u64, u64, u64),
+    /// 诊断：上一帧解算细分（µs）=(建岛, **约束构建**, **热启动预施加**, **迭代扫掠**)。
+    /// 用途：求解相位线性拟合出"每扫掠成本"与"每帧固定成本"两半之后，定位固定
+    /// 成本落在哪（金字塔实测固定 ≈762 µs vs 每扫掠 ≈124 µs，固定是大头）。
+    pub last_detail_us: [u64; 4],
     /// 并查集缓冲（跨帧复用）。
     parent: Vec<u32>,
     /// 岛池（跨帧复用：Vec 容量保留，全清醒场景不逐帧分配）。
@@ -411,6 +422,7 @@ impl ImpulseSolver {
             local_of: Vec::new(),
             inv_i_world: Vec::new(),
             last_phase_us: (0, 0, 0, 0),
+            last_detail_us: [0; 4],
             parent: Vec::new(),
             island_pool: Vec::new(),
         }
@@ -579,12 +591,15 @@ impl ImpulseSolver {
             let local_ref: &[u32] = &local_of;
             let inv_ref: &[Mat3] = &inv_i_world;
             let sp_ref: &SolverParams = &sp;
+            // 诊断细分：每组一份累加器（闭包按 move 捕获，不能共享一个可变借用）。
+            let mut details: Vec<[u64; 3]> = vec![[0; 3]; g_count];
             std::thread::scope(|s| {
                 // iter_mut 逐容器取出元素可变借用（按 g 索引整体借用会跨迭代重叠）。
-                for (g, ((lv, av), (cbuf, wout))) in group_lv
+                for (g, (((lv, av), (cbuf, wout)), det)) in group_lv
                     .iter_mut()
                     .zip(group_av.iter_mut())
                     .zip(build_bufs.iter_mut().zip(warm_outs.iter_mut()))
+                    .zip(details.iter_mut())
                     .enumerate()
                 {
                     let (s0, e0) = groups[g];
@@ -608,6 +623,7 @@ impl ImpulseSolver {
                             shock,
                             normal_inner,
                             sp_ref,
+                            det,
                         );
                     };
                     if g + 1 == g_count {
@@ -618,7 +634,13 @@ impl ImpulseSolver {
                     }
                 }
             });
+            for d in &details {
+                for (k, v) in d.iter().enumerate() {
+                    self.last_detail_us[k + 1] += v;
+                }
+            }
         } else if !awake.is_empty() {
+            let mut det = [0u64; 3];
             solve_island_group(
                 &awake,
                 islands,
@@ -638,7 +660,11 @@ impl ImpulseSolver {
                 shock,
                 normal_inner,
                 &sp,
+                &mut det,
             );
+            for (k, v) in det.iter().enumerate() {
+                self.last_detail_us[k + 1] += v;
+            }
         }
 
         // scatter：组序 = gather 序 → 局部索引一一对应（确定性）。
@@ -852,7 +878,8 @@ fn build_constraint(
             warm_n += 1;
         }
     }
-    let mut pts: Vec<PointConstraint> = Vec::with_capacity(m.points.len());
+    let mut pts = [PointConstraint::default(); 4];
+    let mut npts = 0u8;
     for cp in &m.points {
         // warm starting 匹配：① 特征 ID 精确匹配（带距离护栏，锚点当前世界
         // 位置量距）；② 近邻回退（无特征或 ID 未命中）。
@@ -1019,7 +1046,7 @@ fn build_constraint(
         let trhs1 = drift_eff.dot(t1);
         let trhs2 = drift_eff.dot(t2);
 
-        pts.push(PointConstraint {
+        pts[npts as usize] = PointConstraint {
             ra,
             rb,
             t1,
@@ -1041,9 +1068,10 @@ fn build_constraint(
             pt2: warm_pt.map(|w| w.pt2).unwrap_or(0.0),
             feature: cp.feature,
             warm: warm_pt,
-        });
+        };
+        npts += 1;
     }
-    if pts.is_empty() {
+    if npts == 0 {
         return;
     }
     out.push(ContactConstraint {
@@ -1052,6 +1080,7 @@ fn build_constraint(
         normal: m.normal,
         warm_slot,
         points: pts,
+        npts,
     });
 }
 
@@ -1092,7 +1121,7 @@ fn solve_constraint(
 ) -> f32 {
     let (ai, bi) = (c.a as usize, c.b as usize);
     let normal = c.normal;
-    let npts = c.points.len();
+    let npts = c.npts as usize;
     let mut resid = 0.0f32;
 
     // —— 歧管内层扫掠（法向 + 摩擦两通道一起）——
@@ -1183,10 +1212,12 @@ fn solve_island_group(
     shock_iterations: u32,
     normal_inner: u32,
     sp: &SolverParams,
+    detail: &mut [u64; 3],
 ) {
     for &ii in awake {
         let isl = &islands[ii];
         // 每岛构建约束（岛内流形序 = 全局流形序，§4.14）。
+        let t_build = vxl_phys_core::probe::start();
         cbuf.clear();
         for &mi in &isl.manifs {
             build_constraint(
@@ -1200,10 +1231,12 @@ fn solve_island_group(
                 sp,
             );
         }
+        detail[0] += vxl_phys_core::probe::us(t_build);
         // warm starting 预施加（每约束一次）。
+        let t_warm = vxl_phys_core::probe::start();
         for c in cbuf.iter() {
             let (ai, bi) = (c.a as usize, c.b as usize);
-            for p in &c.points {
+            for p in &c.points[..c.npts as usize] {
                 if let Some(w) = p.warm {
                     if w.pn == 0.0 && w.pt1 == 0.0 && w.pt2 == 0.0 {
                         continue;
@@ -1234,6 +1267,7 @@ fn solve_island_group(
                 }
             }
         }
+        detail[1] += vxl_phys_core::probe::us(t_warm);
         // 顺序冲量迭代（岛内顺序 = 流形序 = 约束构建序，§4.14）。
         // 对称扫掠：偶数迭代正序、奇数迭代反序（约束序 + 接触点序同时反转）——
         // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留可观
@@ -1244,6 +1278,7 @@ fn solve_island_group(
         // 跑满 `early_min_iters` 后残差 < eps 即提前结束剩余外层迭代——安静
         // 堆叠期（金字塔/砖墙的稳态段）12 次外层纯属浪费；判据只依赖状态，
         // 同状态必在同一迭代退出 ⇒ 确定性不受影响。
+        let t_it = vxl_phys_core::probe::start();
         let eps = early_exit_eps();
         let min_iters = early_min_iters();
         for it in 0..iters {
@@ -1290,10 +1325,11 @@ fn solve_island_group(
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
+        detail[2] += vxl_phys_core::probe::us(t_it);
         for c in cbuf.iter() {
             let mut wm = WarmManifold::EMPTY;
             wm.normal = c.normal;
-            wm.n = c.points.len() as u8;
+            wm.n = c.npts;
             for (k, p) in c.points.iter().enumerate().take(4) {
                 wm.points[k] = WarmPoint {
                     pn: p.pn,
