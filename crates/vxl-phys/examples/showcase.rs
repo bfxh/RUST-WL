@@ -35,13 +35,8 @@ fn main() {
     let mut w = World::new(PhysConfig::default());
 
     // ---- 体素地板 + 墙（x = +4 处）----
-    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
-        Vec3::new(-8.0, 0.0, -8.0),
-        0.5,
-        32,
-        3,
-        32,
-    );
+    let mut vol =
+        vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-8.0, 0.0, -8.0), 0.5, 32, 3, 32);
     vol.fill_box(Vec3::new(-8.0, 0.0, -8.0), Vec3::new(8.0, 1.5, 8.0)); // 地板 3 层
     vol.fill_box(Vec3::new(3.0, 1.5, -3.0), Vec3::new(3.5, 4.5, 3.0)); // 墙 1×6×12 格
     vol.set(18, 2, 22, false); // 凿出流体石盆：单格凹坑 x∈[1,1.5] y∈[1,1.5] z∈[3,3.5]
@@ -106,7 +101,13 @@ fn main() {
         Vec3::new(0.35, 0.4, 0.3),
     ]
     .to_vec();
-    let pieces = w.spawn_hull_pieces(hull, &seeds, Vec3::new(0.0, 3.4, 0.0), Quat::IDENTITY, 800.0);
+    let pieces = w.spawn_hull_pieces(
+        hull,
+        &seeds,
+        Vec3::new(0.0, 3.4, 0.0),
+        Quat::IDENTITY,
+        800.0,
+    );
 
     // ---- 刚体盒堆（分两处）----
     let mut boxes = Vec::new();
@@ -129,7 +130,11 @@ fn main() {
             Shape::Box {
                 half: Vec3::splat(0.28),
             },
-            Vec3::new(-4.4 + (i % 3) as f32 * 0.55, 4.2 + (i / 3) as f32 * 0.7, -0.3 + (i % 2) as f32 * 0.6),
+            Vec3::new(
+                -4.4 + (i % 3) as f32 * 0.55,
+                4.2 + (i / 3) as f32 * 0.7,
+                -0.3 + (i % 2) as f32 * 0.6,
+            ),
             Quat::IDENTITY,
             700.0,
         ));
@@ -206,9 +211,7 @@ fn main() {
     let (vox_dims, vox_origin, vox_step) = w
         .providers()
         .voxel(voxel_id)
-        .map(|v| {
-            (v.dims(), v.origin(), v.step())
-        })
+        .map(|v| (v.dims(), v.origin(), v.step()))
         .unwrap();
     for x in [vox_dims.0, vox_dims.1, vox_dims.2] {
         f.write_all(&x.to_le_bytes()).unwrap();
@@ -221,7 +224,9 @@ fn main() {
     let field = w.providers().splat(splat_id).unwrap();
     f.write_all(&(field.len() as u32).to_le_bytes()).unwrap();
     for s in field.splats() {
-        for v in [s.center.x, s.center.y, s.center.z, s.scale.x, s.scale.y, s.scale.z, s.opacity] {
+        for v in [
+            s.center.x, s.center.y, s.center.z, s.scale.x, s.scale.y, s.scale.z, s.opacity,
+        ] {
             f.write_all(&v.to_le_bytes()).unwrap();
         }
         for c in s.color {
@@ -232,8 +237,10 @@ fn main() {
     // 三角网（静态一次）：张数 + 每张（顶点数 + 三角形数 + 顶点 3f + 三角形 3×u32）
     let mesh = w.providers().mesh(mesh_pid).unwrap();
     f.write_all(&1u32.to_le_bytes()).unwrap(); // 场景内网格张数
-    f.write_all(&(mesh.verts().len() as u32).to_le_bytes()).unwrap();
-    f.write_all(&(mesh.tris().len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(mesh.verts().len() as u32).to_le_bytes())
+        .unwrap();
+    f.write_all(&(mesh.tris().len() as u32).to_le_bytes())
+        .unwrap();
     for p in mesh.verts() {
         for v in [p.x, p.y, p.z] {
             f.write_all(&v.to_le_bytes()).unwrap();
@@ -246,7 +253,8 @@ fn main() {
     }
 
     // 流体系统数（静态；粒子位置每帧在帧尾发）
-    f.write_all(&(w.fluids().len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(w.fluids().len() as u32).to_le_bytes())
+        .unwrap();
 
     let mut ms_sum = 0f64;
     let mut ms_max = 0f64;

@@ -68,6 +68,16 @@ pub struct PhysConfig {
     /// 仍在"站着微动"而非垮塌）；10 扫掠档保留为保守选择（`--iters 5`）。
     /// 单子步下扫掠低于 ≈24 即失稳（8×2=16 时 900 步后金字塔垮塌）。
     pub velocity_iterations: u32,
+    /// **关节通道迭代数**（`vxl_phys_solver::joints`；与接触迭代**分开**）。
+    ///
+    /// 为什么不合用 `velocity_iterations`：接触档 3（2 子步 × 3 迭代 × 内层 1
+    /// = 6 扫掠）是**标定过的接触预算**，关节对迭代数的敏感度完全不同——关节链
+    /// 的冲量传播是单向 GS，迭代不足就表现为"橡皮筋"。实测（`arena_bench
+    /// joint_chains`，40 环铰链链 / 40 段固定塔，600 步最大锚点分离）：
+    /// 3 迭代 4.8/7.3 cm、8 迭代 2.0/2.5 cm、16 迭代 1.3/1.2 cm、32 迭代
+    /// 1.1/0.5 cm；步耗时 0.075/0.144/0.233/0.428 ms（40 关节）。
+    /// 默认 8 = 拐点前段（相对 3 迭代分离降 2.4×，代价 +0.07 ms/40 关节）。
+    pub joint_iterations: u32,
     /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
     /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
     /// 3 自由度）+ 强转动耦合，单向 GS 的慢模正在歧管内部——内层 K 遍把歧管内
@@ -146,6 +156,7 @@ impl Default for PhysConfig {
             // 更快且更稳（金字塔 4.32→3.31 ms、抖动 1.45→0.59；墙 3.72→2.77）。
             substeps: 2,
             velocity_iterations: 3,
+            joint_iterations: 8,
             normal_inner: 1,
             shock_iterations: 0,
             contact_skin: 0.02,
@@ -245,6 +256,8 @@ mod tests {
         assert_eq!(c.substeps, 2);
         assert_eq!(c.velocity_iterations, 3);
         assert_eq!(c.normal_inner, 1);
+        // 关节独立预算（见 `joint_iterations` 注释的分离-迭代标定表）。
+        assert_eq!(c.joint_iterations, 8);
         assert_eq!(c.sleep_linear, 0.04);
         assert_eq!(c.sleep_angular, 0.05);
         assert_eq!(c.sleep_time, 0.5);

@@ -84,9 +84,21 @@ impl Support for BoxSupport {
     fn support(&self, dir: Vec3) -> Vec3 {
         let ld = self.rot.transpose_mul_vec3(dir);
         let local = Vec3::new(
-            if ld.x >= 0.0 { self.half.x } else { -self.half.x },
-            if ld.y >= 0.0 { self.half.y } else { -self.half.y },
-            if ld.z >= 0.0 { self.half.z } else { -self.half.z },
+            if ld.x >= 0.0 {
+                self.half.x
+            } else {
+                -self.half.x
+            },
+            if ld.y >= 0.0 {
+                self.half.y
+            } else {
+                -self.half.y
+            },
+            if ld.z >= 0.0 {
+                self.half.z
+            } else {
+                -self.half.z
+            },
         );
         self.pos + self.rot.mul_vec3(local)
     }
@@ -390,7 +402,10 @@ pub fn epa_from_simplex(
             let fc = faces[i];
             for e in [(fc[0], fc[1]), (fc[1], fc[2]), (fc[2], fc[0])] {
                 let k = (e.0.min(e.1), e.0.max(e.1));
-                match horizon.iter().position(|&(x, y)| x.min(y) == k.0 && x.max(y) == k.1) {
+                match horizon
+                    .iter()
+                    .position(|&(x, y)| x.min(y) == k.0 && x.max(y) == k.1)
+                {
                     Some(pos) => {
                         horizon.remove(pos);
                     }
@@ -587,10 +602,7 @@ fn hull_2d_on_plane(pts: &[Vec3], n: Vec3) -> Vec<Vec3> {
     };
     let u = ax.cross(n).normalize();
     let v = n.cross(u); // 右手系（u, v, n）
-    let mut q: Vec<(f32, f32, Vec3)> = pts
-        .iter()
-        .map(|p| (p.dot(u), p.dot(v), *p))
-        .collect();
+    let mut q: Vec<(f32, f32, Vec3)> = pts.iter().map(|p| (p.dot(u), p.dot(v), *p)).collect();
     q.sort_by(|a, b| {
         a.0.partial_cmp(&b.0)
             .unwrap_or(core::cmp::Ordering::Equal)
@@ -784,7 +796,8 @@ mod tests {
         for &y in &[-0.5f32, 0.5] {
             for &z in &[-0.5f32, 0.5] {
                 assert!(
-                    pts.iter().any(|p| (*p - Vec3::new(0.0, y, z)).length() < 1e-5),
+                    pts.iter()
+                        .any(|p| (*p - Vec3::new(0.0, y, z)).length() < 1e-5),
                     "缺裁切面角 ({y},{z})"
                 );
             }

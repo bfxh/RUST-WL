@@ -885,14 +885,22 @@ mod tests {
         //  ① 贴地面的 5 点（面号 3 ⇒ feature 48..52）必须在，且深度 ≈0.1、法线 +Y；
         //  ② 其它面只允许出现**角点**（feature % 16 != 0）——面心样本只有真贴着
         //     的底面才有（窄相据此在多面候选里排除"只有角点的伪面"）。
-        let bottom: Vec<_> = out.iter().filter(|c| (48..53).contains(&c.feature)).collect();
+        let bottom: Vec<_> = out
+            .iter()
+            .filter(|c| (48..53).contains(&c.feature))
+            .collect();
         assert_eq!(bottom.len(), 5, "贴地面应有 5 点；out={}", out.len());
         for c in &bottom {
             assert!((c.depth - 0.1).abs() < 1e-4, "depth={}", c.depth);
             assert!((c.normal.y - 1.0).abs() < 1e-4, "normal={:?}", c.normal);
         }
         for c in out.iter().filter(|c| !(48..53).contains(&c.feature)) {
-            assert_ne!(c.feature % 16, 0, "非贴地面不得有面心样本：feature={}", c.feature);
+            assert_ne!(
+                c.feature % 16,
+                0,
+                "非贴地面不得有面心样本：feature={}",
+                c.feature
+            );
         }
         // 面中心点（feature 48）也应在（对齐落面时中心才给得出正确法线语义）
         assert!(out.iter().any(|c| c.feature == 48));

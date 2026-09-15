@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ccd;
+pub mod joints;
 
 use std::collections::HashMap;
 
@@ -1078,6 +1079,7 @@ fn early_min_iters() -> u32 {
 
 /// 顺序冲量解算一条约束；返回本次扫掠施加的**最大速度级修正**（m/s，
 /// 法向 + 摩擦通道的最大值），供收敛早退判据使用。
+#[allow(clippy::too_many_arguments)] // 热路径内联目标：避免打包结构体的构造成本
 fn solve_constraint(
     c: &mut ContactConstraint,
     lv: &mut [Vec3],
@@ -1207,8 +1209,28 @@ fn solve_island_group(
                         continue;
                     }
                     let impulse = c.normal * w.pn + p.t1 * w.pt1 + p.t2 * w.pt2;
-                    group_apply(lv, av, local_of, inv_i_world, ai, p.ra, impulse, true, bodies);
-                    group_apply(lv, av, local_of, inv_i_world, bi, p.rb, impulse, false, bodies);
+                    group_apply(
+                        lv,
+                        av,
+                        local_of,
+                        inv_i_world,
+                        ai,
+                        p.ra,
+                        impulse,
+                        true,
+                        bodies,
+                    );
+                    group_apply(
+                        lv,
+                        av,
+                        local_of,
+                        inv_i_world,
+                        bi,
+                        p.rb,
+                        impulse,
+                        false,
+                        bodies,
+                    );
                 }
             }
         }
@@ -1228,11 +1250,29 @@ fn solve_island_group(
             let mut resid = 0.0f32;
             if it % 2 == 0 {
                 for c in cbuf.iter_mut() {
-                    resid = resid.max(solve_constraint(c, lv, av, local_of, inv_i_world, bodies, false, normal_inner));
+                    resid = resid.max(solve_constraint(
+                        c,
+                        lv,
+                        av,
+                        local_of,
+                        inv_i_world,
+                        bodies,
+                        false,
+                        normal_inner,
+                    ));
                 }
             } else {
                 for c in cbuf.iter_mut().rev() {
-                    resid = resid.max(solve_constraint(c, lv, av, local_of, inv_i_world, bodies, true, normal_inner));
+                    resid = resid.max(solve_constraint(
+                        c,
+                        lv,
+                        av,
+                        local_of,
+                        inv_i_world,
+                        bodies,
+                        true,
+                        normal_inner,
+                    ));
                 }
             }
             if it + 1 >= min_iters && resid < eps {
@@ -1245,7 +1285,8 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                let _ = solve_constraint(c, lv, av, local_of, inv_i_world, bodies, true, normal_inner);
+                let _ =
+                    solve_constraint(c, lv, av, local_of, inv_i_world, bodies, true, normal_inner);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。

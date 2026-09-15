@@ -39,13 +39,23 @@ fn mat(w: &mut World, friction: f32, restitution: f32) -> vxl_phys_core::Materia
 
 fn add_box(w: &mut World, pos: Vec3, half: Vec3, m: vxl_phys_core::MaterialId, density: f32) {
     let i = w.bodies.len();
-    w.add_dynamic(Shape::Box { half }, pos, vxl_phys_core::Quat::IDENTITY, density);
+    w.add_dynamic(
+        Shape::Box { half },
+        pos,
+        vxl_phys_core::Quat::IDENTITY,
+        density,
+    );
     w.bodies.set_material(i, m);
 }
 
 fn add_sphere(w: &mut World, pos: Vec3, r: f32, m: vxl_phys_core::MaterialId, density: f32) {
     let i = w.bodies.len();
-    w.add_dynamic(Shape::Sphere { radius: r }, pos, vxl_phys_core::Quat::IDENTITY, density);
+    w.add_dynamic(
+        Shape::Sphere { radius: r },
+        pos,
+        vxl_phys_core::Quat::IDENTITY,
+        density,
+    );
     w.bodies.set_material(i, m);
 }
 
@@ -76,7 +86,13 @@ fn scene_pyramid(cfg: PhysConfig) -> World {
         let y = box_half + k as f32 * pitch;
         for i in 0..count {
             let x = (i as f32 - (count as f32 - 1.0) / 2.0) * pitch;
-            add_box(&mut w, Vec3::new(x, y, 0.0), Vec3::splat(box_half), m, 1000.0);
+            add_box(
+                &mut w,
+                Vec3::new(x, y, 0.0),
+                Vec3::splat(box_half),
+                m,
+                1000.0,
+            );
         }
     }
     w
@@ -99,7 +115,13 @@ fn scene_wall(cfg: PhysConfig) -> World {
             }
             let x = (i as f32 - (per_row as f32 - 1.0) / 2.0) * (hw * 2.0 + 0.02) + offset;
             let y = hh + row as f32 * (hh * 2.0 + 0.01);
-            add_box(&mut w, Vec3::new(x, y, 0.0), Vec3::new(hw, hh, hd), m, 1000.0);
+            add_box(
+                &mut w,
+                Vec3::new(x, y, 0.0),
+                Vec3::new(hw, hh, hd),
+                m,
+                1000.0,
+            );
             made += 1;
         }
     }
@@ -171,8 +193,13 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
     let p95 = samples[(samples.len() as f64 * 0.95) as usize];
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
     let t = w.timings();
-    let total_us = (t.broadphase_us + t.narrowphase_us + t.solve_us + t.integrate_vel_us
-        + t.integrate_pos_us + t.fields_us + t.ccd_us)
+    let total_us = (t.broadphase_us
+        + t.narrowphase_us
+        + t.solve_us
+        + t.integrate_vel_us
+        + t.integrate_pos_us
+        + t.fields_us
+        + t.ccd_us)
         .max(1);
     let bodies = w.bodies.len();
     let dynb = (0..bodies).filter(|&i| w.bodies.is_dynamic(i)).count();
@@ -242,7 +269,13 @@ fn scene_slide(cfg: PhysConfig, ticks: usize) {
     ground(&mut w, 120.0);
     let m = mat(&mut w, 0.7, 0.0);
     // 半 0.4 的盒，底面贴地（y=0.4），初速 +12 m/s。
-    add_box(&mut w, Vec3::new(0.0, 0.4, 0.0), Vec3::splat(0.4), m, 1000.0);
+    add_box(
+        &mut w,
+        Vec3::new(0.0, 0.4, 0.0),
+        Vec3::splat(0.4),
+        m,
+        1000.0,
+    );
     w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
     let mu = 0.7f32;
     let ideal = mu * 9.81 * dt; // 每 tick 理论减速（m/s）
@@ -287,7 +320,13 @@ fn scene_approach(cfg: PhysConfig) {
     w.bodies.set_material(wall, mw);
     // 仅静态墙 + 弹体（无地板）：排除摩擦/支撑干扰，直测接触响应。
     let mb = mat(&mut w, 0.3, 0.0);
-    add_box(&mut w, Vec3::new(-3.0, 0.0, 0.0), Vec3::splat(0.4), mb, 1000.0);
+    add_box(
+        &mut w,
+        Vec3::new(-3.0, 0.0, 0.0),
+        Vec3::splat(0.4),
+        mb,
+        1000.0,
+    );
     w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
     println!(
         "approach: 12 m/s 撞 0.1 m 薄墙（substeps={sub}，子步 dt={:.5}）；表面间距轨迹：",
@@ -315,17 +354,18 @@ fn scene_approach(cfg: PhysConfig) {
 /// 用途：provider 接触语义（检测带 vs 真实深度）的回归基准。
 fn scene_voxel_land(cfg: PhysConfig) {
     let mut w = World::new(cfg);
-    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
-        Vec3::new(-4.0, 0.0, -4.0),
-        0.5,
-        16,
-        2,
-        16,
-    );
+    let mut vol =
+        vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 2, 16);
     vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0)); // 顶面 y = 1.0
     w.add_voxel(vol);
     let m = mat(&mut w, 0.6, 0.0);
-    add_box(&mut w, Vec3::new(0.0, 2.5, 0.0), Vec3::splat(0.5), m, 1000.0);
+    add_box(
+        &mut w,
+        Vec3::new(0.0, 2.5, 0.0),
+        Vec3::splat(0.5),
+        m,
+        1000.0,
+    );
     println!("voxel_land: 盒（半 0.5）落到体素顶面 y=1.0（期望静置 y≈1.5）；轨迹：");
     let mut min_y = f32::INFINITY;
     for t in 0..180 {
@@ -375,18 +415,19 @@ fn scene_voxel_land(cfg: PhysConfig) {
 /// 且"解算前接近速度"≥ 阈值（破坏管线可判冲击）。
 fn scene_wall_provider(cfg: PhysConfig) {
     let mut w = World::new(cfg);
-    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
-        Vec3::new(-4.0, 0.0, -4.0),
-        0.5,
-        16,
-        16,
-        16,
-    );
+    let mut vol =
+        vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-4.0, 0.0, -4.0), 0.5, 16, 16, 16);
     vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 0.5, 4.0)); // 地板 1 层
     vol.fill_box(Vec3::new(0.0, 0.5, -2.0), Vec3::new(0.5, 2.5, 2.0)); // 墙 1 格厚
     w.add_voxel(vol);
     let m = mat(&mut w, 0.3, 0.0);
-    add_box(&mut w, Vec3::new(-3.0, 1.0, 0.0), Vec3::splat(0.4), m, 1000.0);
+    add_box(
+        &mut w,
+        Vec3::new(-3.0, 1.0, 0.0),
+        Vec3::splat(0.4),
+        m,
+        1000.0,
+    );
     w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
     println!("wall_provider: 12 m/s 撞 1 格厚体素墙（x∈[0,0.5]）；轨迹：");
     for t in 0..40 {
@@ -402,10 +443,17 @@ fn scene_wall_provider(cfg: PhysConfig) {
             );
             if (12..16).contains(&t) {
                 for mf in w.manifolds() {
-                    let ds: Vec<String> = mf.points.iter().map(|p| format!("{:.4}", p.depth)).collect();
+                    let ds: Vec<String> = mf
+                        .points
+                        .iter()
+                        .map(|p| format!("{:.4}", p.depth))
+                        .collect();
                     println!(
                         "      [流形] 法线=({:.2},{:.2},{:.2}) 深度=[{}]",
-                        mf.normal.x, mf.normal.y, mf.normal.z, ds.join(", ")
+                        mf.normal.x,
+                        mf.normal.y,
+                        mf.normal.z,
+                        ds.join(", ")
                     );
                 }
             }
@@ -468,7 +516,12 @@ fn scene_trimesh_terrain(cfg: PhysConfig) -> World {
                 pts.push(Vec3::new(0.0, -hh, 0.0));
                 pts.push(Vec3::new(0.0, hh, 0.0));
                 let hull = w.add_hull(pts);
-                let bi = w.spawn_hull_body(hull, Vec3::new(x, y, z), vxl_phys_core::Quat::IDENTITY, 1000.0);
+                let bi = w.spawn_hull_body(
+                    hull,
+                    Vec3::new(x, y, z),
+                    vxl_phys_core::Quat::IDENTITY,
+                    1000.0,
+                );
                 w.bodies.set_material(bi as usize, m);
             }
         }
@@ -516,7 +569,13 @@ fn scene_mesh_land(cfg: PhysConfig) {
     }
     w.add_mesh(vxl_phys_terrain::mesh::TriMesh::new(verts, tris));
     let m = mat(&mut w, 0.6, 0.0);
-    add_box(&mut w, Vec3::new(0.0, 0.52, 0.0), Vec3::splat(0.5), m, 1000.0);
+    add_box(
+        &mut w,
+        Vec3::new(0.0, 0.52, 0.0),
+        Vec3::splat(0.5),
+        m,
+        1000.0,
+    );
     println!("mesh_land: 盒（半 0.5）轻放水平网格（面 y=0；期望静置 y≈0.52）：");
     let mut min_y = f32::INFINITY;
     for t in 0..600 {
@@ -524,13 +583,264 @@ fn scene_mesh_land(cfg: PhysConfig) {
         let y = w.bodies.position[1].y;
         min_y = min_y.min(y);
         if t < 5 || (t + 1) % 60 == 0 {
-            println!("  t={:>4}  y={y:>8.4}  vy={:>8.4}", t + 1, w.bodies.linvel[1].y);
+            println!(
+                "  t={:>4}  y={y:>8.4}  vy={:>8.4}",
+                t + 1,
+                w.bodies.linvel[1].y
+            );
         }
     }
     println!(
         "  末态 y={:.4}（≈0.52 为正常；持续下降 = 单向屏障失效）  最低 y={min_y:.4}",
         w.bodies.position[1].y
     );
+}
+
+/// PhysArena `jointProbe` 的逐字复刻（5 种关节；几何/容差/判据同源）。
+///
+/// 探针结构：静态锚块（半 0.2，y=10）+ 悬挂盒（半 0.4，密度 500，间隔 0.25
+/// 避免两端接触），锚点在 t=0 **恰好重合**（起始违例测的是追赶瞬态，不是约束
+/// 保持力）。判据与 arena 同口径：worldPoint 展开后的锚点分离 ≤ 容差
+/// （固定 0.3、其余 0.2；距离走 |d − rest| ≤ 0.35）。240 步。
+fn scene_joint_probes(cfg: PhysConfig) {
+    const ANCHOR_HALF: f32 = 0.2;
+    const BODY_HALF: f32 = 0.4;
+    let anchor_y = 10.0f32;
+    let attach_y = anchor_y - ANCHOR_HALF;
+    let a_local = Vec3::new(0.0, -ANCHOR_HALF, 0.0);
+    let gap = 0.25f32;
+    let rest = 1.2f32;
+
+    // 与 arena `worldPoint` 同一数学：体局部点 → 世界系。
+    let world_point = |p: Vec3, q: vxl_phys_core::Quat, local: Vec3| -> Vec3 {
+        let (x, y, z, w) = (q.x, q.y, q.z, q.w);
+        let tx = 2.0 * (y * local.z - z * local.y);
+        let ty = 2.0 * (z * local.x - x * local.z);
+        let tz = 2.0 * (x * local.y - y * local.x);
+        Vec3::new(
+            p.x + local.x + w * tx + (y * tz - z * ty),
+            p.y + local.y + w * ty + (z * tx - x * tz),
+            p.z + local.z + w * tz + (x * ty - y * tx),
+        )
+    };
+
+    let kinds: [(&str, JointKind, [f32; 3], f32); 5] = [
+        (
+            "joint-spherical",
+            JointKind::Spherical,
+            [0.0, 0.0, 1.0],
+            0.2,
+        ),
+        ("joint-revolute", JointKind::Revolute, [0.0, 0.0, 1.0], 0.2),
+        ("joint-fixed", JointKind::Fixed, [0.0, 0.0, 1.0], 0.3),
+        (
+            "joint-prismatic",
+            JointKind::Prismatic,
+            [1.0, 0.0, 0.0],
+            0.2,
+        ),
+        ("joint-distance", JointKind::Distance, [0.0, 0.0, 1.0], 0.35),
+    ];
+    println!("关节探针（PhysArena jointProbe 复刻；240 步）：");
+    for (name, kind, axis, tol) in kinds {
+        let rope = kind == JointKind::Distance;
+        let b_local = if rope {
+            Vec3::ZERO
+        } else {
+            Vec3::new(0.0, BODY_HALF + gap, 0.0)
+        };
+        let body_y = if rope {
+            attach_y - rest
+        } else {
+            attach_y - BODY_HALF - gap
+        };
+        let mut w = World::new(cfg.clone());
+        ground(&mut w, 80.0);
+        // 锚块必须走 `add_static`：`add_box` 恒为动态体，而 `mass_props` 会把
+        // `density <= 0` 回退成 1.0 ⇒ 用密度 0 假装静态只会得到一个普通动态体，
+        // 锚与悬挂体一起自由落体、相对分离恒 0 ——探针假通过（本轮踩过）。
+        let m = mat(&mut w, 0.5, 0.0);
+        let ia = w.bodies.len();
+        w.add_static(
+            Shape::Box {
+                half: Vec3::splat(ANCHOR_HALF),
+            },
+            Vec3::new(0.0, anchor_y, 0.0),
+            vxl_phys_core::Quat::IDENTITY,
+        );
+        w.bodies.set_material(ia, m);
+        let mb = mat(&mut w, 0.5, 0.0);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, body_y, 0.0),
+            Vec3::splat(BODY_HALF),
+            mb,
+            500.0,
+        );
+        let mut j = Joint::new(kind, 1, 2, a_local, b_local);
+        if !rope {
+            j = j.with_axis(Vec3::new(axis[0], axis[1], axis[2]));
+        }
+        if rope {
+            j = j.with_rest(rest);
+        }
+        w.add_joint(j);
+        let mut worst = 0.0f32;
+        let mut last = 0.0f32;
+        for _ in 0..240 {
+            w.step();
+            let (pa, qa) = w.bodies.pose(1);
+            let (pb, qb) = w.bodies.pose(2);
+            let wa = world_point(pa, qa, a_local);
+            let wb = world_point(pb, qb, b_local);
+            let d = (wb - wa).length();
+            let err = if rope { (d - rest).abs() } else { d };
+            worst = worst.max(err);
+            last = err;
+        }
+        let y = w.bodies.position[2].y;
+        let verdict = if worst <= tol { "PASS" } else { "FAIL" };
+        println!(
+            "  {name:<16} {verdict}  峰值 {worst:.4} m（上限 {tol:.2}） 末态 {last:.4} m  悬挂体 y={y:.3}（初 {body_y:.3}）"
+        );
+    }
+}
+
+/// PhysArena `chain-hinge` / `hanging-tower` 的复刻（动态关节链：拉伸是判据）。
+///
+/// 链场景是关节求解器最难看的形态——一个子步内的冲量要在整条链上传播，
+/// 迭代数不足就表现为"橡皮筋"。指标：全链**最大锚点分离**与**链长拉伸**
+/// （首末体距离 / 名义长度），外加是否发散（NaN）与末态速度。
+fn scene_joint_chains(cfg: PhysConfig) {
+    let n = 40usize;
+    let link = 0.6f32;
+
+    // ---- 铰链链：静态锚块 + n 个球，球形关节（锚点 ±0.3 局部 X）----
+    let mut w = World::new(cfg.clone());
+    ground(&mut w, 120.0);
+    let m = mat(&mut w, 0.4, 0.0);
+    let ia = w.bodies.len();
+    w.add_static(
+        Shape::Box {
+            half: Vec3::splat(0.15),
+        },
+        Vec3::new(0.0, 8.0, 0.0),
+        vxl_phys_core::Quat::IDENTITY,
+    );
+    w.bodies.set_material(ia, m);
+    let mut prev = ia as u32;
+    for i in 0..n {
+        let ms = mat(&mut w, 0.4, 0.0);
+        add_sphere(
+            &mut w,
+            Vec3::new(link * (i + 1) as f32, 8.0, 0.0),
+            0.17,
+            ms,
+            2000.0,
+        );
+        let cur = (w.bodies.len() - 1) as u32;
+        w.add_joint(Joint::new(
+            JointKind::Spherical,
+            prev,
+            cur,
+            Vec3::new(0.3, 0.0, 0.0),
+            Vec3::new(-0.3, 0.0, 0.0),
+        ));
+        prev = cur;
+    }
+    let nominal = link * n as f32;
+    let mut worst = 0.0f32;
+    let mut nan = false;
+    let t0 = std::time::Instant::now();
+    for _ in 0..600 {
+        w.step();
+        for j in 0..n {
+            let (pa, qa) = w.bodies.pose(1 + j);
+            let (pb, qb) = w.bodies.pose(2 + j);
+            let ra = vxl_phys_core::Mat3::from_quat(qa).mul_vec3(Vec3::new(0.3, 0.0, 0.0));
+            let rb = vxl_phys_core::Mat3::from_quat(qb).mul_vec3(Vec3::new(-0.3, 0.0, 0.0));
+            let d = ((pb + rb) - (pa + ra)).length();
+            if !d.is_finite() {
+                nan = true;
+            }
+            worst = worst.max(d);
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0 / 600.0;
+    let (p0, _) = w.bodies.pose(1);
+    let (pn, _) = w.bodies.pose(n);
+    let span = (pn - p0).length();
+    println!("chain-hinge（{n} 环，600 步）：");
+    println!(
+        "  最大锚点分离 {worst:.4} m  首末间距 {span:.3}（名义 {nominal:.2}）  发散={nan}  步耗时 {ms:.3} ms"
+    );
+    println!(
+        "  末态：链尾 y={:.3}（初 {:.3}）",
+        w.bodies.position[n].y, 8.0
+    );
+
+    // ---- 悬挂塔：固定关节，方块半 0.3、节距 0.62（锚点 ±0.31 局部 Y）----
+    let mut w = World::new(cfg);
+    ground(&mut w, 120.0);
+    let top = 3.0 + n as f32 * 0.62;
+    let m = mat(&mut w, 0.5, 0.0);
+    let ia = w.bodies.len();
+    w.add_static(
+        Shape::Box {
+            half: Vec3::splat(0.2),
+        },
+        Vec3::new(0.0, top, 0.0),
+        vxl_phys_core::Quat::IDENTITY,
+    );
+    w.bodies.set_material(ia, m);
+    let mut prev = ia as u32;
+    for i in 0..n {
+        let mb = mat(&mut w, 0.5, 0.0);
+        add_box(
+            &mut w,
+            Vec3::new(0.0, top - (i + 1) as f32 * 0.62, 0.0),
+            Vec3::splat(0.3),
+            mb,
+            1500.0,
+        );
+        let cur = (w.bodies.len() - 1) as u32;
+        w.add_joint(Joint::new(
+            JointKind::Fixed,
+            prev,
+            cur,
+            Vec3::new(0.0, -0.31, 0.0),
+            Vec3::new(0.0, 0.31, 0.0),
+        ));
+        prev = cur;
+    }
+    let mut worst = 0.0f32;
+    let mut nan = false;
+    let mut worst_tilt = 1.0f32;
+    let t0 = std::time::Instant::now();
+    for _ in 0..600 {
+        w.step();
+        for j in 0..n {
+            let (pa, qa) = w.bodies.pose(1 + j);
+            let (pb, qb) = w.bodies.pose(2 + j);
+            let ra = vxl_phys_core::Mat3::from_quat(qa).mul_vec3(Vec3::new(0.0, -0.31, 0.0));
+            let rb = vxl_phys_core::Mat3::from_quat(qb).mul_vec3(Vec3::new(0.0, 0.31, 0.0));
+            let d = ((pb + rb) - (pa + ra)).length();
+            if !d.is_finite() {
+                nan = true;
+            }
+            worst = worst.max(d);
+            // 固定关节的"硬度"还要看相对姿态：相邻块的局部 X 轴应始终同向。
+            let axa = vxl_phys_core::Mat3::from_quat(qa).mul_vec3(Vec3::X);
+            let axb = vxl_phys_core::Mat3::from_quat(qb).mul_vec3(Vec3::X);
+            worst_tilt = worst_tilt.min(axa.dot(axb));
+        }
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0 / 600.0;
+    println!("hanging-tower（{n} 段，600 步）：");
+    println!(
+        "  最大锚点分离 {worst:.4} m  最小相邻轴同向 cos {worst_tilt:.4}  发散={nan}  步耗时 {ms:.3} ms"
+    );
+    println!("  末态：塔尾 y={:.3}", w.bodies.position[n].y);
 }
 
 fn main() {
@@ -591,6 +901,18 @@ fn main() {
         }
         if s == "mesh_land" {
             scene_mesh_land(cfg.clone());
+            continue;
+        }
+        if s == "joints" {
+            scene_joint_probes(cfg.clone());
+            continue;
+        }
+        if s == "joint_chains" {
+            println!(
+                "配置：joint_iterations={} substeps={}",
+                cfg.joint_iterations, cfg.substeps
+            );
+            scene_joint_chains(cfg.clone());
             continue;
         }
         let serial = rest.iter().any(|a| a == "--serial");

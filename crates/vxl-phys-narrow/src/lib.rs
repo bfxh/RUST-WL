@@ -452,7 +452,10 @@ impl DefaultNarrowPhase {
 
     /// 外壳点云（局部坐标；空切片 = id 无效）。
     pub fn hull_points(&self, id: u32) -> &[Vec3] {
-        self.hulls.get(id).map(|h| h.points.as_slice()).unwrap_or(&[])
+        self.hulls
+            .get(id)
+            .map(|h| h.points.as_slice())
+            .unwrap_or(&[])
     }
 
     /// 外壳点云 → 局部 AABB 半长（门面构 `Shape::ConvexHull` 用）。
@@ -590,7 +593,8 @@ impl DefaultNarrowPhase {
         }
 
         // —— 对方是盒/球/外壳：GJK/EPA 一次法线 + 外壳近面顶点细化 ——
-        let (Some(ua), Some(ub)) = (self.support_of(sa, pa, ra), self.support_of(sb, pb, rb)) else {
+        let (Some(ua), Some(ub)) = (self.support_of(sa, pa, ra), self.support_of(sb, pb, rb))
+        else {
             return; // 对方形状不受理
         };
         let Some((n_p, _depth, _p)) = gjk::epa(&ua, &ub, 32) else {
@@ -633,7 +637,6 @@ impl DefaultNarrowPhase {
             points: ContactPoints::from_slice(&pts),
         });
     }
-
 
     pub fn new(skin: f32) -> Self {
         Self {
@@ -1430,11 +1433,7 @@ impl DefaultNarrowPhase {
                     with_center
                 };
                 pool.into_iter()
-                    .max_by(|x, y| {
-                        x.count
-                            .cmp(&y.count)
-                            .then(x.deepest.total_cmp(&y.deepest))
-                    })
+                    .max_by(|x, y| x.count.cmp(&y.count).then(x.deepest.total_cmp(&y.deepest)))
             });
             let (best_key, best_normal) = match pick {
                 Some(g) => (
@@ -1504,9 +1503,7 @@ impl DefaultNarrowPhase {
                     };
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
-                Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => {
-                    return
-                }
+                Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => return,
             };
             if !ok {
                 return;

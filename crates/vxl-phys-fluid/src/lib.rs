@@ -222,11 +222,7 @@ impl FluidSystem {
         for i in -side..=side {
             for j in -side..=side {
                 for k in -side..=side {
-                    let d = Vec3::new(
-                        i as f32 * spacing,
-                        j as f32 * spacing,
-                        k as f32 * spacing,
-                    );
+                    let d = Vec3::new(i as f32 * spacing, j as f32 * spacing, k as f32 * spacing);
                     let r2 = d.length_squared();
                     if r2 <= h2 {
                         let t = h2 - r2;
@@ -497,7 +493,8 @@ impl FluidSystem {
                 let vdn = -vij.dot(d);
                 if vdn > 0.0 {
                     let mu = vdn * self.h / (r2 + 0.01 * self.h2);
-                    let cv = self.mass * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (self.ks * t * t);
+                    let cv =
+                        self.mass * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (self.ks * t * t);
                     acc += d * (cv / r.max(1e-9));
                 }
                 let tt = self.h2 - r2;
@@ -553,9 +550,7 @@ impl FluidSystem {
                 // 流体边界口径（内点鲁棒）：体素等截断 SDF 提供者的内部
                 // 梯度被格间内面主导可指向固体深处 ⇒ 投影穿壁隧逃（实测
                 // 1–2 格厚壁均复现）；解析面提供者默认原样转 contacts_point。
-                if providers
-                    .contacts_point_boundary(bid, pi, self.skin, &mut self.contacts)
-                {
+                if providers.contacts_point_boundary(bid, pi, self.skin, &mut self.contacts) {
                     for c in &self.contacts {
                         let sdf = (pi - c.point).dot(c.normal);
                         let pen = -sdf;
@@ -806,11 +801,7 @@ mod tests {
                 hi_n += 1;
             }
         }
-        let (lo, mid, hi) = (
-            lo_s / lo_n as f32,
-            mid_s / mid_n as f32,
-            hi_s / hi_n as f32,
-        );
+        let (lo, mid, hi) = (lo_s / lo_n as f32, mid_s / mid_n as f32, hi_s / hi_n as f32);
         // 方向：随深度单调（下 > 中 > 顶；顶部自由面钳制 p≥0）。
         assert!(
             lo > mid && mid > hi,

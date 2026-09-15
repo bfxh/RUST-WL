@@ -26,13 +26,8 @@ fn main() {
     // ---- 盆：地板 2 层（y∈[0,1]）+ 围堰 1 层（y∈[1,1.5]），内域 1.5×1.5 m ----
     // 盆尺寸按水量配：0.063 m³ 摊在 7 m 盆上只有 ~1 mm 厚（渲染成散点），
     // 缩到 1.5 m 内域后水层 ~30 mm，粒子间距 ≈ 软团半径 ⇒ 连续水面。
-    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
-        Vec3::new(-1.25, 0.0, -1.25),
-        0.5,
-        5,
-        3,
-        5,
-    );
+    let mut vol =
+        vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-1.25, 0.0, -1.25), 0.5, 5, 3, 5);
     vol.fill_box(Vec3::new(-1.25, 0.0, -1.25), Vec3::new(1.25, 1.0, 1.25));
     for ix in 0..5u32 {
         for iz in 0..5u32 {
@@ -78,7 +73,8 @@ fn main() {
     // 喷溅 0 颗 + 网格 0 张 + 流体 1 系统
     f.write_all(&0u32.to_le_bytes()).unwrap();
     f.write_all(&0u32.to_le_bytes()).unwrap();
-    f.write_all(&(w.fluids().len() as u32).to_le_bytes()).unwrap();
+    f.write_all(&(w.fluids().len() as u32).to_le_bytes())
+        .unwrap();
 
     let mut ms_sum = 0f64;
     let mut ms_max = 0f64;
@@ -132,7 +128,9 @@ fn main() {
         "转储完成：{out_path}（{frames} 帧 | {ticks} tick）\n\
          盆 {}×{}×{} 格 | 水柱 504 粒 → 终态 x∈[{minx:.2},{maxx:.2}] 最低 y={miny:.3}\n\
          单 tick 均值 {:.2} ms（{:.0} FPS）| 峰值 {:.2} ms",
-        vox_dims.0, vox_dims.1, vox_dims.2,
+        vox_dims.0,
+        vox_dims.1,
+        vox_dims.2,
         ms_sum / ticks as f64,
         1000.0 / (ms_sum / ticks as f64),
         ms_max,

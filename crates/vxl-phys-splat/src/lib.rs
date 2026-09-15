@@ -233,7 +233,13 @@ impl GaussianSplatField {
         };
         let splats = &self.splats;
         let len = if all { splats.len() } else { list.len() };
-        (0..len).map(move |k| if all { &splats[k] } else { &splats[list[k] as usize] })
+        (0..len).map(move |k| {
+            if all {
+                &splats[k]
+            } else {
+                &splats[list[k] as usize]
+            }
+        })
     }
 
     /// 密度 σ(p) 与梯度 ∇σ(p)（解析；截断外核不计）。
@@ -310,13 +316,7 @@ impl ProviderColliders for GaussianSplatField {
     }
 
     /// 点查询（探针半径 = skin）：`depth = skin − sdf(p)`；法线 = −∇σ/|∇σ|（外向）。
-    fn contacts_point(
-        &self,
-        id: u32,
-        p: Vec3,
-        skin: f32,
-        out: &mut Vec<InteropContact>,
-    ) -> bool {
+    fn contacts_point(&self, id: u32, p: Vec3, skin: f32, out: &mut Vec<InteropContact>) -> bool {
         let _ = id;
         let (s, g) = self.density_grad(p);
         let gl = g.length();
@@ -357,7 +357,11 @@ impl ProviderColliders for GaussianSplatField {
         out: &mut Vec<InteropContact>,
     ) -> bool {
         let r = Mat3::from_quat(rot);
-        let axes = [r.mul_vec3(Vec3::X), r.mul_vec3(Vec3::Y), r.mul_vec3(Vec3::Z)];
+        let axes = [
+            r.mul_vec3(Vec3::X),
+            r.mul_vec3(Vec3::Y),
+            r.mul_vec3(Vec3::Z),
+        ];
         let hs = [half.x, half.y, half.z];
         for i in 0..3 {
             let (u, hu) = (axes[(i + 1) % 3], hs[(i + 1) % 3]);

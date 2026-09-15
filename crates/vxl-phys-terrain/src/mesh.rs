@@ -51,7 +51,11 @@ impl TriMesh {
             if t[0] >= n || t[1] >= n || t[2] >= n {
                 continue;
             }
-            let (a, b, c) = (verts[t[0] as usize], verts[t[1] as usize], verts[t[2] as usize]);
+            let (a, b, c) = (
+                verts[t[0] as usize],
+                verts[t[1] as usize],
+                verts[t[2] as usize],
+            );
             let nr = (b - a).cross(c - a);
             let ln = nr.length();
             let nrm = if ln > 1e-12 { nr * (1.0 / ln) } else { Vec3::Y };
@@ -456,7 +460,7 @@ mod tests {
         let mut with_grid = TriMesh::new(verts.clone(), tris.clone());
         with_grid.build_grid();
         let brute = TriMesh::new(verts, tris); // 不建网格 ⇒ 全扫
-        // 采样点（含面内/面外/远处）
+                                               // 采样点（含面内/面外/远处）
         let mut st: u32 = 0x2545_f491;
         for _ in 0..200 {
             st = st.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);

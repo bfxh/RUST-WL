@@ -16,14 +16,21 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 ```
 
 注意：**输出重定向 + 显式 `$?`**（管道会吞退出码，fb51911 事故）；日志文件先看尾部。
+**2026-09-15 更正**：clippy 这一项此前若干轮是**红的**（`solve_constraint` 8 参数漏挂
+`#[allow(clippy::too_many_arguments)]`，`normal_inner` 落地时引入、非本轮）——已按仓库
+同风格补挂，门禁链现在真的五项全绿。凡是"门禁全绿"的结论都必须**逐项贴退出码**，
+不能只看 test。
 
 ## 行为门（三命令四哈希）
 
-| 场景 | 命令 | 基线（2026-09-15，6 扫掠档 + 世界逆惯量预积） |
+| 场景 | 命令 | 基线（2026-09-15，6 扫掠档 + 世界逆惯量预积 + 关节族） |
 |---|---|---|
 | 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x4dcf5d460298e316ede2a846391c1990`、末态活跃 0、PASS；压力 `0x1e855f89f30fe8e40ae1ccbff98bc4a6`（report-only） |
 | 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x3a8c778ebaf76a9a2be25bc1f95857de`（10 轮逐位一致） |
-| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.80×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+| T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 3.95–4.80×，随时机）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+
+**关节族落地（2026-09-15，M2 首切片）三个门哈希未变**（关节不参与这些场景，
+`PhysConfig` 新增 `joint_iterations` 字段对它们零影响）——哈希**不变**与换代一样要记录。
 
 **2026-09-15 哈希换代链**（同日多轮标定，全部可回溯；新→旧）：
 6 扫掠档（当前，`0x4dcf5d46…` / `0x1e855f89…` / `0x3a8c778e…`）→
@@ -40,6 +47,24 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 `CARGO_TARGET_DIR=C:/vxl-wl-target-gold cargo run --release -p gold-sample -- <scene> 600 16 0.01 4 3.0 30 4`
 ——**第 4 个位置参数（substeps）必须是 4**，这是塔能站住的配方，勿改。
 三场景：`col45` / `pile5` / `tower25`。
+
+## 关节族（M2 首切片）自检
+
+```bash
+# PhysArena jointProbe 逐字复刻（5 种关节；期望：全 PASS、峰值 0.0000 m、
+# 悬挂体末态 y 与初值相同 = 关节真的在顶住重力。掉到 y≈0.4 = 自由落体的假通过）
+cargo run --release -p vxl-phys --example arena_bench joints
+# 动态关节链：40 环铰链 + 40 段固定塔（600 步）；期望链 ≤0.02 m、塔 ≤0.03 m、cos≈1
+cargo run --release -p vxl-phys --example arena_bench joint_chains
+# 关节迭代预算敏感性（默认 joint_iterations=8；链分离 3 迭代 4.8cm → 8 迭代 2.0cm）
+#   改档：编辑 PhysConfig::joint_iterations（无 CLI 开关，避免与接触 --iters 混淆）
+```
+
+| 判据 | 读数（joint_iterations=8） |
+|---|---|
+| 5 探针锚点分离 | 峰值 0.0000 m（容差 0.2/0.2/0.3/0.2/0.35） |
+| 铰链链 40 环最大分离 | 0.0204 m（3.4% 链节长），0.135 ms/步 |
+| 悬挂塔最大分离 / 姿态 | 0.0253 m / 相邻轴同向 cos = 1.0000，0.127 ms/步 |
 
 ## T1 求解稳定性（快回路，单轮 <1s）
 

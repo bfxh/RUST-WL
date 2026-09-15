@@ -26,6 +26,7 @@ pub use vxl_phys_integrate::Integrator;
 pub use vxl_phys_narrow::heightfield::HeightField;
 pub use vxl_phys_narrow::{ContactPoint, DefaultNarrowPhase, Manifold, NarrowPhase};
 pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
+pub use vxl_phys_solver::joints::{Joint, JointKind, JointSet};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
 pub use vxl_phys_terrain::TerrainSet;
 
@@ -42,9 +43,7 @@ pub enum ProviderEntry {
 /// 其余（含外壳）取局部 AABB 近似；不可估计返回 0（不施加阻力）。
 fn cross_section_area(shape: &Shape) -> f32 {
     match *shape {
-        Shape::Box { half } => {
-            4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
-        }
+        Shape::Box { half } => 4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0,
         Shape::Sphere { radius } => std::f32::consts::PI * radius * radius,
         Shape::Cylinder {
             half_height,
@@ -275,6 +274,7 @@ pub struct PhaseTimings {
     pub integrate_vel_us: u64,
     pub broadphase_us: u64,
     pub narrowphase_us: u64,
+    /// 接触求解 + 关节求解（同一阶段计时；关节通道无关节时零成本）。
     pub solve_us: u64,
     pub integrate_pos_us: u64,
     pub ccd_us: u64,
@@ -316,6 +316,9 @@ pub struct World {
     pub broad: Box<dyn BroadPhase>,
     pub narrow: DefaultNarrowPhase,
     pub solver: ImpulseSolver,
+    /// **关节约束族**（§2.5）：接触解算之后、位置积分之前整帧求解一遍；
+    /// 空集时零成本（`solve` 首行短路）。
+    pub joints: JointSet,
     pub fields: FieldRegistry,
     /// 任务调度（§6 依赖注入：SerialJobSystem / ScopedPool / 自定义实现）。
     pub jobs: Box<dyn JobSystem>,
@@ -362,6 +365,7 @@ impl World {
             broad,
             narrow: DefaultNarrowPhase::new(skin),
             solver: ImpulseSolver::new(skin),
+            joints: JointSet::default(),
             config,
             bodies,
             terrain: TerrainSet::new(),
@@ -461,6 +465,13 @@ impl World {
         self.bodies.push_static(Shape::Provider(id), pos, rot)
     }
 
+    /// 添加一条**关节**（§2.5 关节约束族：球/转动/固定/棱柱/距离）。
+    /// 锚点/轴均为体局部量；返回关节 id（关节序即求解序 ⇒ 确定性）。
+    /// v1 未接限位与马达（见 `vxl_phys_solver::joints` 模块文档）。
+    pub fn add_joint(&mut self, joint: Joint) -> u32 {
+        self.joints.add(joint)
+    }
+
     /// 由 provider marker 体（[`Self::add_voxel`]/`add_mesh`/`add_splat_field`
     /// 返回的静态体）反查 provider id（流体边界列表用，见 [`Self::add_fluid`]）。
     pub fn provider_id_of(&self, body: BodyId) -> Option<u32> {
@@ -474,11 +485,7 @@ impl World {
     /// `boundaries` = 边界碰撞的 provider id 列表（与体素/网格同一 id 空间，
     /// 经 [`Self::provider_id_of`] 由 marker 体反查）；切片1为单向耦合——
     /// 流体被刚体几何约束（驻留投影），对刚体无反作用（水推箱属切片2）。
-    pub fn add_fluid(
-        &mut self,
-        mut sys: vxl_phys_fluid::FluidSystem,
-        boundaries: &[u32],
-    ) -> usize {
+    pub fn add_fluid(&mut self, mut sys: vxl_phys_fluid::FluidSystem, boundaries: &[u32]) -> usize {
         sys.set_boundaries(boundaries);
         self.fluids.push((sys, boundaries.to_vec()));
         self.fluids.len() - 1
@@ -711,8 +718,12 @@ impl World {
     /// 半长取点云局部 AABB（宽相/惯量近似）；质量按 AABB 盒密度。
     pub fn spawn_hull_body(&mut self, hull: u32, pos: Vec3, rot: Quat, density: f32) -> u32 {
         let half = self.narrow.hull_half_extents(hull);
-        self.bodies
-            .push_dynamic(Shape::ConvexHull { hull, half }, pos, rot, density.max(1e-3))
+        self.bodies.push_dynamic(
+            Shape::ConvexHull { hull, half },
+            pos,
+            rot,
+            density.max(1e-3),
+        )
     }
 
     /// 提供者集合只读视图（体素体诊断/可视化用）。
@@ -796,8 +807,12 @@ impl World {
                     continue;
                 }
                 let p = self.bodies.position[i];
-                if p.x < bb.min.x || p.x > bb.max.x || p.y < bb.min.y
-                    || p.y > bb.max.y || p.z < bb.min.z || p.z > bb.max.z
+                if p.x < bb.min.x
+                    || p.x > bb.max.x
+                    || p.y < bb.min.y
+                    || p.y > bb.max.y
+                    || p.z < bb.min.z
+                    || p.z > bb.max.z
                 {
                     continue; // 场外 = 真空
                 }
@@ -864,7 +879,10 @@ impl World {
         //      管线读末态就会漏掉"这一瞬间撞上了"这件事（dt 无关性）。
         self.record_impacts();
         // 5) 求解 + 岛级休眠（唤醒语义在岛内：外部唤醒/新接触自动传播全岛）。
+        //    关节：唤醒传播必须**赶在接触解算之前**（否则关节链在"已判沉睡"
+        //    的岛上晚一步醒），关节冲量本身在接触解算之后施加。
         let t0 = vxl_phys_core::probe::start();
+        self.joints.wake(&mut self.bodies);
         self.solver.solve(
             &mut self.bodies,
             &self.manifolds,
@@ -872,6 +890,7 @@ impl World {
             dt,
             self.jobs.as_ref(),
         );
+        self.joints.solve(&mut self.bodies, &self.config, dt);
         self.timings.solve_us += vxl_phys_core::probe::us(t0);
         // 6) 位置积分。
         let t0 = vxl_phys_core::probe::start();
@@ -1175,7 +1194,8 @@ mod tests {
             Vec3::new(0.3, 0.35, 0.25),
         ]
         .to_vec();
-        let pieces = w.spawn_hull_pieces(hull, &seeds, Vec3::new(0.0, 2.2, 0.0), Quat::IDENTITY, 1.0);
+        let pieces =
+            w.spawn_hull_pieces(hull, &seeds, Vec3::new(0.0, 2.2, 0.0), Quat::IDENTITY, 1.0);
         assert_eq!(pieces.len(), 8, "应有 8 块");
         for _ in 0..900 {
             w.step();
@@ -1261,8 +1281,14 @@ mod tests {
         let (y_free, v_free) = run(0.0);
         let (y_drag, v_drag) = run(6.0);
         println!("free: y={y_free:.3} v={v_free:.3} | drag: y={y_drag:.3} v={v_drag:.3}");
-        assert!(y_drag > y_free + 0.2, "介质应显著减速：free y={y_free} drag y={y_drag}");
-        assert!(v_drag > v_free + 0.5, "末速应更高（落得更慢）：{v_free} vs {v_drag}");
+        assert!(
+            y_drag > y_free + 0.2,
+            "介质应显著减速：free y={y_free} drag y={y_drag}"
+        );
+        assert!(
+            v_drag > v_free + 0.5,
+            "末速应更高（落得更慢）：{v_free} vs {v_drag}"
+        );
     }
 
     /// **网格域（M3 扩展）**：盒落在三角网格地面上并停住（薄壳接触；
