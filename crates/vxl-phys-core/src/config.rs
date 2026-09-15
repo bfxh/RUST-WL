@@ -47,6 +47,13 @@ pub struct PhysConfig {
     /// 基础步长，固定 60 Hz（§5）。
     pub dt: f32,
     /// §4.2 每 60Hz 帧子步 ∈ {1,2,4,8,16}。
+    ///
+    /// 默认 1。**2 子步档暂缓**（2026-09-15）：2×5×1（10 扫掠）在三个 PhysArena
+    /// 同参场景上更快更稳（金字塔 4.32→3.28 ms、墙 3.72→2.50 ms，长跑抖动更低），
+    /// 但它暴露了**摩擦界含去穿透偏置冲量**的缺陷：滑行体阻力 ≈26× 物理值
+    /// （12 m/s 弹体 2 tick 损失 3 m/s，物理应为 0.115 m/s/tick）——子步把 dt
+    /// 减半后 ERP 目标速度被放大，`μ·pn` 随之放大成"粘滞"。修完摩擦界（用载荷
+    /// 部分而非含偏置的总冲量）即可启用该档；数据见 EXPERIMENTS。
     pub substeps: u32,
     /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 12。
     ///
@@ -55,7 +62,8 @@ pub struct PhysConfig {
     /// 相对旧的 16×4（64 扫掠）——金字塔 210 体 13.5→4.1 ms/步、墙 8.7→3.4、
     /// 球坑 2.2→1.4，且**收敛质量更好**（金字塔长跑堆高 19.409 vs 19.402、
     /// 残留 Σv² 0.39 vs 1.17；墙 0.52 vs 5.03）。扫掠总量低于 ≈24 会失稳
-    /// （8×2=16 时 210 体金字塔在 900 步后垮塌：堆顶 19.4→3.5）。
+    /// （8×2=16 时 210 体金字塔在 900 步后垮塌：堆顶 19.4→3.5）；
+    /// 2 子步档可把扫掠降到 10（更快更稳），但被摩擦界缺陷挡住——见 `substeps`。
     pub velocity_iterations: u32,
     /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
     /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
@@ -130,8 +138,10 @@ impl Default for PhysConfig {
     fn default() -> Self {
         Self {
             dt: 1.0 / 60.0,
+            // 已验证默认（12×2 + 早退；哈希见 RECIPES）。**暂停** 2 子步档：
+            // 实测暴露"摩擦界含偏置冲量"，需先修摩擦界再上（见 EXPERIMENTS
+            // 「摩擦界偏置」条目：滑行体阻力 ≈26× 物理值）。
             substeps: 1,
-            // 2026-09-15 标定：总扫掠预算 24（12×2）——见字段注释与 EXPERIMENTS。
             velocity_iterations: 12,
             normal_inner: 2,
             shock_iterations: 0,
@@ -226,8 +236,9 @@ mod tests {
     #[test]
     fn default_is_spec_default() {
         let c = PhysConfig::default();
-        // 2026-09-15 标定：总扫掠预算 24（12×2）——见 `velocity_iterations`
+        // 2026-09-15 标定：12 × 内层 2（24 扫掠）——见 `velocity_iterations`
         // 字段注释；EXPECTATIONS 记录的旧默认 16×4 已由 arena_bench 长跑判据替换。
+        assert_eq!(c.substeps, 1);
         assert_eq!(c.velocity_iterations, 12);
         assert_eq!(c.normal_inner, 2);
         assert_eq!(c.sleep_linear, 0.04);

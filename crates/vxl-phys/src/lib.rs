@@ -292,6 +292,21 @@ impl PhaseTimings {
     }
 }
 
+/// **解算前**的冲击快照（破坏管线消费；见 `World::record_impacts`）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImpactRecord {
+    /// provider id（体素/网格/喷溅同 id 空间）。
+    pub provider: u32,
+    /// 冲击体（动态体）索引。
+    pub body: u32,
+    /// 接触点（流形点均值，世界系）。
+    pub point: Vec3,
+    /// 沿接触法向的接近速度（m/s，> 0 表示正在靠近）。
+    pub approach: f32,
+    /// 该体解算前的速度（挖坑方向用）。
+    pub velocity: Vec3,
+}
+
 /// 物理世界（固定步长契约：调用方以 `config.dt` 的整数倍节拍调用 `step`）。
 pub struct World {
     pub config: PhysConfig,
@@ -310,6 +325,10 @@ pub struct World {
     pairs: Vec<(u32, u32)>,
     manifolds: Vec<Manifold>,
     ccd_manifolds: Vec<Manifold>,
+    /// **解算前的冲击记录**（破坏管线消费）：接触生成后、求解之前快照。
+    /// 不能读"解算后"的速度——子步/迭代会把法向接近速度解得接近 0，管线
+    /// 因此看不见这次冲击（实测：2 子步下 12 m/s 炮弹撞墙不再挖洞）。
+    impacts: Vec<ImpactRecord>,
     hf_bounds: Vec<Aabb>,
     /// 外部碰撞提供者集合（体素/网格…；ROUTE §2.1 兼容轴）与其 AABB。
     providers: Providers,
@@ -353,6 +372,7 @@ impl World {
             pairs: Vec::new(),
             manifolds: Vec::new(),
             ccd_manifolds: Vec::new(),
+            impacts: Vec::new(),
             hf_bounds: Vec::new(),
             providers: Providers::default(),
             provider_bounds: Vec::new(),
@@ -549,58 +569,42 @@ impl World {
         n
     }
 
-    /// **冲击破坏（M3）**：扫描最近一次检测的流形，对「动体 × provider(id)」的
-    /// **高速接触**在接触点处挖出并转为碎块（挖出半径随冲击速度增长）。
-    /// 返回本次产生的碎块总数。确定性：按流形序处理、挖域为轴对齐盒、
-    /// 提取顺序固定（见 `extract_boxes`）。
+    /// **M3 冲击破坏**（调用方在每次 `step()` 之后调用）：对指定 provider，
+    /// 把本 tick **解算前**记录的冲击（沿接触法向的接近速度 ≥ `speed_threshold`）
+    /// 转成弹坑：球心 = 接触点 + 冲击方向 × 1.05r，半径随冲击速度增长（0.25..0.9 m），
+    /// 碎块**静止生成**（引擎不凭空造动量）。返回生成的碎块数。
+    /// 确定性：按记录序处理、挖域为轴对齐盒、提取顺序固定（见 `extract_boxes`）。
     ///
-    /// `speed_threshold` = 触发阈值（m/s，取动体速度）；`density` = 碎块密度。
+    /// 记录在窄相之后、求解之前快照（`record_impacts`）：管线读"解算后速度"会
+    /// 漏掉已被子步解掉的冲击（这正是 2 子步配置下炮弹不再挖洞的根因）。
     pub fn apply_impact_destruction(
         &mut self,
         id: u32,
         speed_threshold: f32,
         density: f32,
     ) -> usize {
-        // 先在只读扫描里收集「挖点」（按流形序），再逐个挖 —— 保持确定性。
+        // 先在只读扫描里收集「挖点」（按冲击记录序），再逐个挖 —— 保持确定性。
         let mut digs: Vec<(Vec3, f32, Vec3, f32)> = Vec::new();
-        for m in &self.manifolds {
-            let (sa, sb) = (
-                self.bodies.shape[m.a as usize],
-                self.bodies.shape[m.b as usize],
-            );
-            let (other, prov, other_is_a) = match (sa, sb) {
-                (Shape::Provider(p), _) => (m.b, p, false),
-                (_, Shape::Provider(p)) => (m.a, p, true),
-                _ => continue,
-            };
-            if prov != id || !self.bodies.is_dynamic(other as usize) {
+        for rec in &self.impacts {
+            if rec.provider != id || !self.bodies.is_dynamic(rec.body as usize) {
                 continue;
             }
-            let v = self.bodies.linvel[other as usize];
-            // **冲击判据 = 沿接触法向的接近速度**（不是体速！）：
-            // 贴地滑行是切向运动，体速很大但不该破坏——按体速判会一路挖穿
-            // 自己脚下的地板（实测：8 m/s 滑行弹体把地板挖穿 ⇒ 碎块逃逸）。
-            // 法线 a→b：other 在 a 侧 ⇒ 接近速度 = v·n；在 b 侧 ⇒ −v·n。
-            let approach = if other_is_a {
-                v.dot(m.normal)
-            } else {
-                -v.dot(m.normal)
-            };
+            // **冲击判据 = 沿接触法向的接近速度**（不是体速！）：贴地滑行是切向
+            // 运动，体速很大但不该破坏（实测：8 m/s 滑行把脚下地板挖穿）。
+            let approach = rec.approach;
             if approach < speed_threshold {
                 continue;
             }
+            let v = rec.velocity;
+            let other = rec.body;
             let sp = approach;
-            // 接触点 = 流形点均值（确定性）
-            let n = m.points.len().max(1) as f32;
-            let mut c = Vec3::ZERO;
-            for p in m.points.iter() {
-                c += p.point;
-            }
+            // 接触点 = 记录时的流形点均值（确定性；已在 record_impacts 算好）
+            let c = rec.point;
             // 冲击体沿冲击方向的半径（保守：包围球半径）——挖域从它之外开始
             let reach = self.bodies.shape[other as usize]
                 .bounding_sphere_radius()
                 .min(2.0);
-            digs.push((c * (1.0 / n), sp, v, reach));
+            digs.push((c, sp, v, reach));
         }
         let mut total = 0usize;
         for (c, sp, v, reach) in digs {
@@ -626,6 +630,51 @@ impl World {
     /// 注册凸体外壳（点云，局部坐标）→ hull id。
     pub fn add_hull(&mut self, points: Vec<Vec3>) -> u32 {
         self.narrow.add_hull(points)
+    }
+
+    /// 本 tick 的冲击快照（只读；诊断/外部管线用）。
+    pub fn impacts(&self) -> &[ImpactRecord] {
+        &self.impacts
+    }
+
+    /// 窄相之后、求解之前：把「动体 × provider」对的接近速度与接触点快照进
+    /// `self.impacts`（本子步重记 ⇒ 每次 `step` 结束时是**最后一个子步**的接触
+    /// 快照，与"读末态流形"的旧语义对齐，但速度是解算前的）。
+    fn record_impacts(&mut self) {
+        self.impacts.clear();
+        for m in &self.manifolds {
+            let (sa, sb) = (
+                self.bodies.shape[m.a as usize],
+                self.bodies.shape[m.b as usize],
+            );
+            let (other, prov, other_is_a) = match (sa, sb) {
+                (Shape::Provider(p), _) => (m.b, p, false),
+                (_, Shape::Provider(p)) => (m.a, p, true),
+                _ => continue,
+            };
+            if !self.bodies.is_dynamic(other as usize) {
+                continue;
+            }
+            let v = self.bodies.linvel[other as usize];
+            // 法线 a→b：other 在 a 侧 ⇒ 接近速度 = v·n；在 b 侧 ⇒ −v·n。
+            let approach = if other_is_a {
+                v.dot(m.normal)
+            } else {
+                -v.dot(m.normal)
+            };
+            let n = m.points.len().max(1) as f32;
+            let mut c = Vec3::ZERO;
+            for p in m.points.iter() {
+                c += p.point;
+            }
+            self.impacts.push(ImpactRecord {
+                provider: prov,
+                body: other,
+                point: c * (1.0 / n),
+                approach,
+                velocity: v,
+            });
+        }
     }
 
     /// **凸体预断裂**（「更一般的凸体/网格切割」的凸体侧）：原壳 ✕ 种子 ⇒
@@ -810,6 +859,10 @@ impl World {
         );
         self.timings.narrowphase_us += vxl_phys_core::probe::us(t0);
         self.pairs = pairs;
+        // 4.5) 冲击快照（**解算前**）：provider 对的接近速度与接触点写给破坏管线。
+        //      放在这里而不是让管线读末态速度——子步/迭代会把法向速度解掉，
+        //      管线读末态就会漏掉"这一瞬间撞上了"这件事（dt 无关性）。
+        self.record_impacts();
         // 5) 求解 + 岛级休眠（唤醒语义在岛内：外部唤醒/新接触自动传播全岛）。
         let t0 = vxl_phys_core::probe::start();
         self.solver.solve(
