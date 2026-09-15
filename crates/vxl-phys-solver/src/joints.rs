@@ -6,7 +6,9 @@
 //! 简化（v1，诚实记录）：
 //! - 有效质量用**完整 3×3 矩阵**（点约束：`invM·I + [r]×ᵀ·I⁻¹·[r]×`；角约束：
 //!   `Ia⁻¹ + Ib⁻¹`）；棱柱/转动的自由轴用 2×2 投影解（固定正交基 ⇒ 确定性）；
-//! - **限位与马达未实现**（棱柱/转动限位、电机）——调用方如实标注；
+//! - **关节限位未实现**（棱柱/转动的角度/行程限位——需累计相对转角状态），
+//!   **马达已实现**：转动/棱柱的自由轴速度马达（目标速度 + `max_force·dt` 冲量上钳，
+//!   `motor_max_force <= 0` = 关，默认关 ⇒ 无马达时逐位等价）；
 //! - **无热启动**（不跨子步累积冲量）——**这不是省事，是实测结论**：实现过
 //!   （迭代前预施加上一子步累积冲量、迭代中只累积增量），球形链最大锚点分离
 //!   0.0204→0.0119 m（−42%）但**固定关节塔 0.0253→0.4758 m（×19）、相邻轴
@@ -51,6 +53,11 @@ pub struct Joint {
     pub axis_b: Vec3,
     /// 距离关节的静止长度。
     pub rest: f32,
+    /// **马达目标**（转动：自由轴的相对角速度 rad/s；棱柱：沿轴的相对线速度 m/s）。
+    /// `motor_max_force <= 0` = 无马达（默认）⇒ 逐位等价于无马达行为。
+    pub motor_target: f32,
+    /// 马达最大力/矩（N 或 N·m）；每子步的冲量上钳 = `motor_max_force · dt`。
+    pub motor_max_force: f32,
 }
 
 impl Joint {
@@ -64,7 +71,17 @@ impl Joint {
             axis_a: Vec3::X,
             axis_b: Vec3::X,
             rest: 0.0,
+            motor_target: 0.0,
+            motor_max_force: 0.0,
         }
+    }
+
+    /// 加**马达**（转动：目标角速度 rad/s；棱柱：目标线速度 m/s；`max_force <= 0` = 关）。
+    /// 关节限位仍未实现（需累计相对转角状态）。
+    pub fn with_motor(mut self, target_velocity: f32, max_force: f32) -> Self {
+        self.motor_target = target_velocity;
+        self.motor_max_force = max_force;
+        self
     }
 
     pub fn with_axis(mut self, axis: Vec3) -> Self {
@@ -90,6 +107,8 @@ pub struct JointSet {
 struct JointParams {
     /// 位置偏置率（1/s）：`β·inv_dt`。
     bias_inv_dt: f32,
+    /// `1/dt`（马达冲量上钳换算用：`max_force·dt = max_force / inv_dt`）。
+    inv_dt: f32,
     /// 速度级残差下限（早退判据，m/s）。
     eps: f32,
     /// 最少迭代数（早退前的保底）。
@@ -101,6 +120,7 @@ fn params(cfg: &PhysConfig, dt: f32) -> JointParams {
     // β 取配置的 baumgarte 档（默认 ≈0.2 档）——偏置率随步长归一，跨子步一致。
     JointParams {
         bias_inv_dt: cfg.baumgarte.max(0.0) * inv_dt,
+        inv_dt,
         eps: 0.002,
         min_iters: 4,
     }
@@ -284,6 +304,37 @@ fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
             }
         }
         _ => {}
+    }
+
+    // ---- 马达行（转动/棱柱；`motor_max_force <= 0` 直接跳过 ⇒ 无马达时逐位不变）----
+    // 速度级马达：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
+    // 与约束行同序（先线性/角行把自由度锁住，再驱动自由轴）⇒ 马达不会与锁定行抢。
+    if j.motor_max_force > 0.0 && j.motor_max_force.is_finite() && sp.inv_dt > 0.0 {
+        let lim = j.motor_max_force / sp.inv_dt; // 本子步可用冲量上限
+        match j.kind {
+            JointKind::Revolute => {
+                let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
+                let wrel = bodies.angvel(bi) - bodies.angvel(ai);
+                let k = axis_w.dot(bodies.apply_world_inv_inertia(ai, axis_w))
+                    + axis_w.dot(bodies.apply_world_inv_inertia(bi, axis_w));
+                if k > 1e-9 {
+                    let lambda = ((j.motor_target - wrel.dot(axis_w)) / k).clamp(-lim, lim);
+                    apply_ang_pair(bodies, ai, bi, axis_w * lambda);
+                    max_dv = max_dv.max(lambda.abs());
+                }
+            }
+            JointKind::Prismatic => {
+                let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
+                let v = rel_vel(bodies, ai, bi, ra, rb);
+                let k = row_mass(bodies, ai, bi, ra, rb, axis_w);
+                if k > 1e-9 {
+                    let lambda = ((j.motor_target - v.dot(axis_w)) / k).clamp(-lim, lim);
+                    apply_pair(bodies, ai, bi, ra, rb, axis_w * lambda);
+                    max_dv = max_dv.max(lambda.abs());
+                }
+            }
+            _ => {}
+        }
     }
     max_dv
 }
@@ -608,6 +659,81 @@ mod tests {
         );
         // 自由轴必须真的能用：重力下沿 Y 下滑（初位 9.6）。
         assert!(y < 9.5, "棱柱自由轴被锁死（y = {y:.3}）");
+    }
+
+    #[test]
+    fn revolute_motor_drives_target_and_respects_force_clamp() {
+        // 强马达：60 步内把自由轴相对角速度驱到目标（3 rad/s），锚点仍被约束保持。
+        let run = |max_force: f32, steps: usize| -> (f32, f32) {
+            let mut bodies = world();
+            let mut set = JointSet::default();
+            set.add(
+                Joint::new(
+                    JointKind::Revolute,
+                    0,
+                    1,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.4, 0.0),
+                )
+                .with_axis(Vec3::Y)
+                .with_motor(3.0, max_force),
+            );
+            let cfg = Cfg::default();
+            let dt = cfg.dt / cfg.substeps.max(1) as f32;
+            for _ in 0..steps {
+                set.solve(&mut bodies, &cfg, dt);
+                integrate(&mut bodies, dt);
+            }
+            let (pa, qa) = bodies.pose(0);
+            let (pb, qb) = bodies.pose(1);
+            let wa = pa + Mat3::from_quat(qa).mul_vec3(Vec3::ZERO);
+            let wb = pb + Mat3::from_quat(qb).mul_vec3(Vec3::new(0.0, 0.4, 0.0));
+            (bodies.angvel(1).y, (wb - wa).length())
+        };
+        let (w_strong, sep_strong) = run(1e6, 60);
+        assert!(
+            (w_strong - 3.0).abs() < 0.1,
+            "强马达未达目标：ω_y = {w_strong:.3}（应 ≈3.0）"
+        );
+        assert!(sep_strong < 0.02, "马达把锚点拉开了：{sep_strong:.3} m");
+        // 弱马达（力钳）：同样步数下达不到目标（否则说明上钳失效）。
+        let (w_weak, _) = run(0.05, 60);
+        assert!(
+            w_weak < 1.0,
+            "力钳失效：max_force=0.05 却驱动到 ω_y = {w_weak:.3}"
+        );
+        // 无马达（默认）⇒ 自由轴不被驱动（等价旧行为）。
+        let (w_off, _) = run(0.0, 60);
+        assert!(w_off.abs() < 1e-3, "未装马达却自转：ω_y = {w_off:.4}");
+    }
+
+    #[test]
+    fn prismatic_motor_drives_along_axis() {
+        let mut bodies = world();
+        let mut set = JointSet::default();
+        set.add(
+            Joint::new(
+                JointKind::Prismatic,
+                0,
+                1,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.4, 0.0),
+            )
+            .with_axis(Vec3::Y)
+            .with_motor(-1.0, 1e6),
+        );
+        let cfg = Cfg::default();
+        let dt = cfg.dt / cfg.substeps.max(1) as f32;
+        for _ in 0..120 {
+            bodies.linvel[1].y -= 9.81 * dt; // 重力（与马达反向，检验马达能压住）
+            set.solve(&mut bodies, &cfg, dt);
+            integrate(&mut bodies, dt);
+        }
+        let vy = bodies.linvel[1].y;
+        assert!(
+            (vy + 1.0).abs() < 0.15,
+            "棱柱马达未驱到目标：v_y = {vy:.3}（应 ≈−1.0，且压过重力）"
+        );
     }
 
     #[test]
