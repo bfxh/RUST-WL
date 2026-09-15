@@ -19,19 +19,20 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 
 ## 行为门（三命令四哈希）
 
-| 场景 | 命令 | 基线（2026-09-15，世界逆惯量预积后） |
+| 场景 | 命令 | 基线（2026-09-15，6 扫掠档 + 世界逆惯量预积） |
 |---|---|---|
-| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x7d5f37231a5b52fcf8267f8b12baec01`、末态活跃 0、PASS；压力 `0x8984a075b5e1d585143e0d4fec584386`（report-only） |
-| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x6120a78c26a27521543d8d465dde9aac`（10 轮逐位一致） |
+| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x4dcf5d460298e316ede2a846391c1990`、末态活跃 0、PASS；压力 `0x1e855f89f30fe8e40ae1ccbff98bc4a6`（report-only） |
+| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x3a8c778ebaf76a9a2be25bc1f95857de`（10 轮逐位一致） |
 | T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.80×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
 
-**2026-09-15 哈希换代链**（同日多轮标定，全部可回溯）：
-世界逆惯量预积（当前）→ 2 子步 × 5 × 内层 1 + provider 逐面发射 → 12×2 + 早退 →
-12×2 → 16×4（`0xbdf0cee6…` / `0x2cc8c488…` / `0x8142fe05…`）→ 更早 `0x443778a6…` /
-`0x067ed531…` / `0x7684f708…`。中间档哈希：
-`0xa53dc9d4…` / `0x8c680bca…` / `0x56e3f638…`（2×5×1 落地）；
-`0x4efce595…` / `0x4426912b…` / `0xc5f12732…`（12×2 + 早退）；
-`0xa2b4a080…` / `0x72c6e73b…` / `0x98d32c4a…`（12×2）。
+**2026-09-15 哈希换代链**（同日多轮标定，全部可回溯；新→旧）：
+6 扫掠档（当前，`0x4dcf5d46…` / `0x1e855f89…` / `0x3a8c778e…`）→
+世界逆惯量预积（`0x7d5f3723…` / `0x8984a075…` / `0x6120a78c…`）→
+2 子步 × 5（`0xa53dc9d4…` / `0x8c680bca…` / `0x56e3f638…`）→
+12×2 + 早退（`0x4efce595…` / `0x4426912b…` / `0xc5f12732…`）→
+12×2（`0xa2b4a080…` / `0x72c6e73b…` / `0x98d32c4a…`）→
+16×4（`0xbdf0cee6…` / `0x2cc8c488…` / `0x8142fe05…`）→
+`0x443778a6…` / `0x067ed531…` / `0x7684f708…`。
 
 哈希按行为变化更新是**预期流程**（ADR 0004）：落地记录里必须显式写出新旧值与原因。
 
