@@ -74,9 +74,15 @@ fn ground(w: &mut World, size: f32) {
 
 /// PhysArena 金字塔（210 体；层距 PITCH=1.01、箱半长 0.5）。
 fn scene_pyramid(cfg: PhysConfig) -> World {
+    scene_pyramid_mu(cfg, 0.6)
+}
+
+/// 金字塔 + **可变摩擦**（`--mu` 旋钮）：判定"堆不入睡"是否由摩擦（锚点漂移 ⇒
+/// 摩擦注能的泵模式）驱动——μ=0 时若堆能停/睡，说明摩擦侧是能量源。
+fn scene_pyramid_mu(cfg: PhysConfig, mu: f32) -> World {
     let mut w = World::new(cfg);
     ground(&mut w, 120.0);
-    let m = mat(&mut w, 0.6, 0.02);
+    let m = mat(&mut w, mu, 0.02);
     let n = 210usize;
     let box_half = 0.5f32;
     let pitch = box_half * 2.0 * 1.01;
@@ -1090,8 +1096,17 @@ fn main() {
             continue;
         }
         let serial = rest.iter().any(|a| a == "--serial");
+        // `--mu X`：金字塔场景的摩擦覆盖（判定"堆不入睡"的能量源）。
+        let mu_ovr = rest
+            .iter()
+            .position(|a| a == "--mu")
+            .and_then(|pos| rest.get(pos + 1))
+            .and_then(|s| s.parse::<f32>().ok());
         let mut w = match s {
-            "pyramid" => scene_pyramid(cfg.clone()),
+            "pyramid" => match mu_ovr {
+                Some(mu) => scene_pyramid_mu(cfg.clone(), mu),
+                None => scene_pyramid(cfg.clone()),
+            },
             "wall" => scene_wall(cfg.clone()),
             "ballpit" => scene_ballpit(cfg.clone()),
             "trimesh" => scene_trimesh_terrain(cfg.clone()),
