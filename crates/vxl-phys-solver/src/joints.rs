@@ -58,6 +58,11 @@ pub struct Joint {
     pub motor_target: f32,
     /// 马达最大力/矩（N 或 N·m）；每子步的冲量上钳 = `motor_max_force · dt`。
     pub motor_max_force: f32,
+    /// **转动限位**（rad，绕自由轴；`lower >= upper` 视为未设）。棱柱限位未实现
+    /// （行程限位同理，待接线）。判据用**当前相对姿态**直接算角度（无跨帧累计
+    /// 状态 ⇒ 无漂移、逐位确定），越界时才建单边行 + 偏置推回。
+    pub limit_lower: f32,
+    pub limit_upper: f32,
 }
 
 impl Joint {
@@ -73,7 +78,16 @@ impl Joint {
             rest: 0.0,
             motor_target: 0.0,
             motor_max_force: 0.0,
+            limit_lower: 1.0,
+            limit_upper: -1.0,
         }
+    }
+
+    /// 加**转动限位**（rad，绕 `axis_a`；`lower >= upper` 视为未设）。
+    pub fn with_limits(mut self, lower: f32, upper: f32) -> Self {
+        self.limit_lower = lower;
+        self.limit_upper = upper;
+        self
     }
 
     /// 加**马达**（转动：目标角速度 rad/s；棱柱：目标线速度 m/s；`max_force <= 0` = 关）。
@@ -308,7 +322,8 @@ fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
 
     // ---- 马达行（转动/棱柱；`motor_max_force <= 0` 直接跳过 ⇒ 无马达时逐位不变）----
     // 速度级马达：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
-    // 与约束行同序（先线性/角行把自由度锁住，再驱动自由轴）⇒ 马达不会与锁定行抢。
+    // **必须排在限位行之前**：限位是更硬的约束，要最后说话——否则马达会把限位刚
+    // 修正好的速度重新驱回越界方向（实测：6 rad/s 的马达直接把限位冲穿 5.77 rad）。
     if j.motor_max_force > 0.0 && j.motor_max_force.is_finite() && sp.inv_dt > 0.0 {
         let lim = j.motor_max_force / sp.inv_dt; // 本子步可用冲量上限
         match j.kind {
@@ -336,6 +351,45 @@ fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
             _ => {}
         }
     }
+    // ---- 转动限位（绕自由轴的相对转角；单边行 + 偏置推回）**最后解** ----
+    // 角度从**当前相对姿态**直接算：`q_rel = q_a⁻¹·q_b` 沿轴的扭转角
+    // `θ = 2·atan2(q_rel.vec·axis, q_rel.w)`（两者都取体局部轴 ⇒ 与体姿态无关）。
+    // 用姿态而非累计角速度积分：无漂移、纯状态函数 ⇒ 确定性不受影响。
+    // 排在马达之后 ⇒ 越界时马达无法把速度驱回越界方向（限位是更硬的约束）。
+    if matches!(j.kind, JointKind::Revolute) && j.limit_lower < j.limit_upper {
+        let q_rel = qa.conjugate() * qb;
+        let v = Vec3::new(q_rel.x, q_rel.y, q_rel.z);
+        let theta = 2.0 * v.dot(j.axis_a).atan2(q_rel.w);
+        // err > 0 = 低于下界（需往正方向转回）；err < 0 = 高于上界（需往负方向）。
+        let err = if theta < j.limit_lower {
+            j.limit_lower - theta
+        } else if theta > j.limit_upper {
+            j.limit_upper - theta
+        } else {
+            0.0
+        };
+        if err != 0.0 {
+            let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
+            let wrel = bodies.angvel(bi) - bodies.angvel(ai);
+            let k = axis_w.dot(bodies.apply_world_inv_inertia(ai, axis_w))
+                + axis_w.dot(bodies.apply_world_inv_inertia(bi, axis_w));
+            if k > 1e-9 {
+                // 单边行：冲量只往"转回限位内"的方向给（带偏置 `β·err/dt` 推回）。
+                let bias = sp.bias_inv_dt * err;
+                let vn = wrel.dot(axis_w);
+                let lambda = if err > 0.0 {
+                    ((bias - vn) / k).max(0.0)
+                } else {
+                    ((bias - vn) / k).min(0.0)
+                };
+                if lambda != 0.0 {
+                    apply_ang_pair(bodies, ai, bi, axis_w * lambda);
+                    max_dv = max_dv.max(lambda.abs());
+                }
+            }
+        }
+    }
+
     max_dv
 }
 
@@ -733,6 +787,79 @@ mod tests {
         assert!(
             (vy + 1.0).abs() < 0.15,
             "棱柱马达未驱到目标：v_y = {vy:.3}（应 ≈−1.0，且压过重力）"
+        );
+    }
+
+    #[test]
+    fn revolute_limit_stops_rotation_at_both_ends() {
+        // 限位可正可负：给自由轴一个持续驱动（用马达当"载荷"），转角必须停在
+        // [lower, upper] 内，且不振荡穿透（严苛：越界量 < 0.05 rad）。
+        for (target, lo, hi) in [(6.0f32, -0.5f32, 0.5f32), (-6.0, -0.4, 0.9)] {
+            let mut bodies = world();
+            let mut set = JointSet::default();
+            set.add(
+                Joint::new(
+                    JointKind::Revolute,
+                    0,
+                    1,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.4, 0.0),
+                )
+                .with_axis(Vec3::Y)
+                .with_limits(lo, hi)
+                .with_motor(target, 1e6),
+            );
+            let cfg = Cfg::default();
+            let dt = cfg.dt / cfg.substeps.max(1) as f32;
+            let mut worst = 0.0f32;
+            for _ in 0..300 {
+                bodies.linvel[1].y -= 9.81 * dt;
+                set.solve(&mut bodies, &cfg, dt);
+                integrate(&mut bodies, dt);
+                // 相对转角（与实现同式：q_rel 沿轴的扭转角）
+                let (_, qa) = bodies.pose(0);
+                let (_, qb) = bodies.pose(1);
+                let q = qa.conjugate() * qb;
+                let theta = 2.0 * Vec3::new(q.x, q.y, q.z).dot(Vec3::Y).atan2(q.w);
+                let over = (lo - theta).max(theta - hi);
+                worst = worst.max(over);
+            }
+            assert!(
+                worst < 0.05,
+                "限位穿透 {worst:.3} rad 超差（区间 [{lo}, {hi}]，驱动 {target}）"
+            );
+        }
+    }
+
+    #[test]
+    fn revolute_limit_allows_free_motion_inside() {
+        // 区间内不得有阻力：给 0.3 rad/s 初速、区间 [-1,1]，300 步后应仍在转
+        // （若限位实现误把区间内也约束住，这里会立刻停住）。
+        let mut bodies = world();
+        bodies.set_angvel_raw(1, Vec3::new(0.0, 0.3, 0.0));
+        let mut set = JointSet::default();
+        set.add(
+            Joint::new(
+                JointKind::Revolute,
+                0,
+                1,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.4, 0.0),
+            )
+            .with_axis(Vec3::Y)
+            .with_limits(-1.0, 1.0),
+        );
+        let cfg = Cfg::default();
+        let dt = cfg.dt / cfg.substeps.max(1) as f32;
+        for _ in 0..300 {
+            set.solve(&mut bodies, &cfg, dt);
+            integrate(&mut bodies, dt);
+        }
+        // 300 步 × (1/120) × 0.3 ≈ 0.75 rad ⇒ 仍在区间内，且角速度基本保持。
+        assert!(
+            bodies.angvel(1).y > 0.25,
+            "区间内被限位误阻：ω_y = {:.4}（应 ≈0.3）",
+            bodies.angvel(1).y
         );
     }
 
