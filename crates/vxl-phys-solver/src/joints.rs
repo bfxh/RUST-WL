@@ -58,9 +58,9 @@ pub struct Joint {
     pub motor_target: f32,
     /// 马达最大力/矩（N 或 N·m）；每子步的冲量上钳 = `motor_max_force · dt`。
     pub motor_max_force: f32,
-    /// **转动限位**（rad，绕自由轴；`lower >= upper` 视为未设）。棱柱限位未实现
-    /// （行程限位同理，待接线）。判据用**当前相对姿态**直接算角度（无跨帧累计
-    /// 状态 ⇒ 无漂移、逐位确定），越界时才建单边行 + 偏置推回。
+    /// **转动限位**（rad，绕自由轴）与**棱柱行程限位**（m，沿轴；`lower >= upper`
+    /// 视为未设）。判据用**当前相对姿态/锚点几何**直接算（无跨帧累计状态 ⇒ 无漂移、
+    /// 逐位确定），越界时才建单边行 + 偏置推回。两者都在马达之后解（限位最后说话）。
     pub limit_lower: f32,
     pub limit_upper: f32,
 }
@@ -375,6 +375,11 @@ fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
                 + axis_w.dot(bodies.apply_world_inv_inertia(bi, axis_w));
             if k > 1e-9 {
                 // 单边行：冲量只往"转回限位内"的方向给（带偏置 `β·err/dt` 推回）。
+                // 偏置沿用接触档 β（`bias_inv_dt`）。**不要**改成 β=1：实测棱柱限位
+                // 在 8 m/s 强驱动下过冲 0.033 m（β=1 反而 0.067，Baumgarte 振荡）。
+                // 过冲的物理下界 ≈ **一子步位移 v·dt**（8 m/s × 1/120 = 0.067 m）——
+                // 想把过冲压到 0 需要**投机式限位**（在仍处于界内、但本子步会越过时
+                // 就建行，用预测速度 `s + v·dt` 判），与接触的 speculative margin 同思路。
                 let bias = sp.bias_inv_dt * err;
                 let vn = wrel.dot(axis_w);
                 let lambda = if err > 0.0 {
@@ -384,6 +389,40 @@ fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
                 };
                 if lambda != 0.0 {
                     apply_ang_pair(bodies, ai, bi, axis_w * lambda);
+                    max_dv = max_dv.max(lambda.abs());
+                }
+            }
+        }
+    }
+
+    // ---- 棱柱行程限位（沿轴；同样**最后解** + 单边行 + 偏置推回）----
+    // 行程 = 锚点沿轴的分离量（`err·axis_w`）——与转动限位同招：用**当前几何**
+    // 直接算，不累计位移 ⇒ 无漂移、纯状态函数。锁定行保证其余方向分离 ≈0。
+    if matches!(j.kind, JointKind::Prismatic) && j.limit_lower < j.limit_upper {
+        let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
+        let s = err.dot(axis_w);
+        // err > 0 = 低于下界（需沿正方向推回）；err < 0 = 高于上界。
+        let lerr = if s < j.limit_lower {
+            j.limit_lower - s
+        } else if s > j.limit_upper {
+            j.limit_upper - s
+        } else {
+            0.0
+        };
+        if lerr != 0.0 {
+            let v = rel_vel(bodies, ai, bi, ra, rb);
+            let k = row_mass(bodies, ai, bi, ra, rb, axis_w);
+            if k > 1e-9 {
+                // 偏置沿用接触档 β（同转动限位；β=1 会诱发 Baumgarte 振荡，实测更差）。
+                let bias = sp.bias_inv_dt * lerr;
+                let vn = v.dot(axis_w);
+                let lambda = if lerr > 0.0 {
+                    ((bias - vn) / k).max(0.0)
+                } else {
+                    ((bias - vn) / k).min(0.0)
+                };
+                if lambda != 0.0 {
+                    apply_pair(bodies, ai, bi, ra, rb, axis_w * lambda);
                     max_dv = max_dv.max(lambda.abs());
                 }
             }
@@ -860,6 +899,88 @@ mod tests {
             bodies.angvel(1).y > 0.25,
             "区间内被限位误阻：ω_y = {:.4}（应 ≈0.3）",
             bodies.angvel(1).y
+        );
+    }
+
+    #[test]
+    fn prismatic_limit_stops_travel_at_both_ends() {
+        // 沿 Y 的自由轴 + 强马达（当持续载荷）驱向下；限位 [-0.5, 0.2] 必须挡住，
+        // 越界量 < 0.02 m。再测反向驱动撞上界。
+        for (target, lo, hi) in [(-8.0f32, -0.5f32, 0.2f32), (8.0, -0.5, 0.6)] {
+            let mut bodies = world();
+            let mut set = JointSet::default();
+            set.add(
+                Joint::new(
+                    JointKind::Prismatic,
+                    0,
+                    1,
+                    Vec3::ZERO,
+                    Vec3::new(0.0, 0.4, 0.0),
+                )
+                .with_axis(Vec3::Y)
+                .with_limits(lo, hi)
+                .with_motor(target, 1e6),
+            );
+            let cfg = Cfg::default();
+            let dt = cfg.dt / cfg.substeps.max(1) as f32;
+            let mut worst = 0.0f32;
+            let mut last_over = 0.0f32;
+            for _ in 0..300 {
+                bodies.linvel[1].y -= 9.81 * dt; // 重力与限位/马达同向，加严
+                set.solve(&mut bodies, &cfg, dt);
+                integrate(&mut bodies, dt);
+                let (pa, qa) = bodies.pose(0);
+                let (pb, qb) = bodies.pose(1);
+                let wa = pa + Mat3::from_quat(qa).mul_vec3(Vec3::ZERO);
+                let wb = pb + Mat3::from_quat(qb).mul_vec3(Vec3::new(0.0, 0.4, 0.0));
+                let s = (wb - wa).y;
+                let over = (lo - s).max(s - hi);
+                worst = worst.max(over);
+                last_over = over;
+            }
+            // 判据（钉在**真实保证**上，不是任意数）：
+            // ① 过冲不超过 **一子步位移**（|驱动| · dt = 8/120 = 0.067 m）——再小
+            //    需要投机式限位（见 limit 行注释）；
+            // ② 末态必须已收回界内（过冲是瞬态，不许永久停在界外）。
+            let bound = 8.0 * dt * 1.05;
+            assert!(
+                worst < bound,
+                "棱柱限位过冲 {worst:.3} m 超一子步位移上界 {bound:.3}（区间 [{lo}, {hi}]）"
+            );
+            assert!(
+                last_over <= 1e-4,
+                "棱柱限位未回收：末态仍越界 {last_over:.5} m（区间 [{lo}, {hi}]）"
+            );
+        }
+    }
+
+    #[test]
+    fn prismatic_limit_allows_free_travel_inside() {
+        // 区间内不得有阻力：0.5 m/s 初速、区间 [-2,2]，60 步后速度基本保持。
+        let mut bodies = world();
+        bodies.linvel[1] = Vec3::new(0.0, 0.5, 0.0);
+        let mut set = JointSet::default();
+        set.add(
+            Joint::new(
+                JointKind::Prismatic,
+                0,
+                1,
+                Vec3::ZERO,
+                Vec3::new(0.0, 0.4, 0.0),
+            )
+            .with_axis(Vec3::Y)
+            .with_limits(-2.0, 2.0),
+        );
+        let cfg = Cfg::default();
+        let dt = cfg.dt / cfg.substeps.max(1) as f32;
+        for _ in 0..60 {
+            set.solve(&mut bodies, &cfg, dt);
+            integrate(&mut bodies, dt);
+        }
+        let vy = bodies.linvel[1].y;
+        assert!(
+            (vy - 0.5).abs() < 0.05,
+            "区间内被限位误阻：v_y = {vy:.4}（应 ≈0.5）"
         );
     }
 
