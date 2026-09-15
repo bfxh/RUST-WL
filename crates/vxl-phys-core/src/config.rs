@@ -48,13 +48,16 @@ pub struct PhysConfig {
     pub dt: f32,
     /// §4.2 每 60Hz 帧子步 ∈ {1,2,4,8,16}。
     ///
-    /// 默认 1。**2 子步档暂缓**（2026-09-15）：2×5×1（10 扫掠）在三个 PhysArena
-    /// 同参场景上更快更稳（金字塔 4.32→3.28 ms、墙 3.72→2.50 ms，长跑抖动更低），
-    /// 但体素 provider 路径在 2 子步下出现回归：12 m/s 弹体停在墙前 **0.122 m**
-    /// （体速被吃掉、无接触力）⇒ 撞击事件丢失（破坏测试 debris=0）。已用两个
-    /// 新基准把范围钉死：`arena_bench slide`（摩擦保真 0.94× μ·g，正常）与
-    /// `arena_bench approach`（静态盒接触两种配置都正确贴合）⇒ 问题在 provider
-    /// 近距接触/推回与 dt 的耦合。修完即可启用该档；数据见 EXPERIMENTS。
+    /// 默认 2（2026-09-15 标定终档）：TGS 式「两次小步」把每步的收敛形状改了——
+    /// 2 子步 × 5 迭代 × 内层 1（10 扫掠）在三个 PhysArena 同参场景上同时
+    /// **更快且更稳**（`examples/arena_bench`，判据 = 3600 步长跑）：金字塔
+    /// 4.32→3.31 ms（长跑抖动 1.45→0.59、堆顶 19.408→19.428）、墙 3.72→2.77
+    /// （0.61→0.44）、球坑持平；体素落体静置高度也从 1.470 变成物理值 1.500。
+    /// 单子步下把扫掠降到 16 会垮（900 步后金字塔堆顶 19.4→3.5），双子步下
+    /// 6–10 扫掠即稳——步长减半让接触冲击的每步位移减半。
+    /// **前置修复**（否则本档不可用）：provider（体素）接触的「逐面发射 + 按接近
+    /// 方向选面」——旧实现只发主导面，墙角下按深度选中地板面而丢掉墙面
+    /// （见 EXPERIMENTS「provider 墙角丢面」）。
     pub substeps: u32,
     /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 12。
     ///
@@ -139,12 +142,11 @@ impl Default for PhysConfig {
     fn default() -> Self {
         Self {
             dt: 1.0 / 60.0,
-            // 已验证默认（12×2 + 早退；哈希见 RECIPES）。**暂停** 2 子步档：
-            // 实测暴露"摩擦界含偏置冲量"，需先修摩擦界再上（见 EXPERIMENTS
-            // 「摩擦界偏置」条目：滑行体阻力 ≈26× 物理值）。
-            substeps: 1,
-            velocity_iterations: 12,
-            normal_inner: 2,
+            // 2026-09-15 标定终档：2 子步 × 5 迭代 × 内层 1（10 扫掠/帧）——
+            // 更快且更稳（金字塔 4.32→3.31 ms、抖动 1.45→0.59；墙 3.72→2.77）。
+            substeps: 2,
+            velocity_iterations: 5,
+            normal_inner: 1,
             shock_iterations: 0,
             contact_skin: 0.02,
             gjk_tolerance: 1e-5,
@@ -237,11 +239,12 @@ mod tests {
     #[test]
     fn default_is_spec_default() {
         let c = PhysConfig::default();
-        // 2026-09-15 标定：12 × 内层 2（24 扫掠）——见 `velocity_iterations`
-        // 字段注释；EXPECTATIONS 记录的旧默认 16×4 已由 arena_bench 长跑判据替换。
-        assert_eq!(c.substeps, 1);
-        assert_eq!(c.velocity_iterations, 12);
-        assert_eq!(c.normal_inner, 2);
+        // 2026-09-15 标定终档：2 子步 × 5 迭代 × 内层 1（10 扫掠/帧）——
+        // 见 `substeps`/`velocity_iterations` 字段注释；EXPECTATIONS 记录的
+        // 旧默认 16×4（单子步）已由 arena_bench 长跑判据替换。
+        assert_eq!(c.substeps, 2);
+        assert_eq!(c.velocity_iterations, 5);
+        assert_eq!(c.normal_inner, 1);
         assert_eq!(c.sleep_linear, 0.04);
         assert_eq!(c.sleep_angular, 0.05);
         assert_eq!(c.sleep_time, 0.5);

@@ -599,44 +599,55 @@ pub fn contacts_box_voxel(
     if best == usize::MAX {
         return false;
     }
-    // 表面法线（world）= 主导面翻转
-    let n_world = m.mul_vec3(dirs[best] * -1.0);
-    // 该面的有效采样点（skin 带内）→ 接触
-    let (fcx, fcy, fcz) = (d3[0][best] * h[0], d3[1][best] * h[1], d3[2][best] * h[2]);
-    let axes = match best {
-        0 | 1 => [1usize, 2],
-        2 | 3 => [0, 2],
-        _ => [0, 1],
-    };
+    // **逐面发射**（2026-09-15 修复）：此前只发「主导面」（按带内采样数、并列取
+    // 最深选一张），墙角下会按深度选中**地板面**而把**墙面整张丢掉**——体的水平
+    // 动量被倾斜的地板法线吸收、撞墙事件不登记（实测 `arena_bench wall_provider`：
+    // 12 m/s 弹体在墙前 0.14 m 处 vx 11.4 → −0.02，墙面法线缺失 ⇒ 破坏管线无冲击，
+    // 2 子步档下更明显）。现在 6 张面各自「带内即发」（法线按面、特征 = 面号×16 +
+    // 采样号），主导面选择从 provider 内移到窄相，依据从"深度"换成"闭合速度"
+    // （见 narrow 的 CLOSING_MIN 逻辑）——两处合起来才修好"墙角丢面"。
+    let _ = best;
     let mut any = false;
-    for ci in 0..5usize {
-        let (lx, ly, lz) = if ci == 0 {
-            (fcx, fcy, fcz)
-        } else {
-            let (su, sv) = match ci {
-                1 => (-1.0f32, -1.0f32),
-                2 => (-1.0, 1.0),
-                3 => (1.0, -1.0),
-                _ => (1.0, 1.0),
-            };
-            let mut l = [fcx, fcy, fcz];
-            l[axes[0]] = su * h[axes[0]];
-            l[axes[1]] = sv * h[axes[1]];
-            (l[0], l[1], l[2])
-        };
-        let p = pos + m.mul_vec3(Vec3::new(lx, ly, lz));
-        let d = sd(p);
-        if d >= skin {
+    for k in 0..6usize {
+        if count[k] == 0 {
             continue;
         }
-        out.push(vxl_phys_core::interop::InteropContact {
-            point: p,
-            normal: n_world,
-            depth: -d,
-            // 面号(1..6)×16 + 采样号(0 = 中心, 1..4 = 角)：跨帧稳定，供 warm 匹配
-            feature: (best as u32 + 1) * 16 + ci as u32,
-        });
-        any = true;
+        let n_world = m.mul_vec3(dirs[k] * -1.0);
+        let (fcx, fcy, fcz) = (d3[0][k] * h[0], d3[1][k] * h[1], d3[2][k] * h[2]);
+        let axes = match k {
+            0 | 1 => [1usize, 2],
+            2 | 3 => [0, 2],
+            _ => [0, 1],
+        };
+        for ci in 0..5usize {
+            let (lx, ly, lz) = if ci == 0 {
+                (fcx, fcy, fcz)
+            } else {
+                let (su, sv) = match ci {
+                    1 => (-1.0f32, -1.0f32),
+                    2 => (-1.0, 1.0),
+                    3 => (1.0, -1.0),
+                    _ => (1.0, 1.0),
+                };
+                let mut l = [fcx, fcy, fcz];
+                l[axes[0]] = su * h[axes[0]];
+                l[axes[1]] = sv * h[axes[1]];
+                (l[0], l[1], l[2])
+            };
+            let p = pos + m.mul_vec3(Vec3::new(lx, ly, lz));
+            let d = sd(p);
+            if d >= skin {
+                continue;
+            }
+            out.push(vxl_phys_core::interop::InteropContact {
+                point: p,
+                normal: n_world,
+                depth: -d,
+                // 面号(1..6)×16 + 采样号(0 = 中心, 1..4 = 角)：跨帧稳定，供 warm 匹配
+                feature: (k as u32 + 1) * 16 + ci as u32,
+            });
+            any = true;
+        }
     }
     any
 }
@@ -869,13 +880,19 @@ mod tests {
             &mut out,
         );
         assert!(any);
-        // **只出主导面**（贴地面）：面号 3 ⇒ feature 48..52（中心 + 4 角共 5 点）、
-        // 穿透 ≈ 0.1、法线 = +Y（面翻转）
-        assert_eq!(out.len(), 5, "只应产出主导面的 5 点；out={}", out.len());
-        for c in &out {
-            assert!((48..53).contains(&c.feature), "feature={}", c.feature);
+        // **逐面发射**（2026-09-15 起）：每张「带内样本数 > 0」的面各自发点；
+        // 共享角点会在相邻面里重复出现，因此断言改为：
+        //  ① 贴地面的 5 点（面号 3 ⇒ feature 48..52）必须在，且深度 ≈0.1、法线 +Y；
+        //  ② 其它面只允许出现**角点**（feature % 16 != 0）——面心样本只有真贴着
+        //     的底面才有（窄相据此在多面候选里排除"只有角点的伪面"）。
+        let bottom: Vec<_> = out.iter().filter(|c| (48..53).contains(&c.feature)).collect();
+        assert_eq!(bottom.len(), 5, "贴地面应有 5 点；out={}", out.len());
+        for c in &bottom {
             assert!((c.depth - 0.1).abs() < 1e-4, "depth={}", c.depth);
             assert!((c.normal.y - 1.0).abs() < 1e-4, "normal={:?}", c.normal);
+        }
+        for c in out.iter().filter(|c| !(48..53).contains(&c.feature)) {
+            assert_ne!(c.feature % 16, 0, "非贴地面不得有面心样本：feature={}", c.feature);
         }
         // 面中心点（feature 48）也应在（对齐落面时中心才给得出正确法线语义）
         assert!(out.iter().any(|c| c.feature == 48));

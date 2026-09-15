@@ -136,6 +136,10 @@ enum AxisSrc {
 /// 与 `box_polytope` 相同（bit0=+x, bit1=+y, bit2=+z）；全局顶点号 =
 /// `面序 × 4 + 面内序号`（即多面体 `verts` 的下标 ⇒ 特征号逐位一致）。
 type BoxSign = (i8, i8, i8);
+/// provider 对的「接近面」判据下限（m/s）：闭合速度超过它才按接近方向选面，
+/// 否则退回"点数最多、并列取最深"（静置/无明显接近时的原规则）。
+const CLOSING_MIN: f32 = 0.1;
+
 const BOX_FACES: [((i8, i8, i8), [BoxSign; 4]); 6] = [
     // +X: [1, 3, 7, 5]
     ((1, 0, 0), [(1, -1, -1), (1, 1, -1), (1, 1, 1), (1, -1, 1)]),
@@ -1328,7 +1332,15 @@ impl DefaultNarrowPhase {
             } else {
                 bodies.linvel[a as usize] - bodies.linvel[b as usize]
             };
-            let band = self.skin.max(vrel.length() * (1.0 / 60.0) * 1.5);
+            // **+ skin 余量**（2026-09-15 修复）：带恰等于「样点到表面距离」时
+            // 接触的出现与否只在速度上差 0.5%（实测基准 wall_provider：2 子步下
+            // 0.1398 vs 0.14 的刀锋 ⇒ 墙面接触整整晚一个子步出现，期间水平动量
+            // 被倾斜的地板法线吸收、撞墙事件不登记）。加一个 skin 把刀锋推开，
+            // 使「带内即建（预测）接触」在速度上连续；预测接触由求解器按
+            // distance/dt 限接近速度，不会造成假制动。
+            let band = self
+                .skin
+                .max(vrel.length() * (1.0 / 60.0) * 1.5 + self.skin);
             let ok = match *body_shape {
                 Shape::Box { half } => providers.contacts_box(id, half, bpos, brot, band, &mut buf),
                 // 球：SDF 类提供者解析求解（`depth = r − sdf(center)`）
@@ -1357,10 +1369,16 @@ impl DefaultNarrowPhase {
                 return; // 不支持 / 全部顶点都不在接触带内
             }
             let sgn = if pr_is_a { 1.0 } else { -1.0 };
-            // 流形法线 = **点数最多的法线组**（量化 0.1 同向；并列取最深）。
-            // provider 查询会同时给出「面接触」（同向、多点）与「棱/角接触」
-            // （斜向、少点）——取多数派 = 主导接触面。实测教训：用「第一个接触
-            // 点」的法线会让盒沿柱角斜法线滑走（角点先入缓冲）。
+            // 流形法线 = 多面候选里选**主导接触面**。候选来自 provider 的
+            // **逐面发射**（每张面各自发带内样本；共享角点会在相邻面里重复出现
+            // ——只有「面心样本」（feature % 16 == 0）能证明该面真的贴着）。
+            // 选择次序（2026-09-15 修复，取代旧的"点数最多、并列取最深"单一规则）：
+            //   ① 有**闭合速度**的面（法线逆着相对速度 = 正在撞上去）优先，取最大者；
+            //   ② 否则只考虑**带面心样本**的组（排除只有角点的"伪面"）；
+            //   ③ 组内仍按点数最多、并列取最深。
+            // 实测：旧的单一规则在墙角按深度选中**地板面**、丢掉墙面 ⇒ 体的水平
+            // 动量被倾斜地板法线吸收、撞墙事件不登记（bench `wall_provider`：
+            // 12 m/s 弹体停在墙前 0.14 m、vx 11.4→−0.02）。
             let quant = |v: Vec3| -> (i32, i32, i32) {
                 (
                     (v.x * 10.0).round() as i32,
@@ -1368,27 +1386,66 @@ impl DefaultNarrowPhase {
                     (v.z * 10.0).round() as i32,
                 )
             };
-            let mut best_key = (0i32, 0i32, 0i32);
-            let mut best_count = 0usize;
-            let mut best_depth = f32::NEG_INFINITY;
-            let mut best_normal = Vec3::Y;
+            // 小组统计（确定性；组数 ≤ 10）
+            struct Group {
+                key: (i32, i32, i32),
+                count: usize,
+                deepest: f32,
+                closing: f32,
+                has_center: bool,
+            }
+            let mut groups: Vec<Group> = Vec::with_capacity(8);
             for c in &buf {
                 let key = quant(c.normal);
-                let mut count = 0usize;
-                let mut deepest = f32::NEG_INFINITY;
-                for c2 in &buf {
-                    if quant(c2.normal) == key {
-                        count += 1;
-                        deepest = deepest.max(c2.depth);
+                let idx = match groups.iter().position(|g| g.key == key) {
+                    Some(i) => i,
+                    None => {
+                        groups.push(Group {
+                            key,
+                            count: 0,
+                            deepest: f32::NEG_INFINITY,
+                            closing: f32::NEG_INFINITY,
+                            has_center: false,
+                        });
+                        groups.len() - 1
                     }
-                }
-                if count > best_count || (count == best_count && deepest > best_depth) {
-                    best_count = count;
-                    best_depth = deepest;
-                    best_key = key;
-                    best_normal = c.normal * sgn;
+                };
+                let g = &mut groups[idx];
+                g.count += 1;
+                g.deepest = g.deepest.max(c.depth);
+                g.closing = g.closing.max(-(c.normal * sgn).dot(vrel));
+                if c.feature % 16 == 0 {
+                    g.has_center = true;
                 }
             }
+            let closing_group = groups
+                .iter()
+                .filter(|g| g.closing > CLOSING_MIN)
+                .max_by(|x, y| x.closing.total_cmp(&y.closing));
+            let pick = closing_group.or_else(|| {
+                let with_center: Vec<&Group> = groups.iter().filter(|g| g.has_center).collect();
+                let pool: Vec<&Group> = if with_center.is_empty() {
+                    groups.iter().collect()
+                } else {
+                    with_center
+                };
+                pool.into_iter()
+                    .max_by(|x, y| {
+                        x.count
+                            .cmp(&y.count)
+                            .then(x.deepest.total_cmp(&y.deepest))
+                    })
+            });
+            let (best_key, best_normal) = match pick {
+                Some(g) => (
+                    g.key,
+                    buf.iter()
+                        .find(|c| quant(c.normal) == g.key)
+                        .map(|c| c.normal * sgn)
+                        .unwrap_or(Vec3::Y),
+                ),
+                None => return,
+            };
             let normal = best_normal;
             let pts: Vec<ContactPoint> = buf
                 .iter()

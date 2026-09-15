@@ -310,6 +310,109 @@ fn scene_approach(cfg: PhysConfig) {
     println!("  最小表面间距 {min_gap:.4} m（≈ 0 表示贴合；>0.05 说明被挡在弹性层外）");
 }
 
+/// **体素地面落体保真度**：盒从 2.5 m 落到体素地板（顶面 y=1.0），打印
+/// y/vy 轨迹与末态读数——期望：贴住顶面（y ≈ 1.5 + skin 余量）、不穿地、最终入睡。
+/// 用途：provider 接触语义（检测带 vs 真实深度）的回归基准。
+fn scene_voxel_land(cfg: PhysConfig) {
+    let mut w = World::new(cfg);
+    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
+        Vec3::new(-4.0, 0.0, -4.0),
+        0.5,
+        16,
+        2,
+        16,
+    );
+    vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 1.0, 4.0)); // 顶面 y = 1.0
+    w.add_voxel(vol);
+    let m = mat(&mut w, 0.6, 0.0);
+    add_box(&mut w, Vec3::new(0.0, 2.5, 0.0), Vec3::splat(0.5), m, 1000.0);
+    println!("voxel_land: 盒（半 0.5）落到体素顶面 y=1.0（期望静置 y≈1.5）；轨迹：");
+    let mut min_y = f32::INFINITY;
+    for t in 0..180 {
+        w.step();
+        let y = w.bodies.position[1].y;
+        min_y = min_y.min(y);
+        if t < 8 || (t + 1) % 15 == 0 {
+            println!(
+                "  t={:>3}  y={y:>8.3}  vy={:>8.3}  流形={}",
+                t + 1,
+                w.bodies.linvel[1].y,
+                w.manifolds().len()
+            );
+        }
+        // 落体窗口内打印流形细节（诊断 depth 符号与求解器可见性）
+        if (24..40).contains(&t) {
+            for mf in w.manifolds() {
+                let ds: Vec<String> = mf
+                    .points
+                    .iter()
+                    .map(|p| format!("{:.4}", p.depth))
+                    .collect();
+                println!(
+                    "    [流形] a={} b={} 法线=({:.2},{:.2},{:.2}) 点数={} 深度=[{}]",
+                    mf.a,
+                    mf.b,
+                    mf.normal.x,
+                    mf.normal.y,
+                    mf.normal.z,
+                    mf.points.len(),
+                    ds.join(", ")
+                );
+            }
+        }
+    }
+    let y = w.bodies.position[1].y;
+    let h = w.health();
+    println!(
+        "  末态 y={y:.3}（期望 1.42–1.60）  最低 y={min_y:.3}（<-1 即穿地）  清醒={}  干净={}",
+        w.bodies.awake[1],
+        h.is_clean()
+    );
+}
+
+/// **provider 撞击保真度**：12 m/s 的盒撞 1 格厚体素墙（+ 体素地板），
+/// 打印撞击窗口的流形（法线/深度）与体速轨迹。期望：贴近到 skin 量级被拦、
+/// 且"解算前接近速度"≥ 阈值（破坏管线可判冲击）。
+fn scene_wall_provider(cfg: PhysConfig) {
+    let mut w = World::new(cfg);
+    let mut vol = vxl_phys_terrain::voxel::VoxelVolume::new(
+        Vec3::new(-4.0, 0.0, -4.0),
+        0.5,
+        16,
+        16,
+        16,
+    );
+    vol.fill_box(Vec3::new(-4.0, 0.0, -4.0), Vec3::new(4.0, 0.5, 4.0)); // 地板 1 层
+    vol.fill_box(Vec3::new(0.0, 0.5, -2.0), Vec3::new(0.5, 2.5, 2.0)); // 墙 1 格厚
+    w.add_voxel(vol);
+    let m = mat(&mut w, 0.3, 0.0);
+    add_box(&mut w, Vec3::new(-3.0, 1.0, 0.0), Vec3::splat(0.4), m, 1000.0);
+    w.bodies.set_linvel(1, Vec3::new(12.0, 0.0, 0.0));
+    println!("wall_provider: 12 m/s 撞 1 格厚体素墙（x∈[0,0.5]）；轨迹：");
+    for t in 0..40 {
+        w.step();
+        let x = w.bodies.position[1].x;
+        let gap = 0.0 - (x + 0.4);
+        if (9..30).contains(&t) || t < 3 {
+            println!(
+                "  t={:>3}  x={x:>7.3}  vx={:>7.3}  右面间距 {gap:>7.4}  流形={}",
+                t + 1,
+                w.bodies.linvel[1].x,
+                w.manifolds().len()
+            );
+            if (12..16).contains(&t) {
+                for mf in w.manifolds() {
+                    let ds: Vec<String> = mf.points.iter().map(|p| format!("{:.4}", p.depth)).collect();
+                    println!(
+                        "      [流形] 法线=({:.2},{:.2},{:.2}) 深度=[{}]",
+                        mf.normal.x, mf.normal.y, mf.normal.z, ds.join(", ")
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let which = args.next().unwrap_or_else(|| "pyramid".to_string());
@@ -356,6 +459,14 @@ fn main() {
         }
         if s == "approach" {
             scene_approach(cfg.clone());
+            continue;
+        }
+        if s == "voxel_land" {
+            scene_voxel_land(cfg.clone());
+            continue;
+        }
+        if s == "wall_provider" {
+            scene_wall_provider(cfg.clone());
             continue;
         }
         let serial = rest.iter().any(|a| a == "--serial");
