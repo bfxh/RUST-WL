@@ -309,6 +309,52 @@ impl Mat3 {
             self.m[0][2] * v.x + self.m[1][2] * v.y + self.m[2][2] * v.z,
         )
     }
+
+    /// **世界系逆惯量矩阵** `M = R·diag(d)·Rᵀ`（行主序，一次算好）。
+    ///
+    /// 求解环用它替换「每点每轮 `Rᵀ·x → diag → R·(...)` 两次矩阵乘」：
+    /// `M·x` 一次矩阵乘即可（数学等价，浮点舍入略有差异 ⇒ 哈希换代）。
+    /// 姿态在一帧内不变（解算只改速度、姿态在解算之后积分），故每帧一次即可。
+    #[inline]
+    pub fn world_inv_inertia(q: Quat, d: Vec3) -> Self {
+        // R 的三列（= 局部轴在世界系的像）。
+        let c0 = Vec3::new(
+            1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+            2.0 * (q.x * q.y + q.w * q.z),
+            2.0 * (q.x * q.z - q.w * q.y),
+        );
+        let c1 = Vec3::new(
+            2.0 * (q.x * q.y - q.w * q.z),
+            1.0 - 2.0 * (q.x * q.x + q.z * q.z),
+            2.0 * (q.y * q.z + q.w * q.x),
+        );
+        let c2 = Vec3::new(
+            2.0 * (q.x * q.z + q.w * q.y),
+            2.0 * (q.y * q.z - q.w * q.x),
+            1.0 - 2.0 * (q.x * q.x + q.y * q.y),
+        );
+        // M = Σ_k d_k · (c_k ⊗ c_k)
+        let (d0, d1, d2) = (d.x, d.y, d.z);
+        Self {
+            m: [
+                [
+                    d0 * c0.x * c0.x + d1 * c1.x * c1.x + d2 * c2.x * c2.x,
+                    d0 * c0.x * c0.y + d1 * c1.x * c1.y + d2 * c2.x * c2.y,
+                    d0 * c0.x * c0.z + d1 * c1.x * c1.z + d2 * c2.x * c2.z,
+                ],
+                [
+                    d0 * c0.y * c0.x + d1 * c1.y * c1.x + d2 * c2.y * c2.x,
+                    d0 * c0.y * c0.y + d1 * c1.y * c1.y + d2 * c2.y * c2.y,
+                    d0 * c0.y * c0.z + d1 * c1.y * c1.z + d2 * c2.y * c2.z,
+                ],
+                [
+                    d0 * c0.z * c0.x + d1 * c1.z * c1.x + d2 * c2.z * c2.x,
+                    d0 * c0.z * c0.y + d1 * c1.z * c1.y + d2 * c2.z * c2.y,
+                    d0 * c0.z * c0.z + d1 * c1.z * c1.z + d2 * c2.z * c2.z,
+                ],
+            ],
+        }
+    }
 }
 
 #[cfg(test)]
