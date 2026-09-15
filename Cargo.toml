@@ -41,6 +41,7 @@ vxl-phys-narrow = { version = "0.1.0", path = "crates/vxl-phys-narrow" }
 vxl-phys-solver = { version = "0.1.0", path = "crates/vxl-phys-solver" }
 vxl-phys-integrate = { version = "0.1.0", path = "crates/vxl-phys-integrate" }
 vxl-phys-field = { version = "0.1.0", path = "crates/vxl-phys-field" }
+vxl-phys-fluid = { version = "0.1.0", path = "crates/vxl-phys-fluid" }
 vxl-phys-terrain = { version = "0.1.0", path = "crates/vxl-phys-terrain" }
 vxl-phys-splat = { version = "0.1.0", path = "crates/vxl-phys-splat" }
 vxl-phys-replay = { version = "0.1.0", path = "crates/vxl-phys-replay" }

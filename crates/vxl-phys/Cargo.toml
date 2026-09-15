@@ -12,6 +12,7 @@ vxl-phys-narrow = { workspace = true }
 vxl-phys-solver = { workspace = true }
 vxl-phys-integrate = { workspace = true }
 vxl-phys-field = { workspace = true }
+vxl-phys-fluid = { workspace = true }
 vxl-phys-terrain = { workspace = true }
 vxl-phys-splat = { workspace = true }
 vxl-phys-replay = { workspace = true }

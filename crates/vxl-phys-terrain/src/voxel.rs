@@ -706,6 +706,112 @@ pub fn contacts_point_voxel(
     true
 }
 
+/// **点查询·流体边界口径**（`contacts_point_voxel` 的内点鲁棒变体）。
+///
+/// 所在格为空或出界（域外/腔内驻留点）与 [`contacts_point_voxel`] 逐位
+/// 一致——外点的截断 SDF 梯度可信（刚体通道既有行为不变）。内点判定按
+/// **所在格占据**而非 sdf 符号：截断 SDF 把出界当「空」，靠近网格外壳的
+/// 内点（距外壳面不足一格）sdf 会误报为正 ⇒ 若按符号分流，会走旧外点
+/// 路径沿截断梯度被持续外推——穿壁隧逃引信之一（实测 escapee 钉在
+/// x≈−0.385 外壳驻留带上）。
+///
+/// 内点**不用**截断 SDF 的内部梯度：±1 格截断在薄壁/角部内部被格间内面
+/// （占据格之间的共享面）主导，中心差分符号可翻转——轻则沿壁面滑推
+/// （穿透轴永不修正），重则把粒子推出远侧表面（穿壁隧逃）。改为在 ±1 格
+/// 邻域内搜最近**真表面面片**（占据格朝空邻格/出界的面）：距离² = 轴向
+/// 差² + 两径向轴**各归各轴**的钳制距离²；法线 = 面轴外向，
+/// `depth = skin − (−距离)` 与外点同口径。
+///
+/// 推回侧：内点一律推往最近的**流体可达面**（邻格在网格内且空）——外壳
+/// 面通向域外，推过去等于把粒子逐出模拟域（隧逃引信之二：距外壳面不足
+/// 0.25·step 的「新穿透原路推回」在壁内命中外壳面，与 sdf 误报叠加成
+/// 外推棘轮，故不作「原路推回」特判）。邻域内无流体可达面才退外壳面；
+/// 再无（深陷大固体，流体浅穿透机制下不会发生）退回截断 SDF 梯度路径
+/// （次优但有限）。扫描序 (dz,dy,dx) × 面序 (轴,±) 固定，严格 `<` 取
+/// 最近 ⇒ 确定。
+pub fn contacts_point_voxel_solid(
+    v: &VoxelVolume,
+    p: Vec3,
+    skin: f32,
+    out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+) -> bool {
+    let (cx, cy, cz) = v.grid_of(p);
+    // 内点判定：所在格被占据 ⇒ 固体内部（格占据是精确判据，不受截断
+    // SDF 在外壳附近的符号噪声影响）；否则（空格/出界）走旧外点路径。
+    if !v.in_range(cx, cy, cz) || !v.get(cx as u32, cy as u32, cz as u32) {
+        return contacts_point_voxel(v, p, skin, out);
+    }
+    let step = v.step;
+    // 两轨最近真表面面片：open = 邻格在网格内且空（流体可达面）；
+    // shell = 邻格出界（网格外壳面）。扫描序 (dz,dy,dx) × 面序 (轴,±)
+    // 固定 + 严格 `<` 取最近 ⇒ 确定。
+    let mut open_d2 = f32::INFINITY;
+    let mut open_n = Vec3::Y;
+    let mut shell_d2 = f32::INFINITY;
+    let mut shell_n = Vec3::Y;
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (ix, iy, iz) = (cx + dx, cy + dy, cz + dz);
+                if !v.in_range(ix, iy, iz) || !v.get(ix as u32, iy as u32, iz as u32) {
+                    continue;
+                }
+                let lo = v.grid_center(ix as u32, iy as u32, iz as u32) - Vec3::splat(step * 0.5);
+                let hi = lo + Vec3::splat(step);
+                // 两径向轴到格区间外的钳制距离（各归各轴；面片矩形距离的径向项）。
+                let qx = (lo.x - p.x).max(p.x - hi.x).max(0.0);
+                let qy = (lo.y - p.y).max(p.y - hi.y).max(0.0);
+                let qz = (lo.z - p.z).max(p.z - hi.z).max(0.0);
+                // 6 面：面为「真表面」⇔ 该方向邻格空或出界。面序固定
+                // （−x,+x,−y,+y,−z,+z），法线 = 外向；到面片矩形的距离²
+                // = 轴向差² + 两径向项²。
+                let faces = [
+                    (Vec3::new(-1.0, 0.0, 0.0), (lo.x - p.x).abs(), qy, qz),
+                    (Vec3::new(1.0, 0.0, 0.0), (hi.x - p.x).abs(), qy, qz),
+                    (Vec3::new(0.0, -1.0, 0.0), (lo.y - p.y).abs(), qx, qz),
+                    (Vec3::new(0.0, 1.0, 0.0), (hi.y - p.y).abs(), qx, qz),
+                    (Vec3::new(0.0, 0.0, -1.0), (lo.z - p.z).abs(), qx, qy),
+                    (Vec3::new(0.0, 0.0, 1.0), (hi.z - p.z).abs(), qx, qy),
+                ];
+                for (dir, da, dr1, dr2) in faces {
+                    let (nx, ny, nz) = (ix + dir.x as i32, iy + dir.y as i32, iz + dir.z as i32);
+                    if v.in_range(nx, ny, nz) && v.get(nx as u32, ny as u32, nz as u32) {
+                        continue; // 内面（贴着占据格）：截断 SDF 的噪声源，跳过
+                    }
+                    let d2 = da * da + dr1 * dr1 + dr2 * dr2;
+                    if v.in_range(nx, ny, nz) {
+                        if d2 < open_d2 {
+                            open_d2 = d2;
+                            open_n = dir;
+                        }
+                    } else if d2 < shell_d2 {
+                        shell_d2 = d2;
+                        shell_n = dir;
+                    }
+                }
+            }
+        }
+    }
+    // 推回侧：一律优先流体可达面（open），外壳面仅作邻域内无 open 时的
+    // 兜底（见函数文档——「原路推回」特判在外壳附近会与 sdf 误报叠加成
+    // 外推棘轮，已删除）；两者皆无退回截断 SDF 梯度路径（次优但有限）。
+    let (face_n, dist) = if open_d2.is_finite() {
+        (open_n, open_d2.sqrt())
+    } else if shell_d2.is_finite() {
+        (shell_n, shell_d2.sqrt())
+    } else {
+        return contacts_point_voxel(v, p, skin, out);
+    };
+    let depth = skin + dist; // 内点：sdf = −dist ⇒ depth = skin − (−dist)
+    out.push(vxl_phys_core::interop::InteropContact {
+        point: p + face_n * dist,
+        normal: face_n,
+        depth,
+        feature: 0,
+    });
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

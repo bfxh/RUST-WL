@@ -52,10 +52,10 @@
 
 | crate | 域 | 现有关键件 | 依赖 | 状态 | 热路径 |
 |---|---|---|---|---|---|
-| `vxl-phys-terrain` | 体素/地形 | `TerrainSet`（高度场账本）+ **`voxel::VoxelVolume`**（占据位图 + 局域 SDF + `CollisionProvider`）+ 贪心提取/球域切割 + **`mesh::TriMesh`**（任意三角网薄壳提供者 + 均匀网格加速） | core, narrow, broad | ✅（M3 第一块） | 🌤 每 tick（体素/网格查询在外层调用时进 🔥） |
+| `vxl-phys-terrain` | 体素/地形 | `TerrainSet`（高度场账本）+ **`voxel::VoxelVolume`**（占据位图 + 局域 SDF + `CollisionProvider`）+ 贪心提取/球域切割 + **`mesh::TriMesh`**（任意三角网薄壳提供者 + 均匀网格加速）+ **`contacts_point_voxel_solid`**（流体边界终版口径：占据门 + 开放面推进） | core, narrow, broad | ✅（M3 第一块） | 🌤 每 tick（体素/网格查询在外层调用时进 🔥） |
 | `vxl-phys-destruction` | 断裂/碎块形状 | 骨架（Voronoi 预断裂待做） | — | 🦴 | ❄️ |
 | `vxl-phys-soft` | 软体/布（XPBD） | 参数骨架（compliance 档位） | — | 🦴 | 🔥（实现后） |
-| `vxl-phys-fluid` | 液体（SPH/PBF/FLIP） | 参数骨架 | — | 🦴 | 🔥（实现后，GPU 为主） |
+| `vxl-phys-fluid` | 液体（SPH/PBF/FLIP） | **WCSPH 求解器**：poly6 密度（含自身项）/ spiky 对称压力梯度 / Tait γ=7 / Monaghan 人工黏度 + XSPH / 镜像鬼影边界密度；确定性均匀网格 27 邻域；SoA + 半隐式欧拉 4 子步（`FluidSystem`） | core | ✅（0.3 切片 1，CPU 档） | 🔥 每 tick（4 子步 × 27 邻域） |
 | `vxl-phys-wheeled` | 车辆（射线悬挂/轮胎） | 参数骨架 | — | 🦴 | 🌤 |
 | `vxl-phys-aero` | 风/气动（面元） | 参数骨架 | — | 🦴 | 🌤 |
 | `vxl-phys-marine` | 海洋/浮力 | 参数骨架 | — | 🦴 | 🌤 |
@@ -74,7 +74,7 @@
 
 | crate | 职责 | 关键件 | 状态 |
 |---|---|---|---|
-| `vxl-phys` | `World` 组装（默认管线）+ **破坏/体素 API**（`add_voxel`/`carve_sphere`/`spawn_box_debris`/`apply_impact_destruction`）+ CCD | `World::{step, add_*, providers, health, state_hash}` | ✅ | 
+| `vxl-phys` | `World` 组装（默认管线）+ **破坏/体素 API**（`add_voxel`/`carve_sphere`/`spawn_box_debris`/`apply_impact_destruction`）+ **流体 API**（`add_fluid`/`fluids`/`fluid_pass`）+ CCD | `World::{step, add_*, providers, health, state_hash}` | ✅ | 
 
 ## 3. 热 crate 的内部模块分类
 
@@ -128,3 +128,24 @@
   `deposit` = 单向耦合占位）。`medium_density = 0` ⇒ 短路（不作介质的场零成本）。
 - **vxl-phys 门面**：`medium_pass`（力场 → 介质阻力 → 速度积分），二次阻力
   `F = −½ρCdA|v_rel|v_rel`；`cross_section_area` 形状迎风面积估计。
+
+## 2026-09-15 新增
+
+- **vxl-phys-fluid（域模块·从骨架落地）**：CPU WCSPH 求解器（PLAN-0.3）——
+  密度 poly6（含自身项）、压力 spiky 对称梯度（中心不减益 ⇒ 抑制张力不稳定）、
+  Tait γ=7（声速定刚度）、Monaghan 人工黏度 + XSPH、镜像鬼影边界密度；邻居 =
+  均匀网格（格边 = h，27 邻域，格内按索引序 ⇒ 求和序是位置的确定函数）；半隐式
+  欧拉 4 子步、单子步行程钳制。`FluidSystem` SoA（pos/vel/dens/press + 网格）。
+  测试 7/7（PLAN-0.3 §3；#2 静水压按实测口径诚实重写）。
+- **vxl-phys-terrain**：`contacts_point_voxel_solid`——流体边界**终版口径**：
+  占据位图判内外（不用 sdf 符号，截断 SDF 近壳内侧会误报）+ 内点恒推最近
+  **开放面** + 壳面/截断 SDF 双回退；旧 `contacts_point_voxel` 保留（外部
+  provider 兼容委托）。试错史（零厚度 typo / SDF 门误报棘轮）见 PLAN-0.3 §4.1。
+- **interop**：`ProviderColliders::contacts_point_boundary` 默认 trait 方法
+  （流体边界专用通道；默认逐位委托 `contacts_point`）。
+- **vxl-phys 门面**：`add_fluid(sys, boundaries)` / `fluids()` / `fluid_pass`
+  （体解算后按子步推进；切片 1 **单向耦合**——流体受几何约束，不反作用刚体）。
+- **转储格式 VXLD v3**：头部追加流体系统数；帧尾追加流体粒子节（每系统：
+  粒子数 + 位置 3f32）。`examples/showcase` 升六域同场（石盆铸装水块 320 粒）；
+  新 `examples/dam_break`（塌坝 504 粒）；`render_demo.py` 支持 v1–v3 解析 +
+  蓝色软团渲染 + `--src/--dst/--dist/--ty/--label`。

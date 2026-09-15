@@ -52,7 +52,7 @@
 | 体素（可破坏地形/建筑） | 稀疏体素 + SDF | 体素块→刚体/粒子（Voronoi 预断裂 + 运行时切割） | `terrain` 账本 + **`voxel::VoxelVolume`（占据位图 + 局域 SDF + `CollisionProvider`，已落地）** |
 | 软体 | 粒子 + XPBD 距离/体积 | XPBD（SPEC §4.6） | `vxl-phys-soft` 参数骨架 |
 | 布料 | 三角网 + XPBD 三组约束 | XPBD + 面元气动（SPEC §4.7） | 同上 |
-| 液体 | 粒子（SPH/PBF）/ 网格（FLIP） | WCSPH → PBF/FLIP 分层（SPEC §4.8） | `vxl-phys-fluid` 骨架 |
+| 液体 | 粒子（SPH/PBF）/ 网格（FLIP） | WCSPH → PBF/FLIP 分层（SPEC §4.8） | **`vxl-phys-fluid` WCSPH 已落地（0.3 切片 1：CPU 档驻留/体素边界/确定性；PLAN-0.3 §4）** |
 | **高斯喷溅（3DGS）** | 各向异性高斯集合 | **三层用法（本文新增，§3.1）** | ❌ 未建 |
 | 风/气动 | 面元 + 速度场 | 面元气动力 + 可选尾流（SPEC §4.7/§4.10 同族） | `vxl-phys-aero` 骨架 |
 | 车辆 | 射线悬挂 + 刷子轮胎 | SPEC §4.10 | `vxl-phys-wheeled` 骨架 |
@@ -210,9 +210,10 @@
 |---|---|---|
 | 多边形（凸体外壳） | ✅ | `add_hull` / `spawn_hull_body` / `spawn_hull_pieces`；窄相 `gjk.rs`（GJK/EPA + 半空间裁剪 + Voronoi 预断裂）；**外壳×提供者 = 顶点采样多点流形**，外壳×{盒/球/外壳} = EPA 单法线 + 外壳近面顶点细化 |
 | 高斯喷溅 | ✅ | 新 crate `vxl-phys-splat`：隐式场 σ(p)=Σw·exp(−½α(p))、SDF `(τ−σ)/|∇σ|`、`ProviderColliders` 三点查；`add_splat_field` 接入；渲染桥 `export_splats` |
-| 演示与对照 | ✅ | `examples/showcase`（**五域同场**：体素+多边形+喷溅+三角网+刚体）→ 逐帧转储（VXLD v2，含静态三角网节）→ `scripts/render_demo.py` → `docs/demo/showcase_full.gif`；`gold-sample` 增「活跃 tick 计时」双引擎对照 |
+| 演示与对照 | ✅ | `examples/showcase`（**六域同场**：体素+多边形+喷溅+三角网+刚体+流体）→ 逐帧转储（VXLD v3，帧尾流体粒子节）→ `scripts/render_demo.py`（`--src/--dst/--dist/--ty/--label`）→ `docs/demo/showcase_full.gif`；`examples/dam_break`（塌坝专项）→ `docs/demo/dam_break.gif`；`gold-sample` 增「活跃 tick 计时」双引擎对照 |
 | 网格（任意三角网） | ✅ | `vxl-phys-terrain::mesh::TriMesh`：薄壳语义（`depth = skin − 最近三角形距离`，法线 = 面法线），均匀网格邻域加速（格边 = 平均边长，下限 0.5）；门面 `add_mesh`；测试：盒静置 / 球沿坡面法线接触 |
-| 液体 / 软体 / 布 | ⏳ | crate 骨架在（`vxl-phys-fluid` / `vxl-phys-soft`），求解器待接 |
+| 液体 | ✅（0.3 切片 1） | `vxl-phys-fluid` WCSPH：poly6 密度（含自身项）/ spiky 对称压力梯度 / Tait γ=7 / Monaghan 人工黏度 + XSPH / 镜像鬼影边界密度；确定性均匀网格 27 邻域；门面 `add_fluid`/`fluid_pass`（单向耦合）；体素边界终版 `contacts_point_voxel_solid`；测试 7/7 + 四哈希不变；驻留瞬态负面结论见 EXPERIMENTS / PLAN-0.3 §4.2 |
+| 软体 / 布 | ⏳ | crate 骨架在（`vxl-phys-soft`），求解器待接 |
 | 体素→粒子（沙/尘） | ⏳ | M3 残留（下一个自然切片） |
 
 **可视化对照**（2026-09-14 追加）：`gold-sample` 支持逐帧转储（第 9 个参数 = dump 路径），

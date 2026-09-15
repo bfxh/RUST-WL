@@ -4,15 +4,17 @@
 //! 运行：`cargo run --release -p vxl-phys --example showcase [ticks] [out.bin]`
 //! 默认 600 tick（每帧 2 tick ⇒ 30 fps × 10 s）。
 //!
-//! 场景（五个域同屏，ROUTE §3）：
+//! 场景（六个域同屏，ROUTE §3）：
 //! - 体素：地板 + 墙体；炮弹冲击 ⇒ 挖洞 + 碎块（破坏管线）；
 //! - 多边形：立方体外壳 Voronoi 预断裂 ⇒ 8 个凸碎块落地；
 //! - 高斯喷溅：球状云 ⇒ 盒堆落在隐式场等值面上；
 //! - 三角网：波浪台面（TriMesh 薄壳 + 均匀网格加速）⇒ 盒/球落在任意三角面上；
-//! - 刚体盒：自由堆积（宽相/求解器负载）。
+//! - 刚体盒：自由堆积（宽相/求解器负载）；
+//! - 流体（WCSPH）：地板凿出石盆 + 铸装近平衡水块 ⇒ 平稳驻留水面。
 //!
 //! 转储格式（小端）：见 `write_header`/`write_frame` 注释（渲染器逐字节对应）。
 //! 版本 2 = 头部在喷溅节后追加三角网节（张数 + 每张顶点/三角形表）。
+//! 版本 3 = 头部追加流体系统数；帧尾追加流体粒子节（每系统：粒子数 + 位置 3f32）。
 
 use std::io::Write;
 use vxl_phys::*;
@@ -21,7 +23,7 @@ use vxl_phys_core::{PhysConfig, Quat, Shape, Vec3};
 const KIND_BOX: u8 = 0;
 const KIND_SPHERE: u8 = 1;
 const KIND_HULL: u8 = 2;
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -42,7 +44,20 @@ fn main() {
     );
     vol.fill_box(Vec3::new(-8.0, 0.0, -8.0), Vec3::new(8.0, 1.5, 8.0)); // 地板 3 层
     vol.fill_box(Vec3::new(3.0, 1.5, -3.0), Vec3::new(3.5, 4.5, 3.0)); // 墙 1×6×12 格
+    vol.set(18, 2, 22, false); // 凿出流体石盆：单格凹坑 x∈[1,1.5] y∈[1,1.5] z∈[3,3.5]
     let voxel_id = w.add_voxel(vol);
+
+    // ---- 流体：石盆 + 铸装近平衡水块（液体域，WCSPH）----
+    // [8,8,5] 铸装口径与门面门禁测试同款：足印 0.35，沉降高 ≈0.24，盆腔
+    // 0.5×0.5 恰好半满。任何带落差的入水都会触发 WCSPH 驻留瞬态（压实波
+    // 在块顶心聚焦 ⇒ 近钳制速度喷泉，PLAN-0.3 §4 负面结论），铸装则无。
+    let sys = vxl_phys_fluid::FluidSystem::new(
+        vxl_phys_fluid::FluidConfig::default(),
+        Vec3::new(1.075, 1.05, 3.075),
+        [8, 8, 5],
+        0.05,
+    );
+    let _fluid = w.add_fluid(sys, &[voxel_id]);
 
     // ---- 高斯喷溅云（x = -4 处的半球）----
     let mut field = vxl_phys_splat::GaussianSplatField::new(0.5);
@@ -230,6 +245,9 @@ fn main() {
         }
     }
 
+    // 流体系统数（静态；粒子位置每帧在帧尾发）
+    f.write_all(&(w.fluids().len() as u32).to_le_bytes()).unwrap();
+
     let mut ms_sum = 0f64;
     let mut ms_max = 0f64;
     for t in 1..=ticks {
@@ -314,12 +332,22 @@ fn main() {
             }
         }
         f.write_all(&bits).unwrap();
+        // 流体粒子位置（帧尾；每系统：粒子数 + 位置 3f32 × n）
+        for (sys, _) in w.fluids() {
+            let ps = sys.positions();
+            f.write_all(&(ps.len() as u32).to_le_bytes()).unwrap();
+            for p in ps {
+                for v in [p.x, p.y, p.z] {
+                    f.write_all(&v.to_le_bytes()).unwrap();
+                }
+            }
+        }
     }
     f.flush().unwrap();
     let frames = ticks / 2;
     println!(
         "转储完成：{out_path}（{frames} 帧 | {ticks} tick）\n\
-         体素 {} 格 | 外壳碎块 {} | 盒 {} | 云上盒 {} | 台面上盒 {} + 球 1 | 喷溅 {} 颗\n\
+         体素 {} 格 | 外壳碎块 {} | 盒 {} | 云上盒 {} | 台面上盒 {} + 球 1 | 喷溅 {} 颗 | 流体 {} 粒\n\
          单 tick 均值 {:.2} ms（{:.0} FPS）| 峰值 {:.2} ms",
         w.providers().voxel(voxel_id).unwrap().filled_count(),
         pieces.len(),
@@ -327,6 +355,7 @@ fn main() {
         cloud_boxes.len(),
         mesh_boxes.len() + 1,
         w.providers().splat(splat_id).unwrap().len(),
+        w.fluids().first().map(|(s, _)| s.positions().len()).unwrap_or(0),
         ms_sum / ticks as f64,
         1000.0 / (ms_sum / ticks as f64),
         ms_max,

@@ -236,6 +236,7 @@ dependencies = [
  "vxl-phys-broad",
  "vxl-phys-core",
  "vxl-phys-field",
+ "vxl-phys-fluid",
  "vxl-phys-integrate",
  "vxl-phys-narrow",
  "vxl-phys-replay",
@@ -280,6 +281,9 @@ dependencies = [
 [[package]]
 name = "vxl-phys-fluid"
 version = "0.1.0"
+dependencies = [
+ "vxl-phys-core",
+]
 
 [[package]]
 name = "vxl-phys-gpu"

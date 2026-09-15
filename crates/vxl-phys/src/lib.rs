@@ -8,6 +8,9 @@
 //! 1. 力场 → 2. 速度积分 → 3. 宽相 → 4. 窄相 → 5. 求解 + 岛级休眠
 //!    → 6. 位置积分。
 //!
+//! 液体域（切片1，单向耦合）：每 tick 体子步全部完成后，`fluid_pass` 以流体
+//! 自身的固定子步数推进全部流体系统（`World::add_fluid` 注册）。
+//!
 //! 确定性（§5）：固定步长、严格 f32、有序归约；`state_hash()` 每 60 tick 比对。
 
 #![forbid(unsafe_code)]
@@ -183,6 +186,24 @@ impl vxl_phys_core::interop::ProviderColliders for Providers {
         }
     }
 
+    /// 流体边界口径：体素走内点鲁棒变体（截断 SDF 在薄壁内部被格间内面
+    /// 主导 ⇒ 中心差分法线可指向固体深处，投影穿壁隧逃——见切片1实测）；
+    /// 其余提供者（解析面/半空间无内点歧义）沿用 `contacts_point`。
+    fn contacts_point_boundary(
+        &self,
+        id: u32,
+        p: Vec3,
+        skin: f32,
+        out: &mut Vec<vxl_phys_core::interop::InteropContact>,
+    ) -> bool {
+        match self.entries.get(id as usize) {
+            Some(ProviderEntry::Voxel(v)) => {
+                vxl_phys_terrain::voxel::contacts_point_voxel_solid(v, p, skin, out)
+            }
+            _ => self.contacts_point(id, p, skin, out),
+        }
+    }
+
     fn contacts_sphere(
         &self,
         id: u32,
@@ -293,6 +314,8 @@ pub struct World {
     /// 外部碰撞提供者集合（体素/网格…；ROUTE §2.1 兼容轴）与其 AABB。
     providers: Providers,
     provider_bounds: Vec<Aabb>,
+    /// 已注册流体系统（液体域；边界 provider id 随行存档）。
+    fluids: Vec<(vxl_phys_fluid::FluidSystem, Vec<u32>)>,
     timings: PhaseTimings,
 }
 
@@ -333,6 +356,7 @@ impl World {
             hf_bounds: Vec::new(),
             providers: Providers::default(),
             provider_bounds: Vec::new(),
+            fluids: Vec::new(),
             timings: PhaseTimings::default(),
         }
     }
@@ -415,6 +439,34 @@ impl World {
         );
         let (pos, rot) = vxl_phys_terrain::MARKER_TRANSFORM;
         self.bodies.push_static(Shape::Provider(id), pos, rot)
+    }
+
+    /// 由 provider marker 体（[`Self::add_voxel`]/`add_mesh`/`add_splat_field`
+    /// 返回的静态体）反查 provider id（流体边界列表用，见 [`Self::add_fluid`]）。
+    pub fn provider_id_of(&self, body: BodyId) -> Option<u32> {
+        match &self.bodies.shape[body as usize] {
+            Shape::Provider(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// 注册**流体系统**（液体域，WCSPH）：返回流体索引（[`Self::fluids`] 取用）。
+    /// `boundaries` = 边界碰撞的 provider id 列表（与体素/网格同一 id 空间，
+    /// 经 [`Self::provider_id_of`] 由 marker 体反查）；切片1为单向耦合——
+    /// 流体被刚体几何约束（驻留投影），对刚体无反作用（水推箱属切片2）。
+    pub fn add_fluid(
+        &mut self,
+        mut sys: vxl_phys_fluid::FluidSystem,
+        boundaries: &[u32],
+    ) -> usize {
+        sys.set_boundaries(boundaries);
+        self.fluids.push((sys, boundaries.to_vec()));
+        self.fluids.len() - 1
+    }
+
+    /// 已注册流体系统及其边界 provider id（渲染读 `.0.positions()` / `.0.velocities()`）。
+    pub fn fluids(&self) -> &[(vxl_phys_fluid::FluidSystem, Vec<u32>)] {
+        &self.fluids
     }
 
     /// **破坏（M3 第一块）**：把体素体盒域内的占据格转为**刚体碎块**
@@ -659,7 +711,21 @@ impl World {
         for _ in 0..substeps {
             self.substep(dt);
         }
+        self.fluid_pass();
         self.tick += 1;
+    }
+
+    /// **液体域通道（切片1：单向耦合）**：体解算+积分完毕后，流体以自身
+    /// `FluidConfig::substeps` 的固定子步数推进一个 tick（`config.dt`）。
+    /// 边界碰撞走统一提供者通道（`Providers` 实现 `ProviderColliders`，
+    /// 体素/网格/喷溅同 id 空间）；无流体时零成本短路。
+    fn fluid_pass(&mut self) {
+        if self.fluids.is_empty() {
+            return;
+        }
+        for (sys, _) in self.fluids.iter_mut() {
+            sys.step(self.config.dt, &self.providers);
+        }
     }
 
     /// **介质通道（喷溅场作介质）**：对每个动体 × 每个「密度 > 0」的喷溅场均采样，
@@ -945,6 +1011,58 @@ mod tests {
         assert!(w.health().is_clean());
         // marker 体（provider）保持静止：位置零漂移。
         assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+    }
+
+    /// **M0.3 液体域**（ROUTE §7）：流体块经门面落入**体素盆**（地板+四壁，
+    /// 一并覆盖体素 provider 的顶面/内壁/角点接触路径）并停驻。
+    /// `add_fluid` + `fluid_pass` 端到端；单向耦合，marker 体不受扰动。
+    /// （不用悬浮板：驻留投影不消耗切向速度，冲击横流会沿板面滑出板缘——
+    /// 那是正确物理，但场景里板外无物，跑出者永远下坠，断言无从谈起。）
+    #[test]
+    fn fluid_rests_on_voxel_provider() {
+        let mut w = World::new(PhysConfig::default());
+        // 体素盆：外廓 0.8×0.8m、格边 0.2；地板层顶面 y=0.2，壁高到 y=0.8，
+        // 内腔 0.4×0.4（与 fluid 域 Tank 测试同腔口）。
+        let mut vol =
+            vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-0.4, 0.0, -0.4), 0.2, 4, 4, 4);
+        vol.fill_box(Vec3::new(-0.4, 0.0, -0.4), Vec3::new(0.4, 0.2, 0.4)); // 地板
+        vol.fill_box(Vec3::new(0.2, 0.2, -0.4), Vec3::new(0.4, 0.8, 0.4)); // +x 壁
+        vol.fill_box(Vec3::new(-0.4, 0.2, -0.4), Vec3::new(-0.2, 0.8, 0.4)); // −x 壁
+        vol.fill_box(Vec3::new(-0.2, 0.2, 0.2), Vec3::new(0.2, 0.8, 0.4)); // +z 壁
+        vol.fill_box(Vec3::new(-0.2, 0.2, -0.4), Vec3::new(0.2, 0.8, -0.2)); // −z 壁
+        let marker = w.add_voxel(vol);
+        let vid = w.provider_id_of(marker).expect("marker 是 provider 体");
+        // 铸装近平衡块（8×8 贴腔口 + 5 层 ≈ 实测静水充高 0.44，320 粒）。
+        // 不用方块自落：任何带落差的方块入盆，WCSPH 驻留瞬态（底部镜像
+        // 鬼影密度尾 → 压实波在块顶心聚焦）都会把顶心粒子以近钳制速度
+        // （实测 ~9 m/s）垂直喷过敞口壁顶——0.8 m 重落、0.1 m 轻落、触底
+        // 就位皆复现，是 PLAN-0.3 §4 已记录的求解器瞬态而非边界失效；
+        // 边界本身在全部场景中零穿壁。铸装后瞬态消失，本测试只验驻留与
+        // 边界。
+        let sys = vxl_phys_fluid::FluidSystem::new(
+            vxl_phys_fluid::FluidConfig::default(),
+            Vec3::new(-0.175, 0.25, -0.175),
+            [8, 8, 5],
+            0.05,
+        );
+        let fid = w.add_fluid(sys, &[vid]);
+        for _ in 0..300 {
+            w.step();
+        }
+        let f = &w.fluids()[fid].0;
+        for (i, p) in f.positions().iter().enumerate() {
+            assert!(p.y > 0.15, "粒子 {i} 穿透盆底：y = {}", p.y);
+            assert!(p.y < 0.9, "粒子 {i} 飞出：y = {}", p.y);
+            assert!(
+                p.x.abs() < 0.45 && p.z.abs() < 0.45,
+                "粒子 {i} 越出盆壁：({}, {})",
+                p.x,
+                p.z
+            );
+        }
+        // 单向耦合：marker 体（provider）保持静止。
+        assert_eq!(w.bodies.position[marker as usize], Vec3::ZERO);
+        assert!(w.health().is_clean());
     }
 
     /// **L1**：外壳落在高度场上（顶点采样；此前不受理 ⇒ 直接穿地）。

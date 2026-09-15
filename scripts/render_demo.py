@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""演示渲染器：读 `out/showcase.bin` 转储 → Pillow 软光栅 → `out/showcase.gif`。
+"""演示渲染器：读 VXLD 转储 → Pillow 软光栅 → GIF/帧序列。
 
-用法： python scripts/render_demo.py [--stride N]
+用法： python scripts/render_demo.py [--stride N] [--src NAME] [--dst NAME]
+                                    [--dist R] [--ty Y] [--label TEXT]
+默认读 out/showcase.bin → out/showcase.gif；--src/--dst 只接受 out/ 下的
+裸文件名。路径安全：所有读写经 `_resolve()` 做 realpath 包含校验（拒绝
+越出 out/），不接受绝对路径与 `..`。
 依赖： Pillow（纯 Python 侧；引擎 crate 仍零外部依赖）。
-
-路径安全：**不接受外部路径参数**——输入/输出是固定常量（`out/` 下），
-且每次读写在 sink 处用 `_resolve()` 做 realpath 包含校验（拒绝越出 out/）。
 """
 import struct
 import sys
@@ -22,7 +23,7 @@ ROOT = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 OUT_ROOT = os.path.join(ROOT, "out")
 SRC_NAME = "showcase.bin"
 DST_NAME = "showcase.gif"
-FRAMES_DIR = "frames"
+FLUID_R = 0.11  # 流体粒子的世界空间软团半径
 
 
 def _resolve(rel_name):
@@ -37,12 +38,12 @@ def _resolve(rel_name):
 
 
 # ---------------------------------------------------------------- 转储解析
-def parse():
-    path = _resolve(SRC_NAME)
+def parse(src_name):
+    path = _resolve(src_name)
     with open(path, "rb") as f:
         assert f.read(4) == b"VXLD", "magic 不符"
         ver, ticks, tpf, dt = struct.unpack("<IIIf", f.read(16))
-        assert ver in (1, 2), f"版本不支持：{ver}"
+        assert ver in (1, 2, 3), f"版本不支持：{ver}"
         nx, ny, nz = struct.unpack("<III", f.read(12))
         ox, oy, oz, step = struct.unpack("<4f", f.read(16))
         (nsplat,) = struct.unpack("<I", f.read(4))
@@ -61,6 +62,9 @@ def parse():
                 verts = [struct.unpack("<3f", f.read(12)) for _ in range(nv)]
                 tris = [struct.unpack("<3I", f.read(12)) for _ in range(nt)]
                 meshes.append((verts, tris))
+        nfluid = 0
+        if ver >= 3:
+            (nfluid,) = struct.unpack("<I", f.read(4))
         frames = []
         nbits = (nx * ny * nz + 7) // 8
         while True:
@@ -84,7 +88,12 @@ def parse():
                     pts = [struct.unpack("<3f", f.read(12)) for _ in range(cnt)]
                 bodies.append((kind, awake, pos, rot, half, pts))
             bits = f.read(nbits)
-            frames.append((tick, ms, bodies, bits))
+            fluids = []
+            for _ in range(nfluid):
+                (cnt,) = struct.unpack("<I", f.read(4))
+                ps = [struct.unpack("<3f", f.read(12)) for _ in range(cnt)]
+                fluids.append(ps)
+            frames.append((tick, ms, bodies, bits, fluids))
     return dict(
         ticks=ticks, tpf=tpf, dt=dt, dims=(nx, ny, nz),
         origin=(ox, oy, oz), step=step, splats=splats, meshes=meshes, frames=frames,
@@ -179,13 +188,21 @@ def hull2d(pts):
 
 # ---------------------------------------------------------------- 主渲染
 def main():
-    stride = 1
-    if "--stride" in sys.argv:
-        stride = max(1, int(sys.argv[sys.argv.index("--stride") + 1]))
-    src = _resolve(SRC_NAME)
+    def arg(name, default=None, cast=str):
+        if name in sys.argv:
+            return cast(sys.argv[sys.argv.index(name) + 1])
+        return default
+
+    stride = arg("--stride", 1, int)
+    src_name = arg("--src", SRC_NAME)
+    dst_name = arg("--dst", DST_NAME)
+    dist = arg("--dist", 13.0, float)
+    ty = arg("--ty", 1.6, float)
+    label = arg("--label", "体素 · 多边形 · 高斯喷溅 · 三角网 · 刚体 · 流体（六域同场）")
+    src = _resolve(src_name)
     if not os.path.exists(src):
         raise SystemExit(f"找不到转储：{src}（先在仓库根跑 showcase 示例）")
-    data = parse()
+    data = parse(src_name)
     nx, ny, nz = data["dims"]
     ox, oy, oz = data["origin"]
     step = data["step"]
@@ -199,15 +216,16 @@ def main():
         font = ImageFont.load_default()
         fontb = font
 
-    frames_dir = _resolve(FRAMES_DIR)
+    frames_dir = _resolve(os.path.splitext(dst_name)[0] + "_frames")
     os.makedirs(frames_dir, exist_ok=True)
     out_frames = []
     total_ms = 0.0
     vox_cache = (None, [])
-    for fi, (tick, ms, bodies, bits) in enumerate(frames):
+    for fi, (tick, ms, bodies, bits, fluids) in enumerate(frames):
         total_ms += ms
         ang = math.radians(28.0 + 90.0 * fi / max(1, len(frames)))
-        cam = Cam((13.0 * math.cos(ang), 8.5, 13.0 * math.sin(ang)), (0.0, 1.6, 0.0))
+        cam = Cam((dist * math.cos(ang), 8.5 * dist / 13.0, dist * math.sin(ang)),
+                  (0.0, ty, 0.0))
         im = Image.new("RGB", (W, H), BG_BOT)
         dr = ImageDraw.Draw(im, "RGBA")
         for y in range(H):
@@ -296,6 +314,18 @@ def main():
             r = max(3.0, s[0] * 2.6 * cam.f / z)
             prims.append((z, "splat", (scr[0], scr[1], r, col, op), None))
 
+        # ---- 流体粒子（蓝色软团；越高越亮）----
+        for ps in fluids:
+            for p in ps:
+                scr = cam.project(p)
+                if scr is None:
+                    continue
+                t = min(1.0, max(0.0, (p[1] - ty) * 0.9 + 0.5))
+                col = (int(255 * (0.15 + 0.30 * t)), int(255 * (0.45 + 0.28 * t)),
+                       int(255 * (0.88 + 0.12 * t)))
+                prims.append((scr[2], "fluid",
+                              (scr[0], scr[1], FLUID_R * cam.f / scr[2]), col))
+
         # ---- 刚体 ----
         for (kind, awake, pos, rot, half, pts) in bodies:
             m = quat_mat(rot)
@@ -362,6 +392,11 @@ def main():
                     rr = r * k / 5
                     dr.ellipse([px - rr, py - rr, px + rr, py + rr],
                                fill=cc + (int(60 * op * (1.0 - k / 6.0)),))
+            elif tag == "fluid":
+                px, py, r = a
+                dr.ellipse([px - r, py - r, px + r, py + r], fill=col + (80,))
+                rr = r * 0.7
+                dr.ellipse([px - rr, py - rr, px + rr, py + rr], fill=col + (230,))
             elif tag == "shadow":
                 px, py, r = a[0], a[1], a[2]
                 c = cam.project((px, shadow_y, py))
@@ -374,24 +409,25 @@ def main():
         fps = 1000.0 / ms if ms > 0 else 0
         dr.rectangle([0, 0, W, 22], fill=(10, 12, 16, 200))
         dr.text((8, 4), "vxl-phys", font=fontb, fill=(120, 220, 255))
-        dr.text((86, 5), "体素 · 多边形 · 高斯喷溅 · 三角网 · 刚体（五域同场）",
-                font=font, fill=(200, 210, 225))
+        dr.text((86, 5), label, font=font, fill=(200, 210, 225))
+        water = sum(len(ps) for ps in fluids)
+        extra = f"  |  水 {water}" if water else ""
         dr.text((8, H - 18),
-                f"tick {tick}  |  {ms:.2f} ms/tick  |  {fps:.0f} FPS  |  体 {len(bodies)}",
+                f"tick {tick}  |  {ms:.2f} ms/tick  |  {fps:.0f} FPS  |  体 {len(bodies)}{extra}",
                 font=font, fill=(200, 210, 225))
         avg = total_ms / (fi + 1)
         dr.text((W - 200, H - 18), f"均 {avg:.2f} ms ⇒ {1000 / avg:.0f} FPS",
                 font=font, fill=(160, 230, 180))
 
-        out_name = FRAMES_DIR + "/f%04d.png" % fi
+        out_name = os.path.basename(frames_dir) + "/f%04d.png" % fi
         im.save(_resolve(out_name))
         out_frames.append(im)
         if fi % 25 == 0:
             print(f"  渲染 {fi}/{len(frames)}")
 
-    out_frames[0].save(_resolve(DST_NAME), save_all=True, append_images=out_frames[1:],
+    out_frames[0].save(_resolve(dst_name), save_all=True, append_images=out_frames[1:],
                        duration=int(1000 / FPS), loop=0, optimize=True)
-    print(f"完成：out/{DST_NAME}（{len(out_frames)} 帧 @ {FPS} fps）")
+    print(f"完成：out/{dst_name}（{len(out_frames)} 帧 @ {FPS} fps）")
 
 
 if __name__ == "__main__":

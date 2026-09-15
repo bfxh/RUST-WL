@@ -200,6 +200,25 @@ pub trait ProviderColliders: Send + Sync {
     ) -> bool {
         false
     }
+
+    /// **流体边界口径**的点查询（液体域边界投影专用，§0 切片1）。
+    ///
+    /// 与 [`ProviderColliders::contacts_point`] 同一接触约定，但**内点语义
+    /// 更强**：流体驻留投影可把粒子推到表面内 ≤ 单子步行程（~0.4h），SDF
+    /// 类提供者的**截断**距离场在薄壁/角部内部被格间内面主导，中心差分
+    /// 法线可指向固体更深处 ⇒ 沿错误法线投影会把粒子推出远侧表面（穿壁
+    /// 隧逃，实测 1–2 格厚壁均复现）。本方法允许提供者给出内点鲁棒的
+    /// 「最近真表面」口径；解析面/半空间提供者无内点歧义，默认实现
+    /// 原样转 [`ProviderColliders::contacts_point`]（既有行为逐位不变）。
+    fn contacts_point_boundary(
+        &self,
+        id: u32,
+        p: Vec3,
+        skin: f32,
+        out: &mut Vec<InteropContact>,
+    ) -> bool {
+        self.contacts_point(id, p, skin, out)
+    }
 }
 
 /// 空提供者集合（未注册任何 provider 时的默认）。
