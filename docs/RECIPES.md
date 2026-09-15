@@ -70,9 +70,37 @@ cd "/d/开发/RUST WL" && git stash pop
 cd /d/开发/physarena && node scripts/vxl-simd-ab.mjs out/old.wasm out/new.wasm   # 3 轮交替 + 位指纹
 ```
 
-要点：`git stash push -- <文件>` 只暂存这几个文件（别全 stash）；A/B 跑完必须
-`npm run build:vxl && npm run build` 把 `public/` 与 `dist/` 都刷成当前构建
-（否则浏览器测的是旧 wasm——本轮与上一轮都踩过）。
+要点：**别用 `git stash push -- <源码文件>` 做 A/B**——Mimosa hook 会按"Bash 直接写
+源码"拒绝（stash 会改写工作区源码）。改用**只读 worktree** 检出旧提交，各自独立
+target 目录：
+
+```bash
+cd "/d/开发/RUST WL"
+git worktree add "D:/开发/RUST-WL-old" <旧提交>
+cd "D:/开发/RUST-WL-old" && CARGO_TARGET_DIR=C:/vxl-wl-target-old \
+  cargo build --release -q -p vxl-phys --example arena_bench
+# 交替跑两个二进制（3 轮），同温窗才有可比性：
+OLD=C:/vxl-wl-target-old/release/examples/arena_bench.exe
+NEW=C:/vxl-wl-target/release/examples/arena_bench.exe
+for r in 1 2 3; do for s in pyramid ballpit; do
+  echo "$s 旧 $($OLD $s | grep -o 'p50 [0-9.]*')  新 $($NEW $s | grep -o 'p50 [0-9.]*')"
+done; done
+git worktree remove "D:/开发/RUST-WL-old" --force   # 收尾
+```
+
+A/B 跑完必须 `npm run build:vxl && npm run build` 把 `public/` 与 `dist/` 都刷成
+当前构建（否则浏览器测的是旧 wasm——本轮与上一轮都踩过）。**换代哈希的改动还要
+过金样**（见下），两道门都贴读数才算过。
+
+## 金样（保真度门，换代哈希时必跑）
+
+```bash
+cd "/d/开发/RUST WL/gold-sample"     # 独立 workspace：-p 要在这里用
+CARGO_TARGET_DIR=C:/vxl-wl-target-gold cargo run --release -q -- col45 600 16 0.01 4 3.0 30 4
+# 三场景 col45 / pile5 / tower25；判据：末态「全睡 + 最深穿透 ≈0 + y 带不塌」，
+# 与 Rapier 同列对照。**本轮教训**：扫掠预积角向量改动时序 −3.8% 但让 col45
+# 从 45/45 入睡退到 40/45 ⇒ 整项回退（见 EXPERIMENTS）。
+```
 
 ## 关节族（M2 首切片）自检
 
