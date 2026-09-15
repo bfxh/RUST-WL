@@ -248,6 +248,15 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         points as f64 / w.manifolds().len().max(1) as f64,
         min_sep,
     );
+    let p = w.narrow.probe_stats();
+    let per = |v: u64| v as f64 / MEASURE as f64;
+    println!(
+        "  窄相计数/步：裁剪 {:.0} 次（内层迭代 {:.1}/次、插值 {:.2}/次、候选点 {:.2}/次）",
+        per(p.0),
+        per(p.1) / per(p.0).max(1.0),
+        per(p.2) / per(p.0).max(1.0),
+        per(p.3) / per(p.0).max(1.0),
+    );
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
     let dd = w.solver.last_detail_us;
     let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;

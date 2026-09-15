@@ -286,6 +286,26 @@ pub struct DefaultNarrowPhase {
     /// 上一帧产出的流形数（下一帧并行块输出缓冲的容量提示）。纯性能提示：
     /// 不参与任何判定，故与确定性无关。
     out_hint: usize,
+    /// 诊断计数器（**零开销**，仅整数自增）：裁剪调用数 / 内层顶点迭代总数 /
+    /// 交点插值总数 / 进 `select_contacts` 前的候选点数。用途：用"每次调用的
+    /// 迭代数"反推成本落在**固定开销**（面选择 + 装配 + 归约）还是**内层行走**
+    /// ——计时探针在 1361 次/步下自身就要 ~200 µs/步，会淹没被测段。
+    pub probe_clip_calls: u64,
+    pub probe_clip_iters: u64,
+    pub probe_clip_xings: u64,
+    pub probe_cand_pts: u64,
+}
+
+impl DefaultNarrowPhase {
+    /// 诊断读数：(裁剪调用数, 内层顶点迭代总数, 交点插值总数, 候选点总数)。
+    pub fn probe_stats(&self) -> (u64, u64, u64, u64) {
+        (
+            self.probe_clip_calls,
+            self.probe_clip_iters,
+            self.probe_clip_xings,
+            self.probe_cand_pts,
+        )
+    }
 }
 
 fn poly_key(s: &Shape) -> u64 {
@@ -664,6 +684,10 @@ impl DefaultNarrowPhase {
             cached_ax_b: (u32::MAX, u64::MAX, [Vec3::ZERO; 3]),
             ref_v: Vec::new(),
             out_hint: 256,
+            probe_clip_calls: 0,
+            probe_clip_iters: 0,
+            probe_clip_xings: 0,
+            probe_cand_pts: 0,
         }
     }
 
@@ -1016,6 +1040,7 @@ impl DefaultNarrowPhase {
             // keep: dot(v - w0, s) <= 0
             self.clip_out.clear();
             let m = self.clip_in.len();
+            self.probe_clip_iters += m as u64;
             for i in 0..m {
                 let (va, fa) = self.clip_in[i];
                 let (vb, fb) = self.clip_in[(i + 1) % m];
@@ -1026,6 +1051,7 @@ impl DefaultNarrowPhase {
                 }
                 if da * db < 0.0 {
                     let t = da / (da - db);
+                    self.probe_clip_xings += 1;
                     self.clip_out.push((
                         va + (vb - va) * t,
                         feat_intersect(fa, fb, ref_base as usize + k),
@@ -1054,6 +1080,8 @@ impl DefaultNarrowPhase {
         if self.cand.is_empty() {
             return false;
         }
+        self.probe_clip_calls += 1;
+        self.probe_cand_pts += self.cand.len() as u64;
 
         // 去重 + 取最深 ≤4 点（确定性排序见 select_contacts）。
         self.select_contacts(self.min_point_sep)
