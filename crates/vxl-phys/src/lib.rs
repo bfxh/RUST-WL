@@ -773,18 +773,20 @@ impl World {
 
     fn substep(&mut self, dt: f32) {
         // 1) 力场（重力在 World::new 注入注册表）+ 介质耦合（喷溅场作介质）。
-        let t0 = std::time::Instant::now();
+        // 计时走跨目标探针：wasm32-unknown-unknown 无时钟（`Instant::now()`
+        // 会 panic），该目标下退化为 0；原生行为不变。
+        let t0 = vxl_phys_core::probe::start();
         self.fields.apply(&mut self.bodies);
         self.medium_pass();
-        self.timings.fields_us += t0.elapsed().as_micros() as u64;
+        self.timings.fields_us += vxl_phys_core::probe::us(t0);
         // 2) 速度积分。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         let maxl = self.config.max_linear_velocity;
         let maxa = self.config.max_angular_velocity;
         Integrator::integrate_velocities(&mut self.bodies, Vec3::ZERO, dt, maxl, maxa);
-        self.timings.integrate_vel_us += t0.elapsed().as_micros() as u64;
+        self.timings.integrate_vel_us += vxl_phys_core::probe::us(t0);
         // 3) 宽相（先注入步长：速度自适应 fat 边距用）。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         self.broad.set_step(dt);
         let pairs = self
             .broad
@@ -795,9 +797,9 @@ impl World {
                 self.jobs.as_ref(),
             )
             .to_vec();
-        self.timings.broadphase_us += t0.elapsed().as_micros() as u64;
+        self.timings.broadphase_us += vxl_phys_core::probe::us(t0);
         // 4) 窄相。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         self.narrow.collide(
             &self.bodies,
             &pairs,
@@ -806,10 +808,10 @@ impl World {
             &mut self.manifolds,
             self.jobs.as_ref(),
         );
-        self.timings.narrowphase_us += t0.elapsed().as_micros() as u64;
+        self.timings.narrowphase_us += vxl_phys_core::probe::us(t0);
         self.pairs = pairs;
         // 5) 求解 + 岛级休眠（唤醒语义在岛内：外部唤醒/新接触自动传播全岛）。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         self.solver.solve(
             &mut self.bodies,
             &self.manifolds,
@@ -817,15 +819,15 @@ impl World {
             dt,
             self.jobs.as_ref(),
         );
-        self.timings.solve_us += t0.elapsed().as_micros() as u64;
+        self.timings.solve_us += vxl_phys_core::probe::us(t0);
         // 6) 位置积分。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         Integrator::integrate_positions(&mut self.bodies, dt);
-        self.timings.integrate_pos_us += t0.elapsed().as_micros() as u64;
+        self.timings.integrate_pos_us += vxl_phys_core::probe::us(t0);
         // 7) 选择性 CCD（§4.12）：对高速体回扫本子步位移，命中即钳位 + 清法向速度。
-        let t0 = std::time::Instant::now();
+        let t0 = vxl_phys_core::probe::start();
         self.ccd_pass(dt);
-        self.timings.ccd_us += t0.elapsed().as_micros() as u64;
+        self.timings.ccd_us += vxl_phys_core::probe::us(t0);
     }
 
     /// 选择性 CCD（§4.12）：保守推进采样。

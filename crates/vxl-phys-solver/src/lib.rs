@@ -423,7 +423,8 @@ impl ImpulseSolver {
         let sp = SolverParams::from_config(config, dt);
         let threads = jobs.threads().max(1);
         let match_dist = self.match_dist;
-        let t_island = std::time::Instant::now();
+        // 计时走跨目标探针（wasm32 无时钟；原生不变）。
+        let t_island = vxl_phys_core::probe::start();
 
         // 1) 并查集分岛（直接对流形；双静态对不入岛）。固定规则：小索引为根（确定性）。
         //    缓冲跨帧复用（self.parent），避免每帧 20 万级 alloc/fill。
@@ -547,8 +548,8 @@ impl ImpulseSolver {
             }
         }
 
-        let d_island = t_island.elapsed().as_micros() as u64;
-        let t_solve = std::time::Instant::now();
+        let d_island = vxl_phys_core::probe::us(t_island);
+        let t_solve = vxl_phys_core::probe::start();
         // 4) 并行解算（§6 契约：组间写槽位不相交，组内 = 串行语义）。
         if g_count > 1 {
             let bodies_ref: &BodySet = bodies;
@@ -689,8 +690,8 @@ impl ImpulseSolver {
         self.group_av = group_av;
         self.local_of = local_of;
 
-        let d_solve = t_solve.elapsed().as_micros() as u64;
-        let t_sleep = std::time::Instant::now();
+        let d_solve = vxl_phys_core::probe::us(t_solve);
+        let t_sleep = vxl_phys_core::probe::start();
         // 5) 岛级休眠与唤醒（§4.11 / §3 稳定性）。
         //    - 建岛阶段已只收「与清醒体连通」的岛（含被牵连的睡眠体），
         //      遗漏的睡眠体天然保持冻结（不解算不积分）；
@@ -740,7 +741,7 @@ impl ImpulseSolver {
             }
         }
         self.island_pool = pool;
-        self.last_phase_us = (d_island, d_solve, t_sleep.elapsed().as_micros() as u64, 0);
+        self.last_phase_us = (d_island, d_solve, vxl_phys_core::probe::us(t_sleep), 0);
     }
 }
 

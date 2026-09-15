@@ -175,3 +175,29 @@ KNOWLEDGE）；D 的失败教训 = 「预估 cache 行数」必须实测（环�
   内域盆）。
 - **性能**：showcase 六域 320 流体粒 ×4 子步全场景 4.23 ms/tick（236 FPS）；
   dam_break 504 粒 3.80 ms/tick。四哈希门禁逐位不变（流体 = 纯新增路径）。
+
+## 2026-09-15 · 接 PhysArena 同台对比（引擎侧改动与实测）
+
+背景：把本引擎作为第 9 个参战引擎接进 `D:\开发\physarena`（浏览器物理引擎测试场），
+与 Rapier / Jolt / PhysX 5 / Bullet / Havok / Crashcat / cannon-es / Oimo.js 同场景对比。
+桥 = `physarena/wasm-bridge/`（独立工作区的工具 crate，零 unsafe：Rust 侧缓冲 +
+导出数据指针，JS 建视图一次性拷出；引擎 crates 仍 `#![forbid(unsafe_code)]`）。
+
+- **新增 `vxl-phys-core::probe`（跨目标计时探针）**：`wasm32-unknown-unknown` 没有
+  时钟实现，`Instant::now()` 会 panic——在 wasm 桥里表现为 `unreachable` 陷阱
+  （首次接入即命中）。原生走真实 `Instant`，wasm 退化为 0 时长。计时是诊断量、
+  不参与状态哈希：改后 `m0_gates` 压测哈希 `0x2cc8c488…` 与 `determinism`
+  `0x8142fe05…` **逐位不变**（原生行为零扰动）。门面 `substep` 与 broad/solver
+  共 14 处生产计时点改走 `probe`。
+- **流体静水压测试顶带闸 5× → 3×（标定修正）**：release 实测顶带 157 / 中带 646
+  ≈ 4.1×（旧 5× 闸门在此误报失败），debug 下同一 5× 闸门通过 ⇒ 两 profile 的
+  绝对值不同（顶带含镜像鬼影密度尾，PLAN-0.3 §4.3）。3× 仍能抓住真实缺陷
+  （"顶带与中带同量级"），且不被 profile 差异误报；两个 profile 现均 7/7。
+- **同台成绩（19 正确性探针）**：0 失败 / 10 降级（关节未接桥 = 声明不支持，
+  复合体/三角网按盒、圆柱/圆锥/胶囊按凸包——全部显式标注）。通过的含
+  **CCD 拦 240 m/s 弹丸**（同一探针下 PhysX-WASM 实测拦不住，见该仓 README）、
+  静置休眠、5 层堆叠不塌、8 体位姿互不串扰、自由落体能量守常。
+- **同台成绩（吞吐，p50 单步 · 9 引擎 × 8 场景平均）**：PhysX 0.29 / Havok 0.35 /
+  Oimo 0.56 / Jolt 0.63 / Rapier 0.72 / Crashcat 1.09 / Bullet(asm.js) 2.06 /
+  **vxl-phys 2.71** / cannon-es 47.5（含一格 30 s 超限）。本引擎当前定位：正确性
+  全绿、吞吐中游（16 速度迭代、无 SIMD、无并行；金字塔 210 体 9.47 ms/步）。

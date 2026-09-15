@@ -19,6 +19,7 @@ pub mod mass;
 pub mod material;
 pub mod math;
 pub mod mem;
+pub mod probe;
 pub mod schedule;
 pub mod shape;
 

@@ -418,7 +418,8 @@ impl BroadPhase for BvhBroadPhase {
         provider_bounds: &[Aabb],
         jobs: &dyn JobSystem,
     ) -> &[(u32, u32)] {
-        let t_aabb = std::time::Instant::now();
+        // 计时走跨目标探针（wasm32 无时钟；原生不变）。
+        let t_aabb = vxl_phys_core::probe::start();
         self.pairs.clear();
         let n = bodies.len();
         // 注：绝不 clear——AABB 数组跨帧保留（睡眠/静态体沿用上帧值，
@@ -498,8 +499,8 @@ impl BroadPhase for BvhBroadPhase {
                 },
             );
         }
-        let d_aabb = t_aabb.elapsed().as_micros() as u64;
-        let t_tree = std::time::Instant::now();
+        let d_aabb = vxl_phys_core::probe::us(t_aabb);
+        let t_tree = vxl_phys_core::probe::start();
         // 1) 代理更新（需要重建：中位分裂全量重建；否则增量只动清醒体）。
         //    面积启发式对结构化插入序（网格行优先）会链化，
         //    阈值 = 3·log2(n) + 16（确定性纯函数，不依赖时序）。
@@ -529,8 +530,8 @@ impl BroadPhase for BvhBroadPhase {
                 }
             }
         }
-        let d_tree = t_tree.elapsed().as_micros() as u64;
-        let t_query = std::time::Instant::now();
+        let d_tree = vxl_phys_core::probe::us(t_tree);
+        let t_query = vxl_phys_core::probe::start();
         // 2) 清醒动体查询（dyn-dyn 双侧发射由最终排序去重收敛；dyn-static 由
         //    动体侧发起）。睡眠体不查询：沉睡体不产生新接触；被唤醒/被撞由
         //    对方（清醒体）的查询反向命中（睡眠叶仍在树内），唤醒语义不变。
@@ -659,11 +660,11 @@ impl BroadPhase for BvhBroadPhase {
             }
             self.cand_arena = fresh;
         }
-        let d_query = t_query.elapsed().as_micros() as u64;
-        let t_sort = std::time::Instant::now();
+        let d_query = vxl_phys_core::probe::us(t_query);
+        let t_sort = vxl_phys_core::probe::start();
         self.pairs.sort_unstable();
         self.pairs.dedup();
-        self.last_breakdown_us = (d_aabb, d_tree, d_query, t_sort.elapsed().as_micros() as u64);
+        self.last_breakdown_us = (d_aabb, d_tree, d_query, vxl_phys_core::probe::us(t_sort));
         &self.pairs
     }
 
