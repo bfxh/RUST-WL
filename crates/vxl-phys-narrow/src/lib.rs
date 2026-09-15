@@ -294,16 +294,23 @@ pub struct DefaultNarrowPhase {
     pub probe_clip_iters: u64,
     pub probe_clip_xings: u64,
     pub probe_cand_pts: u64,
+    /// 观测到的**最大裁剪多边形长度**（`clip_in` 峰值）。用途：为"把
+    /// `clip_in`/`clip_out` 换成定长数组"提供**实测上界**——盒对快路径理论上界
+    /// 是 8（4 顶点入射面 + 4 次半平面裁剪，每次凸多边形裁剪 ≤ m+1），但通用
+    /// 路径的面顶点数无小常数上界（圆柱面 = n 边形、凸包面可达数十顶点），
+    /// 只有实测峰值才能支撑"定长 16 是否安全"的判断。
+    pub probe_clip_max: u64,
 }
 
 impl DefaultNarrowPhase {
-    /// 诊断读数：(裁剪调用数, 内层顶点迭代总数, 交点插值总数, 候选点总数)。
-    pub fn probe_stats(&self) -> (u64, u64, u64, u64) {
+    /// 诊断读数：(裁剪调用数, 内层迭代总数, 插值总数, 候选点总数, 裁剪多边形峰值)。
+    pub fn probe_stats(&self) -> (u64, u64, u64, u64, u64) {
         (
             self.probe_clip_calls,
             self.probe_clip_iters,
             self.probe_clip_xings,
             self.probe_cand_pts,
+            self.probe_clip_max,
         )
     }
 }
@@ -688,6 +695,7 @@ impl DefaultNarrowPhase {
             probe_clip_iters: 0,
             probe_clip_xings: 0,
             probe_cand_pts: 0,
+            probe_clip_max: 0,
         }
     }
 
@@ -1041,6 +1049,7 @@ impl DefaultNarrowPhase {
             self.clip_out.clear();
             let m = self.clip_in.len();
             self.probe_clip_iters += m as u64;
+            self.probe_clip_max = self.probe_clip_max.max(m as u64);
             for i in 0..m {
                 let (va, fa) = self.clip_in[i];
                 let (vb, fb) = self.clip_in[(i + 1) % m];
