@@ -261,6 +261,11 @@ pub struct ImpulseSolver {
     /// 用途：求解相位线性拟合出"每扫掠成本"与"每帧固定成本"两半之后，定位固定
     /// 成本落在哪（金字塔实测固定 ≈762 µs vs 每扫掠 ≈124 µs，固定是大头）。
     pub last_detail_us: [u64; 4],
+    /// 诊断计数器（零开销）：上一次解算的 (接触点总数, 法向冲量≈0 的点数)。
+    /// 用途：回答"**流形选点是否选多了**"——解算后不承载任何法向冲量的点，
+    /// 每扫掠仍要付一次迭代。本段五次微优化证伪（全是"减指令数"）之后，
+    /// 这是唯一还开着的**减工作量**入口。
+    pub last_points: (u64, u64),
     /// 并查集缓冲（跨帧复用）。
     parent: Vec<u32>,
     /// 岛池（跨帧复用：Vec 容量保留，全清醒场景不逐帧分配）。
@@ -423,6 +428,7 @@ impl ImpulseSolver {
             inv_i_world: Vec::new(),
             last_phase_us: (0, 0, 0, 0),
             last_detail_us: [0; 4],
+            last_points: (0, 0),
             parent: Vec::new(),
             island_pool: Vec::new(),
         }
@@ -592,7 +598,7 @@ impl ImpulseSolver {
             let inv_ref: &[Mat3] = &inv_i_world;
             let sp_ref: &SolverParams = &sp;
             // 诊断细分：每组一份累加器（闭包按 move 捕获，不能共享一个可变借用）。
-            let mut details: Vec<[u64; 3]> = vec![[0; 3]; g_count];
+            let mut details: Vec<[u64; 5]> = vec![[0; 5]; g_count];
             std::thread::scope(|s| {
                 // iter_mut 逐容器取出元素可变借用（按 g 索引整体借用会跨迭代重叠）。
                 for (g, (((lv, av), (cbuf, wout)), det)) in group_lv
@@ -634,13 +640,18 @@ impl ImpulseSolver {
                     }
                 }
             });
+            let mut tot = [0u64; 5];
             for d in &details {
                 for (k, v) in d.iter().enumerate() {
-                    self.last_detail_us[k + 1] += v;
+                    tot[k] += v;
                 }
             }
+            for (k, v) in tot.iter().enumerate().take(3) {
+                self.last_detail_us[k + 1] += v;
+            }
+            self.last_points = (tot[3], tot[4]);
         } else if !awake.is_empty() {
-            let mut det = [0u64; 3];
+            let mut det = [0u64; 5];
             solve_island_group(
                 &awake,
                 islands,
@@ -662,9 +673,10 @@ impl ImpulseSolver {
                 &sp,
                 &mut det,
             );
-            for (k, v) in det.iter().enumerate() {
+            for (k, v) in det.iter().enumerate().take(3) {
                 self.last_detail_us[k + 1] += v;
             }
+            self.last_points = (det[3], det[4]);
         }
 
         // scatter：组序 = gather 序 → 局部索引一一对应（确定性）。
@@ -1212,7 +1224,7 @@ fn solve_island_group(
     shock_iterations: u32,
     normal_inner: u32,
     sp: &SolverParams,
-    detail: &mut [u64; 3],
+    detail: &mut [u64; 5],
 ) {
     for &ii in awake {
         let isl = &islands[ii];
@@ -1327,6 +1339,13 @@ fn solve_island_group(
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
         detail[2] += vxl_phys_core::probe::us(t_it);
         for c in cbuf.iter() {
+            // 诊断（零开销）：被解算的点数 / 其中法向冲量≈0 的点数（padding 槽
+            // 不算——只数 `npts` 内的有效点，否则补零槽会被当成"零冲量点"）。
+            detail[3] += c.npts as u64;
+            detail[4] += c.points[..c.npts as usize]
+                .iter()
+                .filter(|p| p.pn <= 1e-6)
+                .count() as u64;
             let mut wm = WarmManifold::EMPTY;
             wm.normal = c.normal;
             wm.n = c.npts;

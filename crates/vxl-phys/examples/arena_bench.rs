@@ -258,6 +258,13 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         per(p.3) / per(p.0).max(1.0),
         p.4,
     );
+    let lp = w.solver.last_points;
+    println!(
+        "  点承载力（**上一次解算调用**＝一个子步）：被解算接触点 {} 个，其中法向冲量≈0 的 {} 个（{:.1}%）",
+        lp.0,
+        lp.1,
+        100.0 * lp.1 as f64 / lp.0.max(1) as f64,
+    );
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
     let dd = w.solver.last_detail_us;
     let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;
