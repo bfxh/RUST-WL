@@ -129,6 +129,16 @@ pub struct PhysConfig {
     /// 位置修正（erp）偏置速度上限（m/s；Rapier `max_corrective_velocity`
     /// 默认 3.0）——替代旧分裂冲量通道的 0.5 上钳，偏置走速度通道 + 正则化。
     pub max_corrective_velocity: f32,
+    /// **无偏置趟（Rapier TGS-Soft 的末趟；0 = 关闭，默认关）**：位置积分之后
+    /// 对同一批约束再解 `stabilization_iterations` 遍，**去掉去穿透偏置与切向
+    /// 漂移回拉**（对齐 Rapier `rhs_wo_bias`：法向只留 speculative 项、切向不留
+    /// 漂移偏置），即把"修正速度"从**最终速度**里移除。
+    /// 动机（2026-09-18 实测）：偏置与漂移回拉此前会作为真实动能留在体上——
+    /// 塔场景的 |v| 与 `erp_inv_dt·pen`（≈0.1–0.24 m/s）同量级，直接导致大堆
+    /// 永不入睡。Rapier 每子步 = 带偏置趟 → 位置积分 → 无偏置趟
+    /// （`num_internal_pgs_iterations` / `num_internal_stabilization_iterations`，
+    /// 默认各 1）。**0 = 关闭时整条路径逐位不变**（含三哈希）。
+    pub stabilization_iterations: u32,
     /// 限速（M0 的防隧道保守闸；CCD 落地后放宽）。
     pub max_linear_velocity: f32,
     pub max_angular_velocity: f32,
@@ -173,6 +183,7 @@ impl Default for PhysConfig {
             contact_damping_ratio: 10.0,
             static_contact_freq_hz: 60.0,
             max_corrective_velocity: 3.0,
+            stabilization_iterations: 0,
             max_linear_velocity: 100.0,
             max_angular_velocity: 50.0,
             sleep_linear: 0.04,

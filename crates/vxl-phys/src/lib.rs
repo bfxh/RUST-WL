@@ -896,6 +896,21 @@ impl World {
         let t0 = vxl_phys_core::probe::start();
         Integrator::integrate_positions(&mut self.bodies, dt);
         self.timings.integrate_pos_us += vxl_phys_core::probe::us(t0);
+        // 6.5) **无偏置趟**（Rapier TGS-Soft 语义：带偏置趟 → 位置积分 → 无偏置趟）：
+        //      去穿透已由 6) 的位置推进兑现，这里把「修正速度」（erp 去穿透偏置 +
+        //      切向漂移回拉）从**最终速度**里移除——它们此前会作为真实动能留在体上。
+        //      关节不重复求解（本件只动接触通道；关节另有 joint_iterations 预算）。
+        if self.config.stabilization_iterations > 0 {
+            let t0 = vxl_phys_core::probe::start();
+            self.solver.solve_unbiased(
+                &mut self.bodies,
+                &self.manifolds,
+                &self.config,
+                dt,
+                self.jobs.as_ref(),
+            );
+            self.timings.solve_us += vxl_phys_core::probe::us(t0);
+        }
         // 7) 选择性 CCD（§4.12）：对高速体回扫本子步位移，命中即钳位 + 清法向速度。
         let t0 = vxl_phys_core::probe::start();
         self.ccd_pass(dt);

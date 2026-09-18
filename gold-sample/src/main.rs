@@ -2,7 +2,8 @@
 //! 坍塌是物理还是数值？（Rapier 0.35 默认 = TGS-Soft 软接触 4 迭代）。
 //!
 //! 用法：cargo run --release -- [scene] [ticks] [vxl_iters] [skin] [inner] [maxcorr]
-//!        [freq] [substeps] [dump.bin]
+//!        [freq] [substeps] [stabilization] [dump.bin]
+//!   stabilization：无偏置趟迭代数（0 = 关闭，默认；Rapier TGS-Soft 末趟同义）。
 //!   dump.bin（可选）：逐帧（每 2 tick）写两侧引擎位姿 + 各自 step 墙钟
 //!   ⇒ `scripts/render_compare.py` 生成同屏对照 GIF（docs/demo/compare_full.gif）。
 //!   「活跃 tick 口径」：入睡后 step 近似空转 ⇒ 全期均值会被稀释（教训：首版得出
@@ -67,6 +68,7 @@ fn build_vxl(
     maxcorr: f32,
     freq: f32,
     substeps: u32,
+    stabilization: u32,
 ) -> (World, Vec<usize>) {
     let cfg = PhysConfig {
         velocity_iterations: iters,
@@ -76,6 +78,7 @@ fn build_vxl(
         max_corrective_velocity: maxcorr,
         contact_freq_hz: freq,
         substeps: substeps.max(1),
+        stabilization_iterations: stabilization,
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -226,11 +229,21 @@ fn main() {
     let maxcorr: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3.0);
     let freq: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30.0);
     let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let stabilization: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     // 可选：逐帧转储路径（同屏可视化对比用；空 = 不转储）
     let dump_path = args.next();
     let s = scene_of(&scene_name);
 
-    let (mut vw, vids) = build_vxl(&s, vxl_iters, skin, inner, maxcorr, freq, substeps);
+    let (mut vw, vids) = build_vxl(
+        &s,
+        vxl_iters,
+        skin,
+        inner,
+        maxcorr,
+        freq,
+        substeps,
+        stabilization,
+    );
     let (mut rw, rhs) = build_rapier(&s);
     let refs = ref_indices(vids.len());
     println!(

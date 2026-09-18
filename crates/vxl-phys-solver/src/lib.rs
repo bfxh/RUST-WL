@@ -446,11 +446,56 @@ impl ImpulseSolver {
         dt: f32,
         jobs: &dyn JobSystem,
     ) {
+        self.solve_phase(bodies, manifolds, config, dt, jobs, false);
+    }
+
+    /// **无偏置趟**（Rapier TGS-Soft 的末趟，`rhs_wo_bias` 同义）：位置积分之后
+    /// 对同一批流形重解，去掉**去穿透偏置**（`max_corr = 0`），把"修正速度"从
+    /// **最终速度**里移除——位置已由带偏置趟的积分推进，去穿透不受影响；最终速度
+    /// 只留"不接近"（speculative）语义。切向漂移回拉**保留**（Rapier 的切向
+    /// `rhs_wo_bias` = 材料点漂移率；实测归零会让 125 体留缝角点场景退化）。
+    /// `config.stabilization_iterations == 0` 时本函数不应被调用。
+    pub fn solve_unbiased(
+        &mut self,
+        bodies: &mut BodySet,
+        manifolds: &[Manifold],
+        config: &PhysConfig,
+        dt: f32,
+        jobs: &dyn JobSystem,
+    ) {
+        self.solve_phase(bodies, manifolds, config, dt, jobs, true);
+    }
+
+    fn solve_phase(
+        &mut self,
+        bodies: &mut BodySet,
+        manifolds: &[Manifold],
+        config: &PhysConfig,
+        dt: f32,
+        jobs: &dyn JobSystem,
+        cleanup: bool,
+    ) {
         let e_threshold = config.restitution_threshold;
-        let iters = config.velocity_iterations.max(1);
-        let shock = config.shock_iterations;
-        let normal_inner = config.normal_inner.max(1);
-        let sp = SolverParams::from_config(config, dt);
+        let iters = if cleanup {
+            config.stabilization_iterations.max(1)
+        } else {
+            config.velocity_iterations.max(1)
+        };
+        let shock = if cleanup { 0 } else { config.shock_iterations };
+        let normal_inner = if cleanup {
+            1
+        } else {
+            config.normal_inner.max(1)
+        };
+        let mut sp = SolverParams::from_config(config, dt);
+        if cleanup {
+            // 无偏置趟：法向只留 speculative（去穿透偏置 0）——对齐 Rapier
+            // `rhs_wo_bias`。**切向漂移回拉保留**：Rapier 的切向 `rhs_wo_bias` =
+            // `solver_contact.tangent_velocity`（材料点漂移率），即在无偏置趟里
+            // 仍然生效；本仓实测把它一并归零会让 125 体留缝角点场景退化
+            // （|ω| 0.13→0.45、末态 KE 1.6→19.0）——它正是那个场景的承重件。
+            sp.max_corr = 0.0;
+        }
         let threads = jobs.threads().max(1);
         let match_dist = self.match_dist;
         // 计时走跨目标探针（wasm32 无时钟；原生不变）。
@@ -760,7 +805,10 @@ impl ImpulseSolver {
         //    - 全员速度低于阈值持续 sleep_time → 岛内**原子**入睡（同帧全员睡），
         //      不存在"部分睡部分醒"状态，从机制上排除反复唤醒；
         //    - 无接触的孤立清醒动体 = 单成员岛，走同一套休眠判定。
-        for island in islands {
+        //    无偏置趟不做休眠判定（同一子步内带偏置趟已判过；重复判定会让
+        //    sleep_timer 每次子步双倍累积 ⇒ 入睡提前，属非本意行为改变）。
+        let sleep_islands: &[Island] = if cleanup { &[] } else { islands };
+        for island in sleep_islands {
             for &bi in &island.bodies {
                 let i = bi as usize;
                 if !bodies.awake[i] {

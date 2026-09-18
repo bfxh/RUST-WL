@@ -27,6 +27,9 @@ fn main() {
     let inner: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(4);
     // 末位可选 skin（T1 调试旋钮）：「缝 vs skin」关系是留缝密堆微抖的触发通道。
     let skin: Option<f32> = args.next().and_then(|s| s.parse().ok());
+    // 其后再可选 stab（无偏置末趟迭代数；0 = 关闭）。注意位置参数：要用 stab 必须
+    // 显式传 skin（默认值 0.02 与 `PhysConfig::default()` 相同，传了不改变场景）。
+    let stab: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
     let mut cfg = PhysConfig {
         velocity_iterations: iters,
@@ -34,6 +37,7 @@ fn main() {
         baumgarte,
         shock_iterations: shock,
         normal_inner: inner,
+        stabilization_iterations: stab,
         ..PhysConfig::default()
     };
     if let Some(s) = skin {
