@@ -34,3 +34,6 @@ toi = "toi"
 ba = "ba"
 # LOD = level of detail（视距/细节层级）。
 LOD = "LOD"
+# UE / UE5 = Unreal Engine（引擎名缩写，盘点文档里引用按其实现的项目）。
+UE = "UE"
+UE5 = "UE5"
