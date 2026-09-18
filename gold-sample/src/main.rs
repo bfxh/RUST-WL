@@ -2,9 +2,9 @@
 //! 坍塌是物理还是数值？（Rapier 0.35 默认 = TGS-Soft 软接触 4 迭代）。
 //!
 //! 用法：cargo run --release -- [scene] [ticks] [vxl_iters] [skin] [inner] [maxcorr]
-//!        [freq] [substeps] [stabilization] [dump.bin]
-//!   stabilization：无偏置趟迭代数（0 = 关闭，默认；Rapier TGS-Soft 末趟同义）。
-//!   dump.bin（可选）：逐帧（每 2 tick）写两侧引擎位姿 + 各自 step 墙钟
+//!        [freq] [substeps] [dump.bin] [stabilization]
+//!   dump.bin（可选）：逐帧（每 2 tick）写两侧引擎位姿 + 各自 step 墙钟；`-` ＝ 不转储
+//!   stabilization：无偏置末趟迭代数（0 = 关闭，默认；Rapier TGS-Soft 末趟同义）
 //!   ⇒ `scripts/render_compare.py` 生成同屏对照 GIF（docs/demo/compare_full.gif）。
 //!   「活跃 tick 口径」：入睡后 step 近似空转 ⇒ 全期均值会被稀释（教训：首版得出
 //!   rapier 0.01 ms/tick 的假数据），故同时报「活跃 tick 均值」。
@@ -229,9 +229,12 @@ fn main() {
     let maxcorr: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3.0);
     let freq: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(30.0);
     let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    // 可选：逐帧转储路径（同屏可视化对比用）。**保持在原位**——INDEX/RECIPES 里的
+    // render_compare 配方按第 9 个位置参数传它；传 `-` ＝ 不转储（让后面的实验旋钮
+    // 可用而不必编造文件名）。
+    let dump_path = args.next().filter(|p| p != "-");
+    // 其后的实验旋钮（都排在 dump 之后，避免破坏既有配方）：
     let stabilization: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    // 可选：逐帧转储路径（同屏可视化对比用；空 = 不转储）
-    let dump_path = args.next();
     let s = scene_of(&scene_name);
 
     let (mut vw, vids) = build_vxl(
