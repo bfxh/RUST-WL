@@ -6,7 +6,9 @@
 
 [default]
 # 允许的行内豁免：`typos:ignore` 注释（与 typos 官方 directive 一致）。
-extend-ignore-re = ["typos:ignore"]
+extend-ignore-re = ["typos:ignore", "[0-9a-f]{7,40}"]
+# git 短哈希（文档里大量引用提交号，如 `006abd1` 会被误判成 "abd"）。
+# 只豁免「7–40 位全十六进制」这种形态，普通英文单词不受影响。
 
 # 标识符级豁免（代码里的变量/字段名）。
 [default.extend-identifiers]
