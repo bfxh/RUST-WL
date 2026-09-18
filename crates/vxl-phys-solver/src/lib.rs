@@ -237,11 +237,16 @@ pub struct ImpulseSolver {
     warm_index: HashMap<(u32, u32), u32>,
     /// 求解印章（自增）。
     warm_stamp: u32,
-    /// **世界逆惯量矩阵缓存**（体索引 → `M = R·diag(inv_local)·Rᵀ`）：一帧内姿态
-    /// 不变（求解只改速度、姿态在解算之后才积分），故每帧 gather 一次、求解环内复用。
-    /// 求解环每点每轮由「`Rᵀ·x → diag → R·(...)` 两次矩阵乘」降为**一次** `M·(r×imp)`
-    /// ——数学等价、浮点舍入不同 ⇒ 启用即换代（见 EXPERIMENTS 2026-09-15）。
-    inv_i_world: Vec<Mat3>,
+    /// **世界逆惯量矩阵缓存（按组紧凑）**：`M = R·diag(inv_local)·Rᵀ`，一帧内姿态
+    /// 不变 ⇒ 每帧 gather 一次、求解环内复用（每点每轮由两次矩阵乘降为**一次**
+    /// `M·(r×imp)`）。**索引 = 组内局部索引**（`local_of[i]`）：原先是全局数组
+    /// （36B × 全体数，8B 档 7.2 MB）且求解环里按随机全局索引访问 ⇒ 缓存不友好；
+    /// 按组紧凑后工作集 = 组内体数（金字塔档 ≈26 体，落进 L1）。
+    /// 纯搬运：同值、同运算序 ⇒ **逐位不变**（2026-09-18 A3）。
+    group_iw: Vec<Vec<Mat3>>,
+    /// **逆质量缓存（按组紧凑）**：`group_apply` 每次调用读一次（热路径），
+    /// 同样按组内局部索引。纯搬运 ⇒ 逐位不变。
+    group_im: Vec<Vec<f32>>,
     /// 上一帧岛（诊断/调试用）。
     pub island_count: usize,
     /// warm starting 点匹配距离（= 4×skin，构造时可调）。
@@ -384,28 +389,29 @@ fn group_apply(
     lv: &mut [Vec3],
     av: &mut [Vec3],
     local_of: &[u32],
-    inv_i_world: &[Mat3],
+    iw: &[Mat3],
+    im: &[f32],
     i: usize,
     ra: Vec3,
     imp: Vec3,
     minus: bool,
-    bodies: &BodySet,
 ) {
     let k = local_of[i];
     if k == u32::MAX {
         return;
     }
     let q = k as usize;
-    let im = bodies.inv_mass[i];
+    let m = im[q];
     // 世界逆惯量矩阵每帧预积（`R·diag(inv_local)·Rᵀ`）⇒ 这里只剩**一次**矩阵乘；
     // 旧路径每点每轮要 `Rᵀ·x → diag → R·(...)` 两次矩阵乘。数学等价、舍入不同
     // （启用即换代；见 EXPERIMENTS 2026-09-15「每点求解成本」）。
-    let dw = inv_i_world[i].mul_vec3(ra.cross(imp));
+    // A3：`iw`/`im` 都按**组内局部索引**读（原为全局散点：36B×全体数 + 4B×全体数）。
+    let dw = iw[q].mul_vec3(ra.cross(imp));
     if minus {
-        lv[q] -= imp * im;
+        lv[q] -= imp * m;
         av[q] -= dw;
     } else {
-        lv[q] += imp * im;
+        lv[q] += imp * m;
         av[q] += dw;
     }
 }
@@ -424,8 +430,9 @@ impl ImpulseSolver {
             warm_outs: Vec::new(),
             group_lv: Vec::new(),
             group_av: Vec::new(),
+            group_iw: Vec::new(),
+            group_im: Vec::new(),
             local_of: Vec::new(),
-            inv_i_world: Vec::new(),
             last_phase_us: (0, 0, 0, 0),
             last_detail_us: [0; 4],
             last_points: (0, 0),
@@ -594,16 +601,17 @@ impl ImpulseSolver {
         let mut group_lv = std::mem::take(&mut self.group_lv);
         let mut group_av = std::mem::take(&mut self.group_av);
         let mut local_of = std::mem::take(&mut self.local_of);
-        let mut inv_i_world = std::mem::take(&mut self.inv_i_world);
+        let mut group_iw = std::mem::take(&mut self.group_iw);
+        let mut group_im = std::mem::take(&mut self.group_im);
 
         build_bufs.resize_with(g_count, Vec::new);
         warm_outs.resize_with(g_count, Vec::new);
         group_lv.resize_with(g_count, Vec::new);
         group_av.resize_with(g_count, Vec::new);
+        group_iw.resize_with(g_count, Vec::new);
+        group_im.resize_with(g_count, Vec::new);
         local_of.clear();
         local_of.resize(n, u32::MAX);
-        inv_i_world.clear();
-        inv_i_world.resize(n, Mat3::IDENTITY);
         let mut groups: Vec<(usize, usize)> = Vec::with_capacity(g_count);
         // gather：组 g 的岛体速度拷入组内 scratch（顺序 = 岛序 = scatter 序）。
         // 分组切分用比例式（g·n/g_count）：`岛数 < 组数` 时尾部组为空区间
@@ -613,6 +621,8 @@ impl ImpulseSolver {
             warm_outs[g].clear();
             group_lv[g].clear();
             group_av[g].clear();
+            group_iw[g].clear();
+            group_im[g].clear();
             let s0 = g * awake.len() / g_count;
             let e0 = (g + 1) * awake.len() / g_count;
             groups.push((s0, e0));
@@ -624,8 +634,11 @@ impl ImpulseSolver {
                     group_av[g].push(bodies.angvel(i));
                     // 每帧一次：世界逆惯量矩阵（帧内姿态不变，求解只改速度；
                     // M = R·diag(inv_local)·Rᵀ ⇒ 求解环每点每轮只需一次矩阵乘）。
-                    inv_i_world[i] =
-                        Mat3::world_inv_inertia(bodies.rot(i), bodies.local_inv_inertia[i]);
+                    group_iw[g].push(Mat3::world_inv_inertia(
+                        bodies.rot(i),
+                        bodies.local_inv_inertia[i],
+                    ));
+                    group_im[g].push(bodies.inv_mass[i]);
                 }
             }
         }
@@ -640,7 +653,8 @@ impl ImpulseSolver {
             let warm_index_ref: &HashMap<(u32, u32), u32> = &warm_index;
             let warm_slots_ref: &[((u32, u32), WarmManifold)] = &warm_slots;
             let local_ref: &[u32] = &local_of;
-            let inv_ref: &[Mat3] = &inv_i_world;
+            let iw_ref: &[Vec<Mat3>] = &group_iw;
+            let im_ref: &[Vec<f32>] = &group_im;
             let sp_ref: &SolverParams = &sp;
             // 诊断细分：每组一份累加器（闭包按 move 捕获，不能共享一个可变借用）。
             let mut details: Vec<[u64; 5]> = vec![[0; 5]; g_count];
@@ -654,6 +668,8 @@ impl ImpulseSolver {
                     .enumerate()
                 {
                     let (s0, e0) = groups[g];
+                    let iw_g: &[Mat3] = &iw_ref[g];
+                    let im_g: &[f32] = &im_ref[g];
                     let job = move || {
                         solve_island_group(
                             &awake_ref[s0..e0],
@@ -663,7 +679,8 @@ impl ImpulseSolver {
                             warm_index_ref,
                             warm_slots_ref,
                             local_ref,
-                            inv_ref,
+                            iw_g,
+                            im_g,
                             lv,
                             av,
                             cbuf,
@@ -705,7 +722,8 @@ impl ImpulseSolver {
                 &warm_index,
                 &warm_slots,
                 &local_of,
-                &inv_i_world,
+                &group_iw[0],
+                &group_im[0],
                 &mut group_lv[0],
                 &mut group_av[0],
                 &mut build_bufs[0],
@@ -794,7 +812,8 @@ impl ImpulseSolver {
         self.group_lv = group_lv;
         self.group_av = group_av;
         self.local_of = local_of;
-        self.inv_i_world = inv_i_world;
+        self.group_iw = group_iw;
+        self.group_im = group_im;
 
         let d_solve = vxl_phys_core::probe::us(t_solve);
         let t_sleep = vxl_phys_core::probe::start();
@@ -1204,8 +1223,8 @@ fn solve_constraint(
     lv: &mut [Vec3],
     av: &mut [Vec3],
     local_of: &[u32],
-    inv_i_world: &[Mat3],
-    bodies: &BodySet,
+    iw: &[Mat3],
+    im: &[f32],
     rev: bool,
     inner: u32,
     reduce: bool,
@@ -1235,8 +1254,8 @@ fn solve_constraint(
                 // 速度级残差：冲量增量 × 有效质量 = 该点速度修正（m/s）。
                 resid = resid.max((dl * p.nmass).abs());
                 let imp = normal * dl;
-                group_apply(lv, av, local_of, inv_i_world, ai, p.ra, imp, true, bodies);
-                group_apply(lv, av, local_of, inv_i_world, bi, p.rb, imp, false, bodies);
+                group_apply(lv, av, local_of, iw, im, ai, p.ra, imp, true);
+                group_apply(lv, av, local_of, iw, im, bi, p.rb, imp, false);
             }
             // —— 摩擦（**精确 2×2 联立切向解** + 径向锥投影）——
             // Rapier `contact_constraint_element.rs` 同式（Δ = −K⁻¹·dvel 后
@@ -1275,8 +1294,8 @@ fn solve_constraint(
                     if d1 != 0.0 || d2 != 0.0 {
                         resid = resid.max((d1 * p.tmass1).abs()).max((d2 * p.tmass2).abs());
                         let imp = p.t1 * d1 + p.t2 * d2;
-                        group_apply(lv, av, local_of, inv_i_world, ai, p.ra, imp, true, bodies);
-                        group_apply(lv, av, local_of, inv_i_world, bi, p.rb, imp, false, bodies);
+                        group_apply(lv, av, local_of, iw, im, ai, p.ra, imp, true);
+                        group_apply(lv, av, local_of, iw, im, bi, p.rb, imp, false);
                     }
                 }
             }
@@ -1296,7 +1315,8 @@ fn solve_island_group(
     warm_index: &HashMap<(u32, u32), u32>,
     warm_slots: &[((u32, u32), WarmManifold)],
     local_of: &[u32],
-    inv_i_world: &[Mat3],
+    iw: &[Mat3],
+    im: &[f32],
     lv: &mut [Vec3],
     av: &mut [Vec3],
     cbuf: &mut Vec<ContactConstraint>,
@@ -1337,28 +1357,8 @@ fn solve_island_group(
                         continue;
                     }
                     let impulse = c.normal * w.pn + p.t1 * w.pt1 + p.t2 * w.pt2;
-                    group_apply(
-                        lv,
-                        av,
-                        local_of,
-                        inv_i_world,
-                        ai,
-                        p.ra,
-                        impulse,
-                        true,
-                        bodies,
-                    );
-                    group_apply(
-                        lv,
-                        av,
-                        local_of,
-                        inv_i_world,
-                        bi,
-                        p.rb,
-                        impulse,
-                        false,
-                        bodies,
-                    );
+                    group_apply(lv, av, local_of, iw, im, ai, p.ra, impulse, true);
+                    group_apply(lv, av, local_of, iw, im, bi, p.rb, impulse, false);
                 }
             }
         }
@@ -1390,8 +1390,8 @@ fn solve_island_group(
                         lv,
                         av,
                         local_of,
-                        inv_i_world,
-                        bodies,
+                        iw,
+                        im,
                         false,
                         normal_inner,
                         reduce,
@@ -1404,8 +1404,8 @@ fn solve_island_group(
                         lv,
                         av,
                         local_of,
-                        inv_i_world,
-                        bodies,
+                        iw,
+                        im,
                         true,
                         normal_inner,
                         reduce,
@@ -1422,17 +1422,7 @@ fn solve_island_group(
         // 确定性：反序为固定次序、纯数据驱动，与线程数无关。
         for _ in 0..shock_iterations {
             for c in cbuf.iter_mut().rev() {
-                let _ = solve_constraint(
-                    c,
-                    lv,
-                    av,
-                    local_of,
-                    inv_i_world,
-                    bodies,
-                    true,
-                    normal_inner,
-                    false,
-                );
+                let _ = solve_constraint(c, lv, av, local_of, iw, im, true, normal_inner, false);
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
