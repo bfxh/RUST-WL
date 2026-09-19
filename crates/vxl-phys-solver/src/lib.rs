@@ -85,6 +85,24 @@ static WARM_EXACT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 static WARM_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WARM_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **回退命中的成因分解**（诊断；只计数）：特征是"ID 变了但材料点还在附近"，
+/// 拆开看变了哪一种 ⇒ 判定修复入口（见 vxl_phys_narrow::feature_kind 注）。
+static WB_SIDE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WB_CLIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WB_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WB_SAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取并清零回退成因分解：`(侧别翻转, 裁剪路变化, 哈希变化, 特征相同)`。
+pub fn warm_fallback_kind_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        WB_SIDE.swap(0, Relaxed),
+        WB_CLIP.swap(0, Relaxed),
+        WB_HASH.swap(0, Relaxed),
+        WB_SAME.swap(0, Relaxed),
+    )
+}
+
 /// 读取并清零 warm 匹配计数：`(精确特征命中, 近邻回退命中, 未匹配)`。
 pub fn warm_match_stats_take() -> (u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -1030,8 +1048,23 @@ fn build_constraint(
                                 .total_cmp(&(warm_world[y] - cp.point).length_squared())
                         })
                         .map(|k| wm.points[k]);
-                    if warm_pt.is_some() {
-                        WARM_FALLBACK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Some(w) = warm_pt {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        WARM_FALLBACK.fetch_add(1, Relaxed);
+                        // 成因分解（诊断，只计数）：见 `vxl_phys_narrow::feature_kind` 注。
+                        let (s_new, c_new) = vxl_phys_narrow::feature_kind(cp.feature);
+                        let (s_old, c_old) = vxl_phys_narrow::feature_kind(w.feature);
+                        if s_new != s_old {
+                            WB_SIDE.fetch_add(1, Relaxed);
+                        } else if c_new != c_old {
+                            WB_CLIP.fetch_add(1, Relaxed);
+                        } else if vxl_phys_narrow::feature_hash_part(cp.feature)
+                            != vxl_phys_narrow::feature_hash_part(w.feature)
+                        {
+                            WB_HASH.fetch_add(1, Relaxed);
+                        } else {
+                            WB_SAME.fetch_add(1, Relaxed);
+                        }
                     }
                 }
                 if warm_pt.is_none() {

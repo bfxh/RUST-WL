@@ -283,6 +283,19 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         wm,
         100.0 * wm as f64 / wt,
     );
+    let (bs, bc, bh, bsame) = vxl_phys_solver::warm_fallback_kind_take();
+    let bt = (bs + bc + bh + bsame).max(1) as f64;
+    println!(
+        "  回退命中的成因（占回退）：侧别翻转 {}（{:.1}%） 裁剪路变 {}（{:.1}%） 哈希变 {}（{:.1}%） 特征同 {}（{:.1}%）",
+        bs,
+        100.0 * bs as f64 / bt,
+        bc,
+        100.0 * bc as f64 / bt,
+        bh,
+        100.0 * bh as f64 / bt,
+        bsame,
+        100.0 * bsame as f64 / bt,
+    );
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
     let dd = w.solver.last_detail_us;
     let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;
