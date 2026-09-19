@@ -271,6 +271,18 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         lp.1,
         100.0 * lp.1 as f64 / lp.0.max(1) as f64,
     );
+    let (we, wf, wm) = vxl_phys_solver::warm_match_stats_take();
+    let wt = (we + wf + wm).max(1) as f64;
+    println!(
+        "  warm 匹配分支（全程累计）：精确特征 {}（{:.1}%） 近邻回退 {}（{:.1}%） 未匹配 {}（{:.1}%）\
+         ——精确率高 ⇒ 流形跨帧稳定（§9/§10 的\"裁剪产物\"归因不成立）",
+        we,
+        100.0 * we as f64 / wt,
+        wf,
+        100.0 * wf as f64 / wt,
+        wm,
+        100.0 * wm as f64 / wt,
+    );
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
     let dd = w.solver.last_detail_us;
     let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;

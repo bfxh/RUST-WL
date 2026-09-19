@@ -342,6 +342,21 @@ fn main() {
         }
     }
     {
+        // 流形特征稳定性（EXPERIMENTS 末节 K）：精确特征命中率 = warm 配对跨帧是否稳定。
+        // 用途：判定 §9/§10 的"裁剪产物 ⇒ 配对漂移"归因是否成立（85%+ ⇒ 不成立）。
+        let (we, wf, wm) = vxl_phys_solver::warm_match_stats_take();
+        let wt = (we + wf + wm).max(1) as f64;
+        println!(
+            "== warm 匹配分支（全程累计）：精确特征 {}（{:.1}%） 近邻回退 {}（{:.1}%） 未匹配 {}（{:.1}%）",
+            we,
+            100.0 * we as f64 / wt,
+            wf,
+            100.0 * wf as f64 / wt,
+            wm,
+            100.0 * wm as f64 / wt,
+        );
+    }
+    {
         let worst = flips.iter().copied().max().unwrap_or(0);
         let flippers = flips.iter().filter(|&&f| f > 0).count();
         println!(

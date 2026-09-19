@@ -71,6 +71,30 @@ const DRIFT_BIAS_SCALE: f32 = 1.0;
 /// （0.34→0.26 变 0.22→0.29）——M1 验收主体是塔，取无死区。
 const DRIFT_DEADZONE: f32 = 0.0;
 
+/// **warm 匹配分支计数**（诊断；atomic 宽松序，只计数、不改行为 ⇒ 哈希不变）。
+///
+/// 用途：判定「本仓流形是否**特征稳定**」——这是"检测每步一次 / 便宜子步"能否成立的
+/// 前提。§9（P1：检测上提，塔崩 |v| 44.4）与 §10（复用约束 + prepare，全变体崩）把失败
+/// 归因于"本引擎流形是**裁剪产物** ⇒ 材料点配对跨帧漂移"；但窄相的 `feature` 设计本
+/// 就是**几何特征哈希**（`feat_intersect`：入射棱对 × 参考侧平面，"同三元组重现同 ID"），
+/// 即**该归因缺实测支撑**。本计数给出依据：
+/// - **精确命中率高** ⇒ 配对稳定 ⇒ 归因错误，§9/§10 的失败须另找机理
+///   （便宜子步这条最值钱的结构杠杆应重新评估）；
+/// - **命中率低** ⇒ 归因成立（且原因多半是参考面翻转 / 裁剪输出churn）。
+static WARM_EXACT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WARM_FALLBACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WARM_MISS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取并清零 warm 匹配计数：`(精确特征命中, 近邻回退命中, 未匹配)`。
+pub fn warm_match_stats_take() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        WARM_EXACT.swap(0, Relaxed),
+        WARM_FALLBACK.swap(0, Relaxed),
+        WARM_MISS.swap(0, Relaxed),
+    )
+}
+
 /// 回退匹配的**接触状态门**（米）：只有本帧裁剪深度 > 此阈值的回退匹配才允许
 /// 暖启动——**分离/预期接触（depth ≤ 0）拒配**（按新接触处理，暖冲量清零、
 /// 锚点重烘焙）。依据：错配锚点的暖冲量会过驱动「间歇角点接触」（125 体族的
@@ -973,6 +997,9 @@ fn build_constraint(
                                     < match_dist * match_dist
                         })
                         .map(|k| wm.points[k]);
+                    if warm_pt.is_some() {
+                        WARM_EXACT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 if warm_pt.is_none() {
                     // **回退分支单独收紧接受半径**（上一轮实测结论的直接产物）：
@@ -1003,6 +1030,12 @@ fn build_constraint(
                                 .total_cmp(&(warm_world[y] - cp.point).length_squared())
                         })
                         .map(|k| wm.points[k]);
+                    if warm_pt.is_some() {
+                        WARM_FALLBACK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if warm_pt.is_none() {
+                    WARM_MISS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         }

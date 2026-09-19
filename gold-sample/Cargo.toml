@@ -12,3 +12,5 @@ publish = false
 [dependencies]
 rapier3d = "0.35.3"
 vxl-phys = { path = "../crates/vxl-phys" }
+# 诊断：warm 匹配分支计数（流形特征稳定性，见 EXPERIMENTS 末节 K）。
+vxl-phys-solver = { path = "../crates/vxl-phys-solver" }
