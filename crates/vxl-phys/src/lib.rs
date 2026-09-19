@@ -895,6 +895,11 @@ impl World {
             self.timings.broadphase_us += vxl_phys_core::probe::us(t0);
             // 4) 窄相。
             let t0 = vxl_phys_core::probe::start();
+            // 速度充气视野（见 `narrow::DefaultNarrowPhase::set_predict_dt`）：
+            // 预测时长 = **距下一次检测的间隔**（复用流形 ⇒ 整个 tick；否则不预测）。
+            // 关闭检测复用时恒传 0 ⇒ 现行行为逐位不变。
+            self.narrow
+                .set_predict_dt(if reuse_manifolds { self.config.dt } else { 0.0 });
             self.narrow.collide(
                 &self.bodies,
                 &pairs,
@@ -997,6 +1002,9 @@ impl World {
             for s in 1..=steps {
                 let t = sub * s as f32;
                 self.bodies.position[i] = p0 + v * t;
+                // CCD 逐采样已在时间维上走路径 ⇒ 不再叠加视野预测（显式清零，
+                // 否则会继承主窄相调用设的 `predict_dt`）。
+                self.narrow.set_predict_dt(0.0);
                 self.narrow.collide(
                     &self.bodies,
                     &pairs,

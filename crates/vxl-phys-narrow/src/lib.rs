@@ -261,6 +261,19 @@ pub struct DefaultNarrowPhase {
     /// 凸体外壳仓库（多边形域；点云注册后由 shape 引用）。
     hulls: HullStore,
     skin: f32,
+    /// **速度充气视野的预测时长**（s；0 = 不预测 ＝ 现行行为）。由 `World` 每子步设为
+    /// **检测间隔**（每子步检测时为 `dt`、每 tick 检测时为整 tick）：窄相的接受判据
+    /// 从 `sep ≤ skin` 放宽为 `sep ≤ skin + max(0, 接近速度)·predict_dt`，使
+    /// "**下一次检测之前会碰上的接触**"提前成流形——求解器的 spec 项
+    /// （`sep·inv_dt`）负责把逼近平滑拦停，不需要额外机制。
+    ///
+    /// 依据（`EXPERIMENTS.md` 末节 L/M）：检测每步一次时塔崩（KE 30 万）的真实机理是
+    /// **逼近中的接触晚生**；把 skin 从 0.01 加到 0.02/0.04/0.08 即可让 KE 降到
+    /// 2 386/1 992/1 271 且 y 带完整 ⇒ 视野不足而非语义不可行。
+    /// `0` 时整条路径逐位不变（含三哈希）。
+    predict_dt: f32,
+    /// 本对的充气量（scratch）：由 SAT 预筛处按 (a, b, n) 计算，`clip` 的逐点过滤共用。
+    inflate: f32,
     /// 接触点空间去重最小间距（m）：2×skin，且 ≥ 1 cm。
     min_point_sep: f32,
     polys: Vec<ConvexPolytope>,
@@ -681,10 +694,28 @@ impl DefaultNarrowPhase {
         });
     }
 
+    /// **设置速度充气视野的预测时长**（0 = 关闭；见 `predict_dt` 字段注）。
+    /// 由 `World` 在每次 `collide` 前设置：检测间隔 = 距下一次窄相的时间。
+    pub fn set_predict_dt(&mut self, dt: f32) {
+        self.predict_dt = if dt > 0.0 { dt } else { 0.0 };
+    }
+
+    /// 本对的充气量＝`max(0, 接近速度)·predict_dt`（`predict_dt = 0` ⇒ 恒 0）。
+    /// 接近速度取**质心**相对速度在法向的投影（忽略角速度贡献：角项在贴面接触上是一阶小量）。
+    fn predict_inflate(&self, a: u32, b: u32, bodies: &vxl_phys_core::BodySet, n: Vec3) -> f32 {
+        if self.predict_dt <= 0.0 {
+            return 0.0;
+        }
+        let vrel = bodies.linvel[b as usize] - bodies.linvel[a as usize];
+        (-vrel.dot(n)).max(0.0) * self.predict_dt
+    }
+
     pub fn new(skin: f32) -> Self {
         Self {
             hulls: HullStore::default(),
             skin,
+            predict_dt: 0.0,
+            inflate: 0.0,
             min_point_sep: (skin * 2.0).max(0.01),
             polys: Vec::new(),
             poly_index: HashMap::new(),
@@ -1089,12 +1120,12 @@ impl DefaultNarrowPhase {
             }
         }
 
-        // 主平面过滤：保留 n_ref 方向距离 ≤ skin 的点（depth = -dist）。
+        // 主平面过滤：保留 n_ref 方向距离 ≤ skin（+本对充气量）的点（depth = -dist）。
         let p0 = self.ref_v[0];
         self.cand.clear();
         for &(v, feat) in &self.clip_in {
             let d = (v - p0).dot(n_ref);
-            if d <= self.skin {
+            if d <= self.skin + self.inflate {
                 self.cand.push(ContactPoint {
                     point: v,
                     depth: -d,
@@ -1285,6 +1316,8 @@ impl NarrowPhase for DefaultNarrowPhase {
         jobs: &dyn JobSystem,
     ) {
         out.clear();
+        // 每对各自的充气量（`clip` 逐点过滤复用）；默认 0 ⇒ 逐位同现行。
+        self.inflate = 0.0;
         // 世界多面体填充缓存跨帧失效（体在帧间移动；键只含体号+形状）。
         self.cached_a = (u32::MAX, u64::MAX);
         self.cached_b = (u32::MAX, u64::MAX);
@@ -1673,7 +1706,9 @@ impl DefaultNarrowPhase {
                     ax
                 });
                 if let Some((sep, n, src)) = self.sat(pb - pa) {
-                    if sep > self.skin {
+                    // 速度充气视野（见 `predict_dt` 字段注）：`0` ⇒ 逐位同现行。
+                    self.inflate = self.predict_inflate(a, b, bodies, n);
+                    if sep > self.skin + self.inflate {
                         return;
                     }
                     if self.clip(n, src) {
@@ -1719,7 +1754,9 @@ impl DefaultNarrowPhase {
                     _ => None,
                 };
                 if let Some((sep, n, src)) = self.sat(pb - pa) {
-                    if sep > self.skin {
+                    // 速度充气视野（同盒对路径；见 `predict_dt` 字段注）。
+                    self.inflate = self.predict_inflate(a, b, bodies, n);
+                    if sep > self.skin + self.inflate {
                         return;
                     }
                     if self.clip(n, src) {
