@@ -308,6 +308,20 @@ pub struct ImpactRecord {
 }
 
 /// 物理世界（固定步长契约：调用方以 `config.dt` 的整数倍节拍调用 `step`）。
+/// **检测每步一次**（实验开关；`false` = 现行"每子步检测"）。
+///
+/// `true` 时：宽相/窄相只在每个 tick 的**首子步**跑，后续子步复用同一张流形表。
+/// 动机：文档算过它值 **−27% 帧**（金字塔相位里 429 µs 是同一帧内的第二遍重复检测）。
+/// 本仓 2026-09-14 的 P1 实验（`00a1ebf`）在塔上崩（|v| 44.4）并据此宣告"必须与 P2
+/// 同批"，但：**那次实现未入档**（该提交只改文档），归因已被两次修正
+/// （见 `EXPERIMENTS.md` 末节 K/K.1 与 DESIGN §10 的更正注），且当时之后落地了三件
+/// 相关能力——`build_constraint` 每子步从**当前位姿**重算深度/锚点、warm 表稠密槽位、
+/// A3 按组紧凑（求解热路径与 `BodySet` 解耦）。⇒ 值得重测（K.1 已证 tick 内复用
+/// 流形时特征 ID 逐子步完全相同 ⇒ warm 精确命中、暖启动完整）。
+fn detect_once_per_tick() -> bool {
+    false
+}
+
 pub struct World {
     pub config: PhysConfig,
     pub bodies: BodySet,
@@ -768,8 +782,21 @@ impl World {
     pub fn step(&mut self) {
         let substeps = self.config.substeps.max(1);
         let dt = self.config.dt / substeps as f32;
-        for _ in 0..substeps {
-            self.substep(dt);
+        // **运动自适应**（见 `detect_once_per_tick` 注）：只有准静态时才敢复用流形表。
+        // 判据：本 tick 的最大位移 `max|v|·dt` ≤ 半个 skin ⇒ 接触集在一 tick 内不会
+        // 实质变化（运动中冻结检测会漏掉"逼近中的接触"，把平滑接触变成硬碰撞——
+        // 塔沉降期实测 KE ×300）。
+        let reuse = detect_once_per_tick() && {
+            let mut v2 = 0.0f32;
+            for i in 0..self.bodies.len() {
+                if self.bodies.awake[i] {
+                    v2 = v2.max(self.bodies.linvel[i].length_squared());
+                }
+            }
+            v2.sqrt() * self.config.dt <= 0.5 * self.config.contact_skin
+        };
+        for k in 0..substeps {
+            self.substep(dt, k == 0, reuse);
         }
         self.fluid_pass();
         self.tick += 1;
@@ -835,7 +862,7 @@ impl World {
         }
     }
 
-    fn substep(&mut self, dt: f32) {
+    fn substep(&mut self, dt: f32, first: bool, reuse_manifolds: bool) {
         // 1) 力场（重力在 World::new 注入注册表）+ 介质耦合（喷溅场作介质）。
         // 计时走跨目标探针：wasm32-unknown-unknown 无时钟（`Instant::now()`
         // 会 panic），该目标下退化为 0；原生行为不变。
@@ -850,30 +877,35 @@ impl World {
         Integrator::integrate_velocities(&mut self.bodies, Vec3::ZERO, dt, maxl, maxa);
         self.timings.integrate_vel_us += vxl_phys_core::probe::us(t0);
         // 3) 宽相（先注入步长：速度自适应 fat 边距用）。
+        //    **检测每步一次**（实验开关 `detect_once_per_tick` + 准静态判据）：
+        //    非首子步且准静态时跳过宽相 + 窄相，复用本 tick 首子步的流形表。
+        let detect = first || !reuse_manifolds;
         let t0 = vxl_phys_core::probe::start();
-        self.broad.set_step(dt);
-        let pairs = self
-            .broad
-            .compute_pairs(
+        if detect {
+            self.broad.set_step(dt);
+            let pairs = self
+                .broad
+                .compute_pairs(
+                    &self.bodies,
+                    &self.hf_bounds,
+                    &self.provider_bounds,
+                    self.jobs.as_ref(),
+                )
+                .to_vec();
+            self.timings.broadphase_us += vxl_phys_core::probe::us(t0);
+            // 4) 窄相。
+            let t0 = vxl_phys_core::probe::start();
+            self.narrow.collide(
                 &self.bodies,
-                &self.hf_bounds,
-                &self.provider_bounds,
+                &pairs,
+                self.terrain.slice(),
+                &self.providers,
+                &mut self.manifolds,
                 self.jobs.as_ref(),
-            )
-            .to_vec();
-        self.timings.broadphase_us += vxl_phys_core::probe::us(t0);
-        // 4) 窄相。
-        let t0 = vxl_phys_core::probe::start();
-        self.narrow.collide(
-            &self.bodies,
-            &pairs,
-            self.terrain.slice(),
-            &self.providers,
-            &mut self.manifolds,
-            self.jobs.as_ref(),
-        );
-        self.timings.narrowphase_us += vxl_phys_core::probe::us(t0);
-        self.pairs = pairs;
+            );
+            self.timings.narrowphase_us += vxl_phys_core::probe::us(t0);
+            self.pairs = pairs;
+        }
         // 4.5) 冲击快照（**解算前**）：provider 对的接近速度与接触点写给破坏管线。
         //      放在这里而不是让管线读末态速度——子步/迭代会把法向速度解掉，
         //      管线读末态就会漏掉"这一瞬间撞上了"这件事（dt 无关性）。
