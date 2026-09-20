@@ -1641,6 +1641,66 @@ impl DefaultNarrowPhase {
         self.box_axes_a = None;
         self.box_axes_b = None;
 
+        // —— 复合体：子形状展开为**子对**并递归本函数 ——
+        //
+        // 放在**最前**（先于地形/提供者分支）⇒ 子形状各自走完整配对路径（含地形）。
+        // 同一体对会**同时**存在多条流形（每个子形状各一条）：`feature` 是暖启动缓存键的
+        // 一部分，不并入子序号会让不同子形状的接触点互相顶替（`0` 是"无特征"哨兵，保持 0）。
+        if let Shape::Compound { compound, .. } = *sa {
+            let Some(kids) = self.kids_take(compound) else {
+                return;
+            };
+            for (ci, kid) in kids.iter().enumerate() {
+                let before = out.len();
+                let cpos = pa + Mat3::from_quat(ra).mul_vec3(kid.offset);
+                let crot = ra * kid.rot;
+                self.process_pair_shaped(
+                    a,
+                    b,
+                    bodies,
+                    &kid.shape,
+                    sb,
+                    cpos,
+                    crot,
+                    pb,
+                    rb,
+                    heightfields,
+                    providers,
+                    out,
+                );
+                tag_child_features(&mut out[before..], ci);
+            }
+            self.kids_put(kids);
+            return;
+        }
+        if let Shape::Compound { compound, .. } = *sb {
+            let Some(kids) = self.kids_take(compound) else {
+                return;
+            };
+            for (ci, kid) in kids.iter().enumerate() {
+                let before = out.len();
+                let cpos = pb + Mat3::from_quat(rb).mul_vec3(kid.offset);
+                let crot = rb * kid.rot;
+                self.process_pair_shaped(
+                    a,
+                    b,
+                    bodies,
+                    sa,
+                    &kid.shape,
+                    pa,
+                    ra,
+                    cpos,
+                    crot,
+                    heightfields,
+                    providers,
+                    out,
+                );
+                tag_child_features(&mut out[before..], ci);
+            }
+            self.kids_put(kids);
+            return;
+        }
+
         // **外部碰撞提供者参与的对**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）。
         // 只有「盒 vs provider」走此路径（其余形状待 provider 专用解法补齐）；
         // 法线约定与高度场一致：provider 在 a → +n_s（外向）；在 b → −n_s。
@@ -1842,7 +1902,7 @@ impl DefaultNarrowPhase {
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
                 Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => return,
-                // 复合体 × 地形：**暂不受理**（子形状展开可后续接；见 `TECH-SURVEY.md` A9 ④）。
+                // 复合体已在上游按子形状展开（本臂不可达，留作穷尽性）。
                 Shape::Compound { .. } => return,
                 // 胶囊体 × 地形：**本切片暂不支持**（显式拒绝，不静默产空接触）。
                 // 后续接法：沿线段取 N 个样本调 `sphere_heightfield` 合并候选点。
@@ -1870,62 +1930,6 @@ impl DefaultNarrowPhase {
 
         // 非 heightfield 对。
         match (*sa, *sb) {
-            // —— 复合体：子形状展开为**子对**并递归复用本函数 ——
-            //
-            // 同一体对会**同时**存在多条流形（每个子形状各一条）：`feature` 是暖启动缓存键
-            // 的一部分，不并入子序号会让不同子形状的接触点互相顶替（`0` 是"无特征"哨兵）。
-            (Shape::Compound { compound, .. }, _) => {
-                let Some(kids) = self.kids_take(compound) else {
-                    return;
-                };
-                for (ci, kid) in kids.iter().enumerate() {
-                    let before = out.len();
-                    let cpos = pa + Mat3::from_quat(ra).mul_vec3(kid.offset);
-                    let crot = ra * kid.rot;
-                    self.process_pair_shaped(
-                        a,
-                        b,
-                        bodies,
-                        &kid.shape,
-                        sb,
-                        cpos,
-                        crot,
-                        pb,
-                        rb,
-                        heightfields,
-                        providers,
-                        out,
-                    );
-                    tag_child_features(&mut out[before..], ci);
-                }
-                self.kids_put(kids);
-            }
-            (_, Shape::Compound { compound, .. }) => {
-                let Some(kids) = self.kids_take(compound) else {
-                    return;
-                };
-                for (ci, kid) in kids.iter().enumerate() {
-                    let before = out.len();
-                    let cpos = pb + Mat3::from_quat(rb).mul_vec3(kid.offset);
-                    let crot = rb * kid.rot;
-                    self.process_pair_shaped(
-                        a,
-                        b,
-                        bodies,
-                        sa,
-                        &kid.shape,
-                        pa,
-                        ra,
-                        cpos,
-                        crot,
-                        heightfields,
-                        providers,
-                        out,
-                    );
-                    tag_child_features(&mut out[before..], ci);
-                }
-                self.kids_put(kids);
-            }
             (Shape::Sphere { radius: ra_ }, Shape::Sphere { radius: rb_ }) => {
                 let d = pb - pa;
                 let dist = d.length();
@@ -2647,6 +2651,64 @@ mod tests {
         // a=球(0) 在上，b=marker(1) → 法线 a→b = -Y（推向地面）。
         assert!(m[0].normal.y < -0.99, "normal {:?}", m[0].normal);
         assert!((m[0].points[0].depth - 0.05).abs() < 0.02);
+    }
+
+    /// 复合体 × 地形：子形状各自走地形路径（此前该组合在高度场分支被**显式拒绝**）。
+    /// 判据：两个球子形状各给出一条流形、法线竖直（含接触）。
+    #[test]
+    fn compound_on_heightfield() {
+        let mut np = DefaultNarrowPhase::new(0.01);
+        let cid = np.add_compound(vec![
+            CompoundChild {
+                shape: Shape::Sphere { radius: 0.3 },
+                offset: Vec3::new(-0.6, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+            CompoundChild {
+                shape: Shape::Sphere { radius: 0.3 },
+                offset: Vec3::new(0.6, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+        ]);
+        let mut b = BodySet::new();
+        let hf = HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0);
+        b.push_dynamic(
+            Shape::Compound {
+                compound: cid,
+                half: np.compound_half_extents(cid),
+            },
+            Vec3::new(0.0, 0.29, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        let _marker = b.push_static(Shape::HeightField(0), Vec3::ZERO, Quat::IDENTITY);
+        let mut pairs = Vec::new();
+        for i in 0..b.len() as u32 {
+            for j in (i + 1)..b.len() as u32 {
+                pairs.push((i, j));
+            }
+        }
+        let mut out = Vec::new();
+        np.collide(
+            &b,
+            &pairs,
+            &[hf],
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &SerialJobSystem,
+        );
+        assert!(
+            out.len() >= 2,
+            "两个球子形状应各出一条地形流形，实得 {} 条",
+            out.len()
+        );
+        for m in &out {
+            assert!(
+                m.normal.y.abs() > 0.99,
+                "地形法线应竖直，实得 {:?}",
+                m.normal
+            );
+        }
     }
 
     #[test]
