@@ -724,6 +724,30 @@ impl DefaultNarrowPhase {
                 pos,
                 rot: Mat3::from_quat(rot),
             })),
+            // 圆柱/圆锥：**多面化表示**的支撑（顶点有限 ⇒ EPA 良态）。此前缺这两支 ⇒
+            // 「外壳 × 圆柱/锥」这类组合**静默无接触**（见 `TECH-SURVEY.md` A9 ④ 留档）。
+            Shape::Cylinder {
+                half_height,
+                radius,
+            } => Some(gjk::ShapeSupport::Prism(gjk::PrismSupport {
+                half_height,
+                radius,
+                segments: CYLINDER_SEGMENTS,
+                cone: false,
+                pos,
+                rot: Mat3::from_quat(rot),
+            })),
+            Shape::Cone {
+                half_height,
+                radius,
+            } => Some(gjk::ShapeSupport::Prism(gjk::PrismSupport {
+                half_height,
+                radius,
+                segments: CYLINDER_SEGMENTS,
+                cone: true,
+                pos,
+                rot: Mat3::from_quat(rot),
+            })),
             _ => None,
         }
     }
@@ -2363,6 +2387,63 @@ mod tests {
             (d - 0.01).abs() < 2e-3,
             "深度应 ≈1 cm（0.3 − 端点距 0.29），实得 {d}"
         );
+    }
+
+    /// 外壳 × 圆柱：曾因 `support_of` 缺圆柱/锥分支而**静默无接触**（`TECH-SURVEY.md` A9 ④ 留档）。
+    /// 判据：有接触、法线竖直、有正压入。
+    #[test]
+    fn hull_on_cylinder_cap() {
+        let mut np = DefaultNarrowPhase::new(0.01);
+        // 外壳：3×3×3 立方点云（半 0.3）。
+        let mut pts: Vec<Vec3> = Vec::with_capacity(27);
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    pts.push(Vec3::new(x as f32, y as f32, z as f32) * 0.3);
+                }
+            }
+        }
+        let hid = np.add_hull(pts);
+        let mut b = BodySet::new();
+        // 静立圆柱（半高 0.5、半径 0.4，中心 y=-0.5 ⇒ 顶面 y=0）。
+        b.push_static(
+            Shape::Cylinder {
+                half_height: 0.5,
+                radius: 0.4,
+            },
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+        );
+        // 外壳落在顶面（底面压入 1 cm ⇒ 中心 y = 0.29）。
+        b.push_dynamic(
+            Shape::ConvexHull {
+                hull: hid,
+                half: Vec3::splat(0.3),
+            },
+            Vec3::new(0.0, 0.29, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        let mut pairs = Vec::new();
+        for i in 0..b.len() as u32 {
+            for j in (i + 1)..b.len() as u32 {
+                pairs.push((i, j));
+            }
+        }
+        let mut out = Vec::new();
+        np.collide(
+            &b,
+            &pairs,
+            &[],
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &SerialJobSystem,
+        );
+        assert!(!out.is_empty(), "外壳 × 圆柱应有接触（此前为静默无接触）");
+        let m = &out[0];
+        assert!(m.normal.y.abs() > 0.99, "法线应竖直，实得 {:?}", m.normal);
+        let dmax = m.points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+        assert!(dmax > 0.0, "应有正压入，实得 {dmax}");
     }
 
     /// 圆锥 × 盒地板（坐底）：底圆盘多面化 ⇒ 应给出**多点**支撑（单点会晃）、法线竖直、
