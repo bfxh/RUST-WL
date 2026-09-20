@@ -194,6 +194,27 @@ fn summary_vxl(w: &World, ids: &[usize]) -> Sum {
     }
 }
 
+/// 超阈分解（仅线性 / 仅角速 / 双超 / 总数；阈值 4 cm/s、0.05 rad/s）。
+///
+/// **为什么要按 50 tick 采样**（2026-09-20 教训）：塔的 KE 在 tick ~150 后就进入
+/// 平台（均值 102.5 J、σ 9.2 J ⇒ 自然波动带 ±18%），"超阈体数"同属一个平台；
+/// 只在**末态**打一次，会把波动读成趋势——档里"300→600 不降反增 ⇒ 稳态增长"
+/// 与复测 1200 tick 的"181 ⇒ 衰减"都是这么读出来的。趋势与波动只能靠时程分。
+fn over_threshold(w: &World, ids: &[usize]) -> (usize, usize, usize, usize) {
+    let (mut only_lin, mut only_ang, mut both) = (0usize, 0usize, 0usize);
+    for &i in ids {
+        let l = w.bodies.linvel[i].length() >= 0.04;
+        let a = w.bodies.angvel(i).length() >= 0.05;
+        match (l, a) {
+            (true, true) => both += 1,
+            (true, false) => only_lin += 1,
+            (false, true) => only_ang += 1,
+            (false, false) => {}
+        }
+    }
+    (only_lin, only_ang, both, ids.len())
+}
+
 fn summary_rapier(w: &PhysicsWorld, hs: &[RigidBodyHandle]) -> Sum {
     let (mut vmax, mut ke, mut sleeping) = (0.0f32, 0.0f32, 0usize);
     let (mut ymin, mut ymax) = (f32::MAX, f32::MIN);
@@ -271,7 +292,7 @@ fn main() {
         s.side,
         vids.len()
     );
-    println!("tick | 引擎 | |v|max | KE(J) | 入睡 | 最深 | y 带");
+    println!("tick | 引擎 | |v|max | KE(J) | 入睡 | 最深 | y 带 | 超阈(仅 vxl：线/角/双)");
     // 转储头：magic + 每帧 tick 数 + 盒半长（场景统一 0.5）
     let mut dump: Option<std::io::BufWriter<std::fs::File>> = match &dump_path {
         Some(dp) => {
@@ -346,8 +367,10 @@ fn main() {
         if t % 50 == 0 || t == ticks {
             let a = summary_vxl(&vw, &vids);
             let b = summary_rapier(&rw, &rhs);
+            // 超阈分解随行打印 ⇒ 趋势/波动一眼可分（见 `over_threshold` 注）。
+            let (ol, oa, ob, _) = over_threshold(&vw, &vids);
             println!(
-                "{t:4} | vxl    | {:7.3} | {:9.1} | {:5} | {:5.3} | [{:.2},{:.2}]",
+                "{t:4} | vxl    | {:7.3} | {:9.1} | {:5} | {:5.3} | [{:.2},{:.2}] | 超阈 线{ol} 角{oa} 双{ob}",
                 a.vmax, a.ke, a.sleeping, a.deep, a.ymin, a.ymax
             );
             println!(
@@ -433,12 +456,12 @@ fn main() {
             vp.x, vp.y, vp.z, rp.x, rp.y, rp.z
         );
     }
-        {
+    {
         if let Some(f) = dump.as_mut() {
-        use std::io::Write as _;
-        f.flush().unwrap();
-    }
-    let timed = ticks as f64;
+            use std::io::Write as _;
+            f.flush().unwrap();
+        }
+        let timed = ticks as f64;
         let v_ms = vxl_ns as f64 / timed / 1e6;
         let r_ms = rapier_ns as f64 / timed / 1e6;
         let v_act = vxl_active.max(1) as f64;
@@ -461,20 +484,15 @@ fn main() {
             vids.len()
         );
     }
-println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
+    println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
     // 嗡振画像：超阈分解（线性/角速分别）+ 最活跃体明细（含层高）。
-    let (mut only_lin, mut only_ang, mut both, mut clean) = (0, 0, 0, 0);
+    // 计数复用 `over_threshold`（与 50 tick 随行打印**同源** ⇒ 两处不会漂开）。
+    let (only_lin, only_ang, both, ntot) = over_threshold(&vw, &vids);
+    let clean = ntot - only_lin - only_ang - both;
     let mut top: Vec<(usize, f32, f32, f32)> = Vec::new();
     for &i in &vids {
         let v = vw.bodies.linvel[i].length();
         let w = vw.bodies.angvel(i).length();
-        let (l, a) = (v >= 0.04, w >= 0.05);
-        match (l, a) {
-            (true, true) => both += 1,
-            (true, false) => only_lin += 1,
-            (false, true) => only_ang += 1,
-            (false, false) => clean += 1,
-        }
         top.push((i, v, w, vw.bodies.position[i].y));
     }
     println!(
