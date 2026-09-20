@@ -1188,6 +1188,55 @@ impl DefaultNarrowPhase {
         }
     }
 
+    /// **胶囊中心线 ↔ 凸体**：中心线取最近点后复用球的解析路径（`sphere_convex_ab`）。
+    /// 返回 `(中心线最近点, 对方表面点)`；无接触返回 `None`。
+    ///
+    /// 为什么不用 GJK/EPA（`EXPERIMENTS.md` R.1/R.2 两次实测）：EPA 对**光滑**支撑不适定
+    /// （临界接触给 45° 假法线 + 42 m 假深度）；"收成芯再跑 GJK"又踩 GJK 的**面平局**退化
+    /// （盒顶面对 ±Y 时支撑解到角点 + 无进展提前退出，实测 `d=7.077 / p_other=(5,0,5)`）。
+    /// 解析最近点两条坑都不碰。
+    ///
+    /// 采样点为什么就是段上最近点：点到**凸**集的距离沿线段是凸函数 ⇒ 迭代
+    /// `q ← 体上最近点(p)`、`p ← 段上最近点(q)` 的驻点即全局最近点对，且距离单调不增。
+    fn capsule_axis_reach(
+        &mut self,
+        s0: Vec3,
+        s1: Vec3,
+        radius: f32,
+        other: &Shape,
+        opos: Vec3,
+        orot: Quat,
+    ) -> Option<(Vec3, Vec3)> {
+        let idx = self.poly_for(other)?;
+        self.poly_b.fill(&self.polys[idx], opos, orot);
+        let seg = s1 - s0;
+        let seg_len2 = seg.length_squared();
+        let mut p = (s0 + s1) * 0.5;
+        for _ in 0..4 {
+            let (q, _d2, inside, in_n) = closest_point_on_poly(&self.poly_b, p);
+            // 内部时同样把 q 拉到"朝最近面"的表面上，迭代方向才有效。
+            let q = if inside {
+                p + in_n * -max_plane_d_of(&self.poly_b, p)
+            } else {
+                q
+            };
+            let t = if seg_len2 > 1e-18 {
+                ((q - s0).dot(seg) / seg_len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let p_new = s0 + seg * t;
+            let done = (p_new - p).length_squared() <= 1e-12;
+            p = p_new;
+            if done {
+                break;
+            }
+        }
+        // 采样点交给球的解析路径（其内部会再填一次 `poly_b`，成本可接受）。
+        let (_n, _depth, surf) = self.sphere_convex_ab(p, radius, other, opos, orot)?;
+        Some((p, surf))
+    }
+
     /// **胶囊体 × 凸体：GJK 距离**。返回 `(n_cap→other, dist, p_cap, p_other)`；
     /// 线段与对方重叠（`Intersecting`）时改用 EPA 求穿透法线（返回 `dist = -depth`）。
     ///
@@ -1822,29 +1871,41 @@ impl DefaultNarrowPhase {
                 },
                 _,
             ) => {
-                let cap = gjk::CapsuleSupport {
-                    half_height,
-                    radius,
-                    pos: pa,
-                    rot: Mat3::from_quat(ra),
+                let axis = Mat3::from_quat(ra).mul_vec3(Vec3::Y);
+                // 凸体对方走**解析最近点**（`EXPERIMENTS.md` R.2）；对方不是多面体（胶囊/球）
+                // 时退回 GJK 距离老路。两条路都给出对方**表面点** `p_other`。
+                let (n_raw, p_other) = if self.poly_for(sb).is_some() {
+                    let Some((p_sample, surf)) = self.capsule_axis_reach(
+                        pa - axis * half_height,
+                        pa + axis * half_height,
+                        radius,
+                        sb,
+                        pb,
+                        rb,
+                    ) else {
+                        return;
+                    };
+                    (p_sample - surf, surf)
+                } else {
+                    let cap = gjk::CapsuleSupport {
+                        half_height,
+                        radius,
+                        pos: pa,
+                        rot: Mat3::from_quat(ra),
+                    };
+                    // 借用作用域：`support_of` 借 `self.hulls` ⇒ 先把结论算成局部值。
+                    let reach = match self.support_of(sb, pb, rb) {
+                        Some(other) => Self::capsule_reach(&cap, &other),
+                        None => None,
+                    };
+                    let Some((_n, _dist, p_cap, p_other)) = reach else {
+                        return;
+                    };
+                    (p_other - p_cap, p_other)
                 };
-                // 借用作用域：`support_of` 借 `self.hulls` ⇒ 先把结论算成局部值。
-                let (reach, plane) = match self.support_of(sb, pb, rb) {
-                    Some(other) => {
-                        let r = Self::capsule_reach(&cap, &other);
-                        // 对方**朝向胶囊那一侧**的表面沿 n 的偏移（胶囊在 a ⇒ 朝
-                        // −n 侧）。与外壳路径同款取支撑平面，只取平面常数。
-                        let pl = r.map(|(n, _, _, _)| n.dot(gjk::Support::support(&other, -n)));
-                        (r, pl)
-                    }
-                    None => (None, None),
-                };
-                let (Some((_n, _dist, p_cap, p_other)), Some(plane)) = (reach, plane) else {
-                    return;
-                };
-                // 法线 a→b：胶囊在 a ⇒ 由胶囊指向对方。**穿透时 GJK 见证点会换序**
-                // （`point_b − point_a` 的符号翻转）⇒ 一律用两体中心定号。
-                let mut n_ab = p_other - p_cap;
+                // 法线 a→b：初始符号不重要——**一律用两体中心定号**（GJK 穿透时见证点会换序，
+                // 这正是要抹平的不确定性）。
+                let mut n_ab = n_raw;
                 if n_ab.length_squared() < 1e-18 {
                     n_ab = pb - pa;
                 }
@@ -1855,19 +1916,22 @@ impl DefaultNarrowPhase {
                 if n_ab.dot(pb - pa) < 0.0 {
                     n_ab = -n_ab;
                 }
-                let axis = Mat3::from_quat(ra).mul_vec3(Vec3::Y);
+                // 压入量用**见证点平面**（对方表面点沿 n 的投影），不是对方的支撑平面：大盒配
+                // 微倾法线时支撑平面会给出数十米偏移（R.1 实测的 42 m）。两条路的 `p_other`
+                // 都是真表面点，此式统一适用。
+                let plane = n_ab.dot(p_other);
                 let mut local: Vec<ContactPoint> = Vec::with_capacity(2);
-                for (i, s) in [pa - axis * cap.half_height, pa + axis * cap.half_height]
+                for (i, s) in [pa - axis * half_height, pa + axis * half_height]
                     .into_iter()
                     .enumerate()
                 {
                     // 该端帽压入量（n 由胶囊指向对方）：`n·端点 + radius − plane`；
                     // 平面取对方朝胶囊那侧，故压入为正。
-                    let depth = n_ab.dot(s) + cap.radius - plane;
+                    let depth = n_ab.dot(s) + radius - plane;
                     if depth > -self.skin {
                         local.push(ContactPoint {
                             // 接触点 = 朝向对方那侧的帽面（+n 侧）。
-                            point: s + n_ab * cap.radius,
+                            point: s + n_ab * radius,
                             depth,
                             feature: i as u32 + 1,
                         });
@@ -1895,26 +1959,38 @@ impl DefaultNarrowPhase {
                     radius,
                 },
             ) => {
-                let cap = gjk::CapsuleSupport {
-                    half_height,
-                    radius,
-                    pos: pb,
-                    rot: Mat3::from_quat(rb),
+                let axis = Mat3::from_quat(rb).mul_vec3(Vec3::Y);
+                // 同臂 1：凸体对方走解析最近点，非多面体（胶囊/球）退回 GJK 老路。
+                let (n_raw, p_other) = if self.poly_for(sa).is_some() {
+                    let Some((p_sample, surf)) = self.capsule_axis_reach(
+                        pb - axis * half_height,
+                        pb + axis * half_height,
+                        radius,
+                        sa,
+                        pa,
+                        ra,
+                    ) else {
+                        return;
+                    };
+                    (surf - p_sample, surf)
+                } else {
+                    let cap = gjk::CapsuleSupport {
+                        half_height,
+                        radius,
+                        pos: pb,
+                        rot: Mat3::from_quat(rb),
+                    };
+                    let reach = match self.support_of(sa, pa, ra) {
+                        Some(other) => Self::capsule_reach(&cap, &other),
+                        None => None,
+                    };
+                    let Some((_n, _dist, p_cap, p_other)) = reach else {
+                        return;
+                    };
+                    (p_cap - p_other, p_other)
                 };
-                let (reach, plane) = match self.support_of(sa, pa, ra) {
-                    Some(other) => {
-                        let r = Self::capsule_reach(&cap, &other);
-                        // 对方**朝向胶囊那一侧**的表面沿 n 的偏移（胶囊在 b ⇒ 朝 +n 侧）。
-                        let pl = r.map(|(n, _, _, _)| n.dot(gjk::Support::support(&other, n)));
-                        (r, pl)
-                    }
-                    None => (None, None),
-                };
-                let (Some((_n, _dist, p_cap, p_other)), Some(plane)) = (reach, plane) else {
-                    return;
-                };
-                // 法线 a→b：胶囊在 b ⇒ 由对方指向胶囊（同上：中心定号，别信见证点序）。
-                let mut n_ab = p_cap - p_other;
+                // 法线 a→b：初始符号不重要（同上：中心定号，别信见证点序）。
+                let mut n_ab = n_raw;
                 if n_ab.length_squared() < 1e-18 {
                     n_ab = pb - pa;
                 }
@@ -1925,18 +2001,19 @@ impl DefaultNarrowPhase {
                 if n_ab.dot(pb - pa) < 0.0 {
                     n_ab = -n_ab;
                 }
-                let axis = Mat3::from_quat(rb).mul_vec3(Vec3::Y);
+                // 压入量用见证点平面（理由同臂 1）。
+                let plane = n_ab.dot(p_other);
                 let mut local: Vec<ContactPoint> = Vec::with_capacity(2);
-                for (i, s) in [pb - axis * cap.half_height, pb + axis * cap.half_height]
+                for (i, s) in [pb - axis * half_height, pb + axis * half_height]
                     .into_iter()
                     .enumerate()
                 {
                     // 该端帽压入量（n 由对方指向胶囊）：`plane − (n·端点 − radius)`。
-                    let depth = plane - (n_ab.dot(s) - cap.radius);
+                    let depth = plane - (n_ab.dot(s) - radius);
                     if depth > -self.skin {
                         local.push(ContactPoint {
                             // 接触点 = 朝向对方那侧的帽面（−n 侧）。
-                            point: s - n_ab * cap.radius,
+                            point: s - n_ab * radius,
                             depth,
                             feature: i as u32 + 1,
                         });
