@@ -133,6 +133,10 @@ fn sat_scan_sse2(
         let mut sep_arr = [0f32; 4];
         let flags: i32; // bit k: 1 = 该 lane 用 −n（sep2 更大；下面 unsafe 块内赋值）
         let degen: i32; // bit k: 1 = 该 lane 退化（标量侧 continue）
+        // SAFETY: 本块（含内部 `dot_lane`）只调用 x86_64 基线 SSE2 内建——函数在
+        // `#[cfg(target_arch = "x86_64")]` 下编译，故无需运行时特性探测；`_mm_loadu_ps`
+        // 的输入是上方长度为 4 的本地 `f32` 数组（未对齐读 16 字节仍在界内），其余内建
+        // 只消费 `__m128` 寄存器值：无裸指针运算、无生命周期擦除、无别名假设。
         unsafe {
             let nx = _mm_loadu_ps(cx.as_ptr());
             let ny = _mm_loadu_ps(cy.as_ptr());
