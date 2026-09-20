@@ -368,6 +368,25 @@ fn main() {
             bsame,
             100.0 * bsame as f64 / bt,
         );
+        let (nf, ns) = vxl_phys_solver::warm_normal_flip_take();
+        let nt = (nf + ns).max(1) as f64;
+        println!(
+            "== 参考面代理（占回退命中）：接触法向变化 {}（{:.1}%） 法向不变 {}（{:.1}%）——变化⇒换参考面，不变⇒同面换裁剪侧平面",
+            nf,
+            100.0 * nf as f64 / nt,
+            ns,
+            100.0 * ns as f64 / nt,
+        );
+        let (pts, sep, spec, bias) = vxl_phys_solver::solve_accounting_take();
+        println!(
+            "== 解算记账（累计）：点 {:.0} 万，其中分离点 {:.1}%（吃 spec），spec 和 {:.0}、bias 和 {:.0}（×1000，均值 {:.2}/{:.2}）",
+            pts as f64 / 1e4,
+            100.0 * sep as f64 / pts.max(1) as f64,
+            spec as f64 / 1e3,
+            bias as f64 / 1e3,
+            spec as f64 / 1e3 / pts.max(1) as f64,
+            bias as f64 / 1e3 / pts.max(1) as f64,
+        );
     }
     {
         let worst = flips.iter().copied().max().unwrap_or(0);

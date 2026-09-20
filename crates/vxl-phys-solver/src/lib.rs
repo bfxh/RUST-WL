@@ -92,6 +92,22 @@ static WB_CLIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 static WB_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WB_SAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **参考面变化的代理**（诊断；只计数）：匹配上的点里，"接触法向变了"（`dot < 0.99999`）
+/// 与"法向几乎不变"各占多少。
+///
+/// 用途（A6 参考面稳定性）：`feature` 的哈希部分 = `入射棱对 × 参考侧平面 k`
+/// （`k = ref_base + k'`）。**换参考面**（`ref_base` 变）通常伴随法向改变；而在**同一面内**
+/// 换裁剪侧平面（`k'` 变）则法向不变、只有哈希变 ⇒ 用"法向是否变"即可把 K.1 的
+/// "哈希变 55.9%" 拆成「换面」与「同面换裁剪面」两块。
+static WN_FLIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static WN_SAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取并清零参考面代理计数：`(法向变了, 法向几乎不变)`。
+pub fn warm_normal_flip_take() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (WN_FLIP.swap(0, Relaxed), WN_SAME.swap(0, Relaxed))
+}
+
 /// 读取并清零回退成因分解：`(侧别翻转, 裁剪路变化, 哈希变化, 特征相同)`。
 pub fn warm_fallback_kind_take() -> (u64, u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -113,8 +129,29 @@ pub fn warm_match_stats_take() -> (u64, u64, u64) {
     )
 }
 
-/// 回退匹配的**接触状态门**（米）：只有本帧裁剪深度 > 此阈值的回退匹配才允许
-/// 暖启动——**分离/预期接触（depth ≤ 0）拒配**（按新接触处理，暖冲量清零、
+/// **解算记账**（诊断；只计数）：点总数 / 其中分离点（`depth < 0`，吃 spec 额度）数 /
+/// `spec` 之和 ×1000 / `bias` 之和 ×1000。
+///
+/// 用途（`EXPERIMENTS.md` 末节 N/P 的复用余价）：判定"复用是否让去穿透/闭合额度被
+/// **重复发放**"——复用下几何冻结，若同一份 `sep` 被逐子步当额度发出去，就是系统性的
+/// 能量注入；"每子步 spec 之和"与"每子步 bias 之和"在复用开关下的对比即可判。
+static DA_PTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DA_SEP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DA_SPEC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DA_BIAS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 读取并清零解算记账：`(点总数, 分离点数, spec 和 ×1000, bias 和 ×1000)`。
+pub fn solve_accounting_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        DA_PTS.swap(0, Relaxed),
+        DA_SEP.swap(0, Relaxed),
+        DA_SPEC.swap(0, Relaxed),
+        DA_BIAS.swap(0, Relaxed),
+    )
+}
+
+/// 回退匹配的**接触状态门**（米）：只有本帧裁剪深度 > 此阈值的回退匹配才允许/// 暖启动——**分离/预期接触（depth ≤ 0）拒配**（按新接触处理，暖冲量清零、
 /// 锚点重烘焙）。依据：错配锚点的暖冲量会过驱动「间歇角点接触」（125 体族的
 /// 触发画像 = 留缝角点间歇接触，见 OPEN-PROBLEMS P1）；而塔的承重腿是持续
 /// 正深度接触、不受影响。**非距离判别式**（距离类门已实测分不开有害/必需匹配）。
@@ -1051,6 +1088,12 @@ fn build_constraint(
                     if let Some(w) = warm_pt {
                         use std::sync::atomic::Ordering::Relaxed;
                         WARM_FALLBACK.fetch_add(1, Relaxed);
+                        // 参考面代理：法向是否变（见 `warm_normal_flip_take` 注）。
+                        if wm.normal.dot(m.normal) < 0.99999 {
+                            WN_FLIP.fetch_add(1, Relaxed);
+                        } else {
+                            WN_SAME.fetch_add(1, Relaxed);
+                        }
                         // 成因分解（诊断，只计数）：见 `vxl_phys_narrow::feature_kind` 注。
                         let (s_new, c_new) = vxl_phys_narrow::feature_kind(cp.feature);
                         let (s_old, c_old) = vxl_phys_narrow::feature_kind(w.feature);
@@ -1170,6 +1213,16 @@ fn build_constraint(
         };
         let pen = (depth - sp.slop).max(0.0);
         let bias = (erp_inv_dt * pen).min(sp.max_corr);
+        // 诊断记账（只计数，不改行为；见 `solve_accounting_take`）。
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            DA_PTS.fetch_add(1, Relaxed);
+            if depth < 0.0 {
+                DA_SEP.fetch_add(1, Relaxed);
+            }
+            DA_SPEC.fetch_add((spec.max(0.0) * 1000.0) as u64, Relaxed);
+            DA_BIAS.fetch_add((bias * 1000.0) as u64, Relaxed);
+        }
         let rhs = bias - spec + bounce;
         // 正则化：穿透接触 cfm=1（硬投影，支撑刚性）；speculative 接触 cfm<1
         // （等效柔度 ω/ζ，限制迭代增益，深堆不依赖跨层链收敛——金样定标结论）。
