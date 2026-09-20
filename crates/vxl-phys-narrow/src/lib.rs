@@ -61,6 +61,11 @@ pub(crate) fn feat_intersect(fa: u32, fb: u32, k: usize) -> u32 {
 pub struct ContactPoints {
     buf: [ContactPoint; 4],
     len: u8,
+    /// **特征空间**：复合体子形状序号 + 1（非复合体恒 0）。求解器用它区分**同一体对**上的
+    /// 多条流形（复合体每个子形状一条）。**不借 `feature` 的任何位**——窄相特征号的高位被
+    /// "侧别/裁剪路/哈希"编码占用，哈希逐帧漂移 ⇒ 借用会让普通场景暖启动随机失效（实测见
+    /// `TECH-SURVEY.md` A9 ④ 的那次回退）。
+    space: u16,
 }
 
 impl ContactPoints {
@@ -80,6 +85,16 @@ impl ContactPoints {
     /// 可变逐点视图（窄相内部用：复合体要给特征号并入子形状序号）。
     pub fn as_mut_slice(&mut self) -> &mut [ContactPoint] {
         &mut self.buf[..self.len as usize]
+    }
+
+    /// 特征空间（复合体子形状序号 + 1；非复合体恒 0）。
+    pub fn space(&self) -> u16 {
+        self.space
+    }
+
+    /// 设特征空间（窄相复合体展开时按子序号填；求解器读它做 warm 键的第三维）。
+    pub fn set_space(&mut self, s: u16) {
+        self.space = s;
     }
 }
 
@@ -538,6 +553,8 @@ impl CompoundStore {
 fn tag_child_features(ms: &mut [Manifold], ci: usize) {
     let tag = ((ci as u32) + 1) << 16;
     for m in ms.iter_mut() {
+        // **显式空间通道**（求解器 warm 键的第三维）：不借 `feature` 的位（高位是编码/哈希）。
+        m.points.set_space((ci + 1) as u16);
         for p in m.points.as_mut_slice() {
             p.feature = if p.feature == 0 { tag } else { p.feature | tag };
         }

@@ -9,20 +9,23 @@
 //! （更早的"只有串行构建器计数"归因**已被推翻**：`build_constraint` 只有一个调用点，
 //! 就在并行驱动内。）
 //!
-//! **修法**（试做过一版并**回退**，见 `TECH-SURVEY.md` A9 ④）：给流形加**显式的空间通道**
-//! （如 `Manifold.child: u16`，窄相填、求解器直接读）。⚠️ **不能**用 `feature >> 16` 当键的
-//! 空间——窄相特征号的高位不空闲（裁剪路径是**哈希**，"侧别/裁剪路/哈希"编码用高位）⇒ 空间随
-//! 几何逐帧漂移 ⇒ 普通场景暖启动被随机打掉（实测：`default_tier_stability` 的 `top_y`
-//! 2.7223 → 2.725223）。改完解禁本测试：`exact` 应从 0 变为"每条流形都精确命中"，
-//! 且 `default_tier_stability` 四个冻结读数必须逐位不变。
+//! ✅ **已修复（2026-09-20）**：暖启动键的第三维 = **显式特征空间**（`ContactPoints::space()`，
+//! 窄相复合体展开时按子形状序号填；非复合体恒 0）⇒ 同体对两条流形不再相互覆盖。
+//! 读数：本场景由 `(0, 0, 0)` 变为 `(4, 0, 0)`（4 tick × 2 子步 × 2 流形各 1 点）；
+//! 对照探针 `warm_counter_probe` 保持 `(32, 0, 0)`；`default_tier_stability` 四个冻结读数
+//! **逐位不变**（非复合体键退化为 `(a, b, 0)`）。
+//!
+//! ⚠️ **不要**用 `feature` 的高位当空间：窄相特征号高位被"侧别/裁剪路/哈希"编码占用，哈希逐帧
+//! 漂移 ⇒ 普通场景暖启动随机失效（实测 `default_tier_stability` 的 top_y 漂 3 mm，已回退）。
+//! 详见 `TECH-SURVEY.md` A9 ④。
 
 use vxl_phys::{
     warm_match_stats_take, CompoundChild, FrictionModel, Material, PhysConfig, Quat, Shape, Vec3,
     World,
 };
 
-/// 见文件头：同体对两流形的暖缓存失效（键相同 ⇒ 相互覆盖）未修前本测试不可用。
-#[ignore = "已知缺陷：同体对两条流形令该对暖缓存整条失效（计数全 0）；见文件头与 TECH-SURVEY A9 ④"]
+/// 回归门（2026-09-20 解除 ignore）：暖启动键已带**显式特征空间**（`ContactPoints::space()`，
+/// 窄相复合体展开时按子形状序号填）⇒ 同体对两条流形不再相互覆盖。
 #[test]
 fn compound_contacts_get_exact_warm_matches() {
     let mut w = World::new(PhysConfig::default());
@@ -71,20 +74,16 @@ fn compound_contacts_get_exact_warm_matches() {
     }
     assert!(contact_ticks >= 3, "复合体应在 80 tick 内落地并保持接触");
     // 清掉落地阶段的计数，只量"稳定接触"这几 tick 的匹配分支。
+    // 注：`warm_match_stats_take()` **会清零** ⇒ 循环里不能再调它（否则最后读到的总是 0；
+    // 本文件先前正是踩了这条，读数被诊断打印吃掉，误判成"全 0"）。
     let _ = warm_match_stats_take();
-    for t in 0..4 {
+    for _ in 0..4 {
         w.step();
-        let awake = (0..w.bodies.len()).filter(|&i| w.bodies.awake[i]).count();
-        println!(
-            "t={t} 流形={} 清醒体={awake} 计数={:?}",
-            w.manifolds().len(),
-            warm_match_stats_take()
-        );
     }
     let (exact, fallback, unmatched) = warm_match_stats_take();
     assert!(
         exact > 0,
-        "复合体接触应拿到**精确特征**暖启动命中（子序号标记生效），实得 exact={exact} \
-         fallback={fallback} unmatched={unmatched}"
+        "复合体接触应拿到**精确特征**暖启动命中（子序号标记 + 显式空间通道生效），实得 \
+         exact={exact} fallback={fallback} unmatched={unmatched}"
     );
 }

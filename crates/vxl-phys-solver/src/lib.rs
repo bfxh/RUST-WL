@@ -193,11 +193,23 @@ impl WarmManifold {
     }
 }
 
+/// **warm 缓存键**：`(体 a, 体 b, 特征空间)`。
+///
+/// 特征空间来自 `ContactPoints::space()`（**显式通道**，窄相复合体展开时按子形状序号填；
+/// 非复合体恒 0）。**为什么必须有它**：同一体对会同时存在多条流形（复合体每个子形状一条），
+/// 共用 `(a, b)` 键会相互覆盖 ⇒ 该对的暖缓存**整条失效**（实测 `warm_counter_probe`：
+/// 两球复合体计数全 0，单子形状复合体 32）。非复合体场景空间恒为 0 ⇒ 键退化为 `(a, b, 0)`。
+///
+/// ⚠️ **不要**改用 `feature` 的高位当空间：窄相特征号高位被"侧别/裁剪路/哈希"编码占用，
+/// 哈希逐帧漂移 ⇒ 普通场景暖启动会随机失效（实测 `default_tier_stability` 的 top_y 漂 3 mm，
+/// 见 `TECH-SURVEY.md` A9 ④）。
+type WarmKey = (u32, u32, u32);
+
 /// 死槽键（槽位表空洞哨兵）。
-const DEAD_KEY: (u32, u32) = (u32::MAX, u32::MAX);
+const DEAD_KEY: WarmKey = (u32::MAX, u32::MAX, u32::MAX);
 
 /// warm 回写条目：(槽号（`u32::MAX` = 新键）, 键, 数据)。
-type WarmOutEntry = (u32, (u32, u32), WarmManifold);
+type WarmOutEntry = (u32, WarmKey, WarmManifold);
 
 use vxl_phys_core::Vec3;
 
@@ -295,6 +307,8 @@ struct ContactConstraint {
     normal: Vec3,
     /// warm 槽号（`u32::MAX` = 本 tick 新接触；回写按此**原位写**，零哈希）。
     warm_slot: u32,
+    /// warm 键的**特征空间**（`ContactPoints::space()`；非复合体恒 0）——回写键 = `(a, b, space)`。
+    warm_space: u32,
     /// 点数据**定长内联**（流形点 ≤4，窄相已截断）：`Vec<PointConstraint>` 时
     /// 每流形一次 `with_capacity(4)` 堆分配 + 释放——金字塔实测每帧 1140 次
     /// （570 流形 × 2 子步），是构建相位的固定开销之一。内联后零堆。
@@ -309,11 +323,11 @@ struct ContactConstraint {
 pub struct ImpulseSolver {
     /// **warm 槽位表（稠密）**：(键, 数据) 连续存储；回写按槽号原位写、
     /// 剪枝对稠密槽单遍扫——`HashMap` 桶遍历曾是 33.5ms/tick 的大头（DESIGN §11）。
-    warm_slots: Vec<((u32, u32), WarmManifold)>,
+    warm_slots: Vec<(WarmKey, WarmManifold)>,
     /// 空闲槽号（LIFO 复用，避免周期压实）。
     warm_free: Vec<u32>,
     /// 键 → 槽号（查找用；只在查找/分配时触达）。
-    warm_index: HashMap<(u32, u32), u32>,
+    warm_index: HashMap<WarmKey, u32>,
     /// 求解印章（自增）。
     warm_stamp: u32,
     /// **世界逆惯量矩阵缓存（按组紧凑）**：`M = R·diag(inv_local)·Rᵀ`，一帧内姿态
@@ -729,8 +743,8 @@ impl ImpulseSolver {
             let bodies_ref: &BodySet = bodies;
             let awake_ref: &[usize] = &awake;
             let islands_ref: &[Island] = islands;
-            let warm_index_ref: &HashMap<(u32, u32), u32> = &warm_index;
-            let warm_slots_ref: &[((u32, u32), WarmManifold)] = &warm_slots;
+            let warm_index_ref: &HashMap<WarmKey, u32> = &warm_index;
+            let warm_slots_ref: &[(WarmKey, WarmManifold)] = &warm_slots;
             let local_ref: &[u32] = &local_of;
             let iw_ref: &[Vec<Mat3>] = &group_iw;
             let im_ref: &[Vec<f32>] = &group_im;
@@ -871,7 +885,7 @@ impl ImpulseSolver {
         } else {
             // 稠密单遍剪枝（顺序访存）。
             for (i, (key, v)) in warm_slots.iter_mut().enumerate() {
-                let (a, b) = *key;
+                let (a, b, _space) = *key;
                 if a == u32::MAX {
                     continue; // 已是空洞
                 }
@@ -960,8 +974,8 @@ fn build_constraint(
     out: &mut Vec<ContactConstraint>,
     m: &Manifold,
     bodies: &BodySet,
-    warm_index: &HashMap<(u32, u32), u32>,
-    warm_slots: &[((u32, u32), WarmManifold)],
+    warm_index: &HashMap<WarmKey, u32>,
+    warm_slots: &[(WarmKey, WarmManifold)],
     match_dist: f32,
     e_threshold: f32,
     sp: &SolverParams,
@@ -1012,7 +1026,15 @@ fn build_constraint(
     };
 
     // 槽位表查找：索引给槽号，数据在稠密槽位里（回写按槽号原位写）。
-    let warm_slot = warm_index.get(&(m.a, m.b)).copied().unwrap_or(u32::MAX);
+    //
+    // **键的第三维 = 特征空间**（`ContactPoints::space()`，**显式通道**）：同一体对会同时有多条
+    // 流形（复合体每个子形状一条），共用 `(a, b)` 键会相互覆盖 ⇒ 该对暖缓存整条失效。
+    // 非复合体恒 0 ⇒ 键退化为 `(a, b, 0)`。
+    let warm_space = m.points.space() as u32;
+    let warm_slot = warm_index
+        .get(&(m.a, m.b, warm_space))
+        .copied()
+        .unwrap_or(u32::MAX);
     let warmm = if warm_slot == u32::MAX {
         None
     } else {
@@ -1277,6 +1299,7 @@ fn build_constraint(
         b: m.b,
         normal: m.normal,
         warm_slot,
+        warm_space,
         points: pts,
         npts,
     });
@@ -1431,8 +1454,8 @@ fn solve_island_group(
     islands: &[Island],
     manifolds: &[Manifold],
     bodies: &BodySet,
-    warm_index: &HashMap<(u32, u32), u32>,
-    warm_slots: &[((u32, u32), WarmManifold)],
+    warm_index: &HashMap<WarmKey, u32>,
+    warm_slots: &[(WarmKey, WarmManifold)],
     local_of: &[u32],
     iw: &[Mat3],
     im: &[f32],
@@ -1568,7 +1591,7 @@ fn solve_island_group(
                     depth0: p.depth0,
                 };
             }
-            warm_out.push((c.warm_slot, (c.a, c.b), wm));
+            warm_out.push((c.warm_slot, (c.a, c.b, c.warm_space), wm));
         }
     }
 }
