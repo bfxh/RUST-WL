@@ -1553,6 +1553,40 @@ impl DefaultNarrowPhase {
         self.select_contacts(self.min_point_sep)
     }
 
+    /// 胶囊 × 高度场：**沿中心线取 N 个样本**，每个样本按半径 r 的球处理
+    /// （候选点 `depth = h − y + r`、接触点 `(x, h, z)`、法线取地形法线）。
+    /// 覆盖：两端 + 等分中间点（平躺胶囊靠两端、竖直靠底端；`select_contacts` 取最深 ≤4）。
+    /// `feature = 样本序号 + 1`（等分序稳定 ⇒ 跨帧可续接）。
+    fn capsule_heightfield(
+        &mut self,
+        seg_a: Vec3,
+        seg_b: Vec3,
+        radius: f32,
+        hf: &HeightField,
+    ) -> bool {
+        const SAMPLES: u32 = 5;
+        self.cand.clear();
+        let denom = (SAMPLES - 1) as f32;
+        for k in 0..SAMPLES {
+            let t = k as f32 / denom;
+            let s = seg_a + (seg_b - seg_a) * t;
+            if let Some((hgt, _)) = hf.sample(s.x, s.z) {
+                let depth = hgt - s.y + radius;
+                if depth > -self.skin {
+                    self.cand.push(ContactPoint {
+                        point: Vec3::new(s.x, hgt, s.z),
+                        depth,
+                        feature: k + 1,
+                    });
+                }
+            }
+        }
+        if self.cand.is_empty() {
+            return false;
+        }
+        self.select_contacts(self.min_point_sep)
+    }
+
     /// 外壳 × 高度场：**逐顶点采样**（与 `poly_heightfield` 同款，只是顶点来自外壳点云）。
     /// 此前该组合**不受理**（`hull_pair` 的注："列裁剪对任意凸壳未实现"）。
     /// 特征 = 顶点序号 + 1（点云序稳定 ⇒ 跨帧可续接）。点云较密时接触点靠 `select_contacts`
@@ -1978,9 +2012,19 @@ impl DefaultNarrowPhase {
                 Shape::HeightField(_) | Shape::Provider(_) => return,
                 // 复合体已在上游按子形状展开（本臂不可达，留作穷尽性）。
                 Shape::Compound { .. } => return,
-                // 胶囊体 × 地形：**本切片暂不支持**（显式拒绝，不静默产空接触）。
-                // 后续接法：沿线段取 N 个样本调 `sphere_heightfield` 合并候选点。
-                Shape::Capsule { .. } => return,
+                // 胶囊体 × 地形：沿中心线取 N 个样本（每个样本按球处理）。
+                Shape::Capsule {
+                    half_height,
+                    radius,
+                } => {
+                    let axis = Mat3::from_quat(brot).mul_vec3(Vec3::Y);
+                    self.capsule_heightfield(
+                        bpos - axis * half_height,
+                        bpos + axis * half_height,
+                        radius,
+                        hf,
+                    )
+                }
             };
             if !ok {
                 return;
@@ -2418,6 +2462,34 @@ mod tests {
             (d - 0.01).abs() < 2e-3,
             "深度应 ≈1 cm（0.3 − 端点距 0.29），实得 {d}"
         );
+    }
+
+    /// 胶囊 × 地形：此前高度场分支**显式拒绝**本组合 ⇒ 静默无接触。
+    /// 现沿中心线取 5 个样本、每个按球处理。判据：有接触、法线竖直、压入 ≈1 cm。
+    #[test]
+    fn capsule_on_heightfield() {
+        let mut b = BodySet::new();
+        let hf = HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0);
+        // 竖直胶囊：下端点 y0 − 0.4、帽面再 −0.3 ⇒ 压入 1 cm 时 y0 = 0.69。
+        b.push_dynamic(
+            Shape::Capsule {
+                half_height: 0.4,
+                radius: 0.3,
+            },
+            Vec3::new(0.0, 0.69, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        let _marker = b.push_static(Shape::HeightField(0), Vec3::ZERO, Quat::IDENTITY);
+        let m = manifolds_for(&b, &[hf]);
+        assert!(!m.is_empty(), "竖直胶囊 × 地形应有接触（此前为静默无接触）");
+        assert!(
+            m[0].normal.y.abs() > 0.99,
+            "法线应竖直，实得 {:?}",
+            m[0].normal
+        );
+        let dmax = m[0].points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+        assert!((dmax - 0.01).abs() < 5e-3, "压入应 ≈1 cm，实得 {dmax}");
     }
 
     /// 外壳 × 地形：此前 `hull_pair` 明确不受理（"列裁剪对任意凸壳未实现"）⇒ 静默无接触。
