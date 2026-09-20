@@ -3,8 +3,8 @@ name: ci
 # 门禁分层（V2 §5 + M1 静态层）：
 #   ① 提交门（四门禁）：{测试 + clippy + fmt} × 三编译器矩阵、miri、loom、TSan、ASan；
 #   ② 静态层：文本/工作流（typos / actionlint / zizmor / 纪律扫描 / 词汇）、
-#      依赖图（cargo-deny / cargo-machete）、文档与强化 lint（rustdoc -D warnings、
-#      clippy 强化档）；
+#      依赖图（本仓依赖红线 deps_lock.py / cargo-deny / cargo-machete）、文档与强化
+#      lint（rustdoc -D warnings、clippy 强化档）；
 #   ③ 确定性层：三编译器 + aarch64 的跨平台哈希比对；
 #   ④ 报告层（不阻断）：覆盖率。
 # 汇总门 `gates-summary` 把 ①②③ 收敛成**一个状态**——Free 私有仓无「必需检查」
@@ -104,6 +104,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      # 本仓自研的依赖红线（纯 Python stdlib，无需装任何工具）：外部依赖 / 构建依赖
+      # 只准减不准加，现状与「为什么需要它」见 scripts/deps-baseline.json。
+      # 放在装工具之前——本 job 里最便宜的一步先跑。
+      - name: 依赖红线（外部依赖 / 构建依赖增量门）
+        run: python3 scripts/deps_lock.py
       - name: 安装依赖审计工具
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
