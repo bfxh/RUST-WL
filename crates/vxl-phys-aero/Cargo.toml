@@ -1,0 +1,8 @@
+[package]
+name = "vxl-phys-aero"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "vxl_phys 气动域（面元气动力，骨架，见 docs/SPEC.md §1/§4.7 同通道）"
+
+[dependencies]

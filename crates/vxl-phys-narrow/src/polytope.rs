@@ -9,7 +9,7 @@ use vxl_phys_core::Vec3;
 
 #[derive(Clone, Debug, Default)]
 pub struct ConvexPolytope {
-    /// 展开顶点：面 i 的顶点 = verts[face_start[i]..face_start[i+1]]。
+    /// 展开顶点：面 i 的顶点 = `verts[face_start[i]..face_start[i+1]]`。
     pub verts: Vec<Vec3>,
     pub face_normal: Vec<Vec3>,
     pub face_start: Vec<u32>,
@@ -133,6 +133,51 @@ impl ConvexPolytope {
         p.finish()
     }
 
+    /// **圆锥**（底面 r 在 `y = −h`、顶点在 `y = +h`）：底盖 n 边形 + n 个三角侧面
+    /// `[b_{i+1}, b_i, apex]`（此绕序给出**朝外且朝上**的法线）。
+    ///
+    /// 为什么多面化而不是解析支撑：锥侧面是**光滑**面，喂 EPA 会复现胶囊那类不适定
+    /// （`EXPERIMENTS.md` R.2）。代价是滚动时的"打摆"（与圆柱同族，`TECH-SURVEY.md` A9 记录）。
+    pub fn cone_polytope(radius: f32, half_height: f32, segments: u32) -> Self {
+        let n = segments.max(8);
+        let mut p = ConvexPolytope::default();
+        let apex = Vec3::new(0.0, half_height, 0.0);
+        let mut b: Vec<Vec3> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let th = 2.0 * core::f32::consts::PI * (i as f32) / (n as f32);
+            let (s, c) = th.sin_cos();
+            b.push(Vec3::new(radius * c, -half_height, radius * s));
+        }
+        let ni = n as i32;
+        // 底盖（外法线 −Y）：与圆柱同款，角度递增序。
+        p.face_start.push(0);
+        p.face_normal.push(-Vec3::Y);
+        for k in 0..ni {
+            p.verts.push(b[k as usize]);
+        }
+        // 侧面三角：法线用该三角的**真实面法线**（朝外 + 朝上），不是纯径向。
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let bi = b[i as usize];
+            let bj = b[j as usize];
+            let e1 = bi - bj;
+            let e2 = apex - bj;
+            let nrm = Vec3::new(
+                e1.y * e2.z - e1.z * e2.y,
+                e1.z * e2.x - e1.x * e2.z,
+                e1.x * e2.y - e1.y * e2.x,
+            )
+            .normalize();
+            p.face_start.push(p.verts.len() as u32);
+            p.face_normal.push(nrm);
+            p.verts.push(bj);
+            p.verts.push(bi);
+            p.verts.push(apex);
+        }
+        p.face_start.push(p.verts.len() as u32);
+        p.finish()
+    }
+
     pub fn face_range(&self, f: usize) -> (usize, usize) {
         (self.face_start[f] as usize, self.face_start[f + 1] as usize)
     }
@@ -171,5 +216,40 @@ mod tests {
     fn box_has_three_unique_edge_dirs() {
         let p = ConvexPolytope::box_polytope(Vec3::splat(0.5));
         assert_eq!(p.edge_dirs.len(), 3);
+    }
+
+    /// 钉板：盒多面体的面法线/棱方向「顺序 + 取向」是 SAT 的隐含契约。
+    ///
+    /// - `face_normal[0]/[2]/[4]` 必须是 +X/+Y/+Z（T3 extents 快路径按此
+    ///   下标配对 half 分量，顺序一改即静默错算）；
+    /// - SAT 严格 `>` 首次极大值平局规则依赖轴序列顺序，重排 = 全局行为变更。
+    ///
+    /// 任何重排都必须在此测试显式更新，不允许无感漂移。
+    #[test]
+    fn box_axis_order_and_orientation_is_pinned() {
+        let p = ConvexPolytope::box_polytope(Vec3::new(0.5, 1.0, 2.0));
+        let bits = |v: Vec3| [v.x.to_bits(), v.y.to_bits(), v.z.to_bits()];
+        let expect_axes = [Vec3::X, -Vec3::X, Vec3::Y, -Vec3::Y, Vec3::Z, -Vec3::Z];
+        assert_eq!(p.face_normal.len(), 6);
+        for (i, e) in expect_axes.iter().enumerate() {
+            assert_eq!(bits(p.face_normal[i]), bits(*e), "face_normal[{i}]");
+        }
+        // 棱方向：finish() 按面序首次出现去重 → [+Y, +Z, +X]（全正取向）。
+        let expect_edges = [Vec3::Y, Vec3::Z, Vec3::X];
+        assert_eq!(p.edge_dirs.len(), 3);
+        for (i, e) in expect_edges.iter().enumerate() {
+            assert_eq!(bits(p.edge_dirs[i]), bits(*e), "edge_dirs[{i}]");
+        }
+        // 盒三轴互叉必为单位轴（9 对全非退化 → SAT 棱轴数恒为 9，无跳过）。
+        for &ea in &p.edge_dirs {
+            for &eb in &p.edge_dirs {
+                let c = ea.cross(eb);
+                let l2 = c.length_squared();
+                assert!(
+                    l2 < 1e-8 || (l2 - 1.0).abs() < 1e-6,
+                    "cross {ea:?}×{eb:?} 非退化但非单位：{l2}"
+                );
+            }
+        }
     }
 }

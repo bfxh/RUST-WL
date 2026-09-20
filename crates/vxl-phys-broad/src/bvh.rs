@@ -14,6 +14,14 @@ use super::Aabb;
 
 const NULL: u32 = u32::MAX;
 
+/// 建树工作项。`key` = 当前层最长轴上的中心（每层算一次，见 `build_range`）。
+#[derive(Clone, Copy, Debug)]
+struct Work {
+    body: u32,
+    aabb: Aabb,
+    key: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BvhNode {
     aabb: Aabb,
@@ -130,7 +138,12 @@ impl DynamicBvh {
 
     #[inline]
     fn fat(&self, a: &Aabb) -> Aabb {
-        let m = Vec3::splat(self.fat_margin);
+        self.fat_with(a, self.fat_margin)
+    }
+
+    #[inline]
+    fn fat_with(&self, a: &Aabb, margin: f32) -> Aabb {
+        let m = Vec3::splat(margin);
         Aabb {
             min: a.min - m,
             max: a.max + m,
@@ -139,9 +152,14 @@ impl DynamicBvh {
 
     /// 插入叶子（体 id + 精确 AABB），返回叶子节点索引。
     pub fn insert(&mut self, body: u32, aabb: Aabb) -> u32 {
+        self.insert_fat(body, aabb, self.fat_margin)
+    }
+
+    /// 插入叶子，fat 边距显式给定（速度自适应边距用；见 `move_proxy_scaled`）。
+    pub fn insert_fat(&mut self, body: u32, aabb: Aabb, margin: f32) -> u32 {
         let leaf = self.allocate();
         self.nodes[leaf as usize] = BvhNode {
-            aabb: self.fat(&aabb),
+            aabb: self.fat_with(&aabb, margin),
             left: NULL,
             right: NULL,
             parent: NULL,
@@ -233,22 +251,41 @@ impl DynamicBvh {
         self.free_node(leaf);
     }
 
-    /// 移动代理：fat AABB 包含则保持增量（不动树），否则删除重插。
-    /// 返回（可能变化的）叶子节点索引。
+    /// 移动代理（固定边距版；见 `move_proxy_scaled`）。
     pub fn move_proxy(&mut self, leaf: u32, aabb: Aabb) -> u32 {
+        self.move_proxy_scaled(leaf, aabb, self.fat_margin).0
+    }
+
+    /// 移动代理（速度自适应边距版）：叶子已存的 fat 盒包含新精确盒 → 零结构
+    /// 操作；逃出旧 fat 盒时首选**就地生长 refit**（T2 树风暴治理：叶盒取
+    /// 旧 fat ∪ 新 fat、沿祖先 refit，无节点手术），仅当叶盒过度疏松
+    /// （周长 > 4× 目标 fat 周长）才 remove + 以 `margin` 重插收紧。
+    /// 返回（可能变化的叶子索引, 盒是否变化——查询缓存失效信号）。
+    ///
+    /// 动机（M1 宽相提速）：固定 0.02 边距下，下落体每帧位移 > 边距 → 每帧
+    /// remove+insert（10 万体规模 = 每帧数万次结构操作，实测树更新 45~70ms）。
+    /// 边距随「本帧位移·k」放大后，快速体可在其 fat 盒内连续多帧不动树；
+    /// 再叠加就地生长，逃逸路径也基本零手术（实测树 p95 56→? 见 M1-PLAN）。
+    /// 确定性：margin 只由（速度, dt）决定，纯函数，时序无关。
+    pub fn move_proxy_scaled(&mut self, leaf: u32, aabb: Aabb, margin: f32) -> (u32, bool) {
         let fat = self.nodes[leaf as usize].aabb;
-        let contains = aabb.min.x >= fat.min.x
-            && aabb.min.y >= fat.min.y
-            && aabb.min.z >= fat.min.z
-            && aabb.max.x <= fat.max.x
-            && aabb.max.y <= fat.max.y
-            && aabb.max.z <= fat.max.z;
-        if contains {
-            return leaf;
+        if fat.contains(&aabb) {
+            return (leaf, false);
         }
-        let body = self.nodes[leaf as usize].body;
-        self.remove(leaf);
-        self.insert(body, aabb)
+        let target = aabb.grown(margin);
+        let grown = union_aabb(&fat, &target);
+        if perimeter(&grown) <= 4.0 * perimeter(&target) {
+            self.nodes[leaf as usize].aabb = grown;
+            // refit 从叶的**父节点**起步（该函数假定节点有左右子）。
+            // 生长路径用允许提前退出的变体（结构未变，只有盒在长大）。
+            let p = self.nodes[leaf as usize].parent;
+            self.fix_upwards_grow(p);
+            (leaf, true)
+        } else {
+            let body = self.nodes[leaf as usize].body;
+            self.remove(leaf);
+            (self.insert_fat(body, aabb, margin), true)
+        }
     }
 
     /// 祖先链 refit + 旋转平衡。
@@ -264,6 +301,39 @@ impl DynamicBvh {
             self.nodes[node as usize].height = 1 + self.nodes[left as usize]
                 .height
                 .max(self.nodes[right as usize].height);
+            node = self.nodes[node as usize].parent;
+        }
+    }
+
+    /// 生长路径专用 refit（**提前退出**）：仅当「某个叶子的盒在原位生长、
+    /// 结构未变」时调用——此时每层的新盒/新高只依赖子节点，故某层自洽不变
+    /// ⇒ 其上必然全部不变，可直接停；旋转（结构变化）时不许停。
+    ///
+    /// **不得**用于 `insert`/`remove`：那两处会新建节点或改变孩子集合，
+    /// 新节点的盒/高在创建时即自洽，首层就会误判「未变化」而退出、导致祖先
+    /// 高度/盒不再传播——最小复现测试实测抓出（三节点链高度不一致 @ 根）。
+    fn fix_upwards_grow(&mut self, mut node: u32) {
+        while node != NULL {
+            let before = node;
+            node = self.balance(node);
+            let rotated = node != before;
+            let left = self.nodes[node as usize].left;
+            let right = self.nodes[node as usize].right;
+            let new_box = union_aabb(
+                &self.nodes[left as usize].aabb,
+                &self.nodes[right as usize].aabb,
+            );
+            let new_h = 1 + self.nodes[left as usize]
+                .height
+                .max(self.nodes[right as usize].height);
+            if !rotated
+                && self.nodes[node as usize].height == new_h
+                && self.nodes[node as usize].aabb == new_box
+            {
+                return;
+            }
+            self.nodes[node as usize].aabb = new_box;
+            self.nodes[node as usize].height = new_h;
             node = self.nodes[node as usize].parent;
         }
     }
@@ -359,19 +429,27 @@ impl DynamicBvh {
         if items.is_empty() {
             return leaf_of;
         }
-        let mut work: Vec<(u32, Aabb)> = items.to_vec();
+        let mut work: Vec<Work> = items
+            .iter()
+            .map(|(b, a)| Work {
+                body: *b,
+                aabb: *a,
+                key: 0.0,
+            })
+            .collect();
         self.root = self.build_range(&mut work, &mut leaf_of);
+        // 注：validate 实测只占建树 ≈2%（去掉后 20 万体仍 47.5ms）⇒ 保留（廉价自检）。
         self.validate();
         leaf_of
     }
 
-    fn build_range(&mut self, items: &mut [(u32, Aabb)], leaf_of: &mut [u32]) -> u32 {
+    fn build_range(&mut self, items: &mut [Work], leaf_of: &mut [u32]) -> u32 {
         debug_assert!(!items.is_empty());
         if items.len() == 1 {
             // 直接分配叶子（与 insert 同口径存 fat AABB，保持增量容差）；
             // 重建绝不走 insert——insert 挂到 self.root 并旋转，会与
             // top-down 手工接线互相破坏父指针。
-            let (body, aabb) = items[0];
+            let (body, aabb) = (items[0].body, items[0].aabb);
             let leaf = self.allocate();
             self.nodes[leaf as usize] = BvhNode {
                 aabb: self.fat(&aabb),
@@ -385,9 +463,9 @@ impl DynamicBvh {
             return leaf;
         }
         // 包围盒 → 最长轴。
-        let mut bound = items[0].1;
-        for (_, a) in items.iter().skip(1) {
-            bound = union_aabb(&bound, a);
+        let mut bound = items[0].aabb;
+        for it in items.iter().skip(1) {
+            bound = union_aabb(&bound, &it.aabb);
         }
         let ex = bound.max.x - bound.min.x;
         let ey = bound.max.y - bound.min.y;
@@ -399,12 +477,16 @@ impl DynamicBvh {
         } else {
             2
         };
+        // 键每层算**一次**（O(n)）；放进比较器会按比较次数重算（O(n log n)·2 次）——
+        // 建树是比较受限的（20 万体 47ms 的绝大部分在此）。
+        for it in items.iter_mut() {
+            it.key = center_axis(&it.aabb, axis);
+        }
         let mid = items.len() / 2;
-        // 全序：(轴中心, body id)；f32 全序用 total_cmp。
+        // 全序：(轴中心, body id)；f32 全序用 total_cmp。**与逐次现算等价** ⇒
+        // 树形逐位不变（哈希/确定性不受影响）。
         items.select_nth_unstable_by(mid, |a, b| {
-            let ca = center_axis(&a.1, axis);
-            let cb = center_axis(&b.1, axis);
-            ca.total_cmp(&cb).then(a.0.cmp(&b.0))
+            a.key.total_cmp(&b.key).then(a.body.cmp(&b.body))
         });
         let (left_items, right_items) = items.split_at_mut(mid);
         // 中位分裂后左右两侧的 body id 不连续：leaf_of 全量传入，按 body id 寻址。
@@ -508,6 +590,68 @@ mod tests {
                 (k, aabb_at(x, y, half))
             })
             .collect()
+    }
+
+    /// ===== 最小复现组（T2 尾教训）：把树不变量压缩到 2-3 节点面，钉住
+    /// 「结构改动前必须先看最小面」这条纪律。四块断言 = 高度公式 / 盒并集 /
+    /// 父指针 / 包含性（叶子盒 ⊆ 祖先盒）。=====
+    fn assert_tree_invariants(t: &DynamicBvh) {
+        t.validate(); // 结构测试同源断言（高度/盒/父指针/叶子高度）
+                      // 包含性：每个叶子的盒必须被其全部祖先盒包含（查询完备性的根）。
+        for leaf in 0..t.nodes.len() as u32 {
+            if !t.nodes[leaf as usize].is_leaf() {
+                continue;
+            }
+            let box0 = t.nodes[leaf as usize].aabb;
+            let mut cur = t.nodes[leaf as usize].parent;
+            while cur != NULL {
+                let ancestor_box = t.nodes[cur as usize].aabb;
+                assert!(
+                    ancestor_box.min.x <= box0.min.x
+                        && ancestor_box.min.y <= box0.min.y
+                        && ancestor_box.max.x >= box0.max.x
+                        && ancestor_box.max.y >= box0.max.y,
+                    "祖先盒未包含叶子：leaf {leaf} 祖先 {cur}"
+                );
+                cur = t.nodes[cur as usize].parent;
+            }
+        }
+    }
+
+    /// 两节点树：生长一个叶子后，父盒必须扩张且包含该叶子。
+    #[test]
+    fn min_tree_two_nodes_growth_refits_parent() {
+        let mut t = DynamicBvh::new(0.02);
+        let a = t.insert(0, aabb_at(0.0, 0.0, 0.5));
+        let b = t.insert(1, aabb_at(3.0, 0.0, 0.5));
+        assert_tree_invariants(&t);
+        // 叶子 a 原地生长（远小于 4× 周长比 ⇒ 走就地生长分支）。
+        let bigger = aabb_at(0.6, 0.0, 0.6);
+        let (nl, changed) = t.move_proxy_scaled(a, bigger, 0.02);
+        assert!(changed, "盒变化必须报 changed");
+        assert_tree_invariants(&t);
+        let _ = (b, nl);
+    }
+
+    /// 三节点：顺序插入形成链 ⇒ 触发旋转；旋转后不变量必须自洽。
+    #[test]
+    fn min_tree_three_nodes_rotation_keeps_invariants() {
+        let mut t = DynamicBvh::new(0.02);
+        let mut leaves = [NULL; 3];
+        for k in 0..3u32 {
+            leaves[k as usize] = t.insert(k, aabb_at(k as f32 * 10.0, 0.0, 0.5));
+            assert_tree_invariants(&t);
+        }
+        // 逐叶位移（会走 fix_upwards ⇒ 可能触发 balance 旋转）。
+        for k in 0..3u32 {
+            let (_, changed) = t.move_proxy_scaled(
+                leaves[k as usize],
+                aabb_at(k as f32 * 10.0 + 2.0, 1.0, 0.5),
+                0.02,
+            );
+            assert!(changed);
+            assert_tree_invariants(&t);
+        }
     }
 
     fn build(items: &[(u32, Aabb)]) -> (DynamicBvh, Vec<u32>) {

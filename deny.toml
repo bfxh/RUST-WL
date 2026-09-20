@@ -1,0 +1,46 @@
+# cargo-deny：依赖层静态审计（公告 / 许可 / 禁用 / 来源）。
+# 运行：`cargo deny check`（CI static 层，阻断）。
+#
+# 纪律背景：引擎 workspace 的第三方依赖是**极小面**（仅 xxhash-rust，见
+# crates/vxl-phys-replay）——本文件的作用是给「新增依赖」上锁：任何新依赖
+# 必须过许可白名单 + 无公告 + 有明确来源，才允许进入构建图。
+
+[graph]
+# 空 targets = 按当前宿主全部 target 检查（CI 三平台各自跑一遍）。
+targets = []
+
+[advisories]
+version = 2
+# 被 yank 的版本一律拒（可复现构建不接受「已撤回」的依赖）。
+yanked = "deny"
+# 例外的写法：{ id = "RUSTSEC-XXXX-YYYY", reason = "…", expiry = "YYYY-MM-DD" }
+# —— 到期后必须重新评估，不允许无声长期豁免。
+ignore = []
+
+[licenses]
+version = 2
+# 白名单**只列当前依赖树实际出现的许可**（cargo-deny 会对未出现的条目报
+# `license-not-encountered`）——即「新增许可类型必须显式开锁并写理由」：
+#   MIT / Apache-2.0  → 本仓自身（workspace.package.license）
+#   BSL-1.0           → xxhash-rust（唯一第三方依赖）
+allow = ["MIT", "Apache-2.0", "BSL-1.0"]
+confidence-threshold = 0.9
+
+[bans]
+# 同一 crate 多版本共存 = 依赖树膨胀与不一致风险，先告警暴露。
+multiple-versions = "warn"
+# 通配版本（"*"）禁止：构建不可复现。workspace 内部 path 依赖天然无版本
+# 约束（`{ workspace = true }`），由 allow-wildcard-paths 放行。
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+deny = []
+skip = []
+skip-tree = []
+
+[sources]
+# 只允许 crates.io 与显式列出的 git 源；未知源一律拒（供应链纪律）。
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

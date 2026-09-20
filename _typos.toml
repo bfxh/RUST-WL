@@ -1,0 +1,39 @@
+# typos 配置：拼写静态检查（CI static 层，阻断）。
+#
+# 原则：**只豁免本项目确有语义的术语/符号**，不做全局关闭——这样新提交里的
+# 真拼写错误仍会被抓。豁免项一律给出物理/工程含义，防止把「不知道所以放行」
+# 混进来。
+
+[default]
+# 允许的行内豁免：`typos:ignore` 注释（与 typos 官方 directive 一致）。
+extend-ignore-re = ["typos:ignore", "[0-9a-f]{7,40}"]
+# git 短哈希（文档里大量引用提交号，如 `006abd1` 会被误判成 "abd"）。
+# 只豁免「7–40 位全十六进制」这种形态，普通英文单词不受影响。
+
+# 标识符级豁免（代码里的变量/字段名）。
+[default.extend-identifiers]
+# 物理量符号（求解器）：pn = 法向冲量，pt1/pt2 = 切向冲量分量。
+pn = "pn"
+# 惯性张量主轴分量（转动惯量符号）。
+iy = "iy"
+# 网格/栅格循环下标（i + z / i + y 的惯用简写）。
+iz = "iz"
+# 二次惯性矩记号（面积惯性积/转动惯量，工程力学习用）。
+Iy = "Iy"
+
+# 词级豁免（注释与文档正文里出现同形词时一并放行）。
+[default.extend-words]
+# 同上：物理量符号在注释中大量出现（如 `cap_magnitude(μ·pn)`）。
+pn = "pn"
+iy = "iy"
+iz = "iz"
+Iy = "Iy"
+# toi = time of impact（连续碰撞检测术语）。
+toi = "toi"
+# ba = 骨骼/刚体骨架缩写（同族命名的既有记号）。
+ba = "ba"
+# LOD = level of detail（视距/细节层级）。
+LOD = "LOD"
+# UE / UE5 = Unreal Engine（引擎名缩写，盘点文档里引用按其实现的项目）。
+UE = "UE"
+UE5 = "UE5"

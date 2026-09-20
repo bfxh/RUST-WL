@@ -40,16 +40,63 @@ impl FrictionModel {
     }
 }
 
-/// 主配置。`Default` = 规格书默认档（迭代 16、子步 1、skin 0.01）。
+/// 主配置。`Default` = 规格书默认档（迭代 12×内层 2、子步 1、skin 0.02；
+/// 2026-09-15 按实测标定，见 `velocity_iterations` 字段注释）。
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysConfig {
     /// 基础步长，固定 60 Hz（§5）。
     pub dt: f32,
     /// §4.2 每 60Hz 帧子步 ∈ {1,2,4,8,16}。
+    ///
+    /// 默认 2（2026-09-15 标定）：TGS 式「两次小步」把每步的收敛形状改了——
+    /// **2 子步 × 3 迭代 × 内层 1（6 扫掠）**在三个 PhysArena 同参场景上同时
+    /// **更快且更稳**（`examples/arena_bench`，判据 = 3600 步长跑）：金字塔
+    /// 4.32→1.93 ms（单子步基准） / wasm 9.47→1.78、墙 7.44→1.36、球坑 2.11→0.95；
+    /// 体素落体静置高度也从 1.470 变成物理值 1.500。
+    /// 单子步下扫掠低于 ≈24 即失稳（16 扫掠时 900 步后金字塔垮塌），双子步下
+    /// 6 扫掠即稳——步长减半让接触冲击的每步位移减半。
+    /// **前置修复**（否则本档不可用）：provider（体素）接触的「逐面发射 + 按接近
+    /// 方向选面」——旧实现只发主导面，墙角下按深度选中地板面而丢掉墙面
+    /// （见 EXPERIMENTS「provider 墙角丢面」）。
     pub substeps: u32,
-    /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 16。
+    /// §4.1 TGS-Soft/顺序冲量速度迭代 ∈ {1,4,8,16,32,64}，默认 3。
+    ///
+    /// 默认档 **2 子步 × 3 迭代 × 内层 1 = 6 扫掠/帧**（2026-09-15 复查标定）：
+    /// 在 provider 修复 + 世界逆惯量预积之后重扫阶梯，6 扫掠即可站住（金字塔
+    /// 3600 步长跑堆顶 19.424、墙 6.962，43 套件全绿）。相对 10 扫掠（2×5×1）
+    /// 再快 1.2–1.26×，代价是金字塔长跑微动 0.52→1.63（≈旧 16×4 档的 1.45，
+    /// 仍在"站着微动"而非垮塌）；10 扫掠档保留为保守选择（`--iters 5`）。
+    /// 单子步下扫掠低于 ≈24 即失稳（8×2=16 时 900 步后金字塔垮塌）。
     pub velocity_iterations: u32,
+    /// **关节通道迭代数**（`vxl_phys_solver::joints`；与接触迭代**分开**）。
+    ///
+    /// 为什么不合用 `velocity_iterations`：接触档 3（2 子步 × 3 迭代 × 内层 1
+    /// = 6 扫掠）是**标定过的接触预算**，关节对迭代数的敏感度完全不同——关节链
+    /// 的冲量传播是单向 GS，迭代不足就表现为"橡皮筋"。实测（`arena_bench
+    /// joint_chains`，40 环铰链链 / 40 段固定塔，600 步最大锚点分离）：
+    /// 3 迭代 4.8/7.3 cm、8 迭代 2.0/2.5 cm、16 迭代 1.3/1.2 cm、32 迭代
+    /// 1.1/0.5 cm；步耗时 0.075/0.144/0.233/0.428 ms（40 关节）。
+    /// 默认 8 = 拐点前段（相对 3 迭代分离降 2.4×，代价 +0.07 ms/40 关节）。
+    pub joint_iterations: u32,
+    /// 法向「歧管内层扫掠」次数（M1 稳定性）：每个接触流形在外层每次迭代内
+    /// 对**法向通道**多扫 K 遍（摩擦/偏置不变）。4 点面接触是冗余约束（4 约束 /
+    /// 3 自由度）+ 强转动耦合，单向 GS 的慢模正在歧管内部——内层 K 遍把歧管内
+    /// 收敛等价提到 ≈K×外层。实测（45 盒最小沸腾档）：16 次外层残留 ≈15% 重力
+    /// 增量（微抖 |v|≈0.03 永不入睡，角点接触下升级沸腾），内层 4 遍后入睡。
+    /// 1 = 关闭（M0 行为）；默认 1（2026-09-15 标定：**总扫掠预算**才是决定量，
+    /// 双子步下 2 子步 × 3 迭代 × 内层 1 = 6 扫掠即站住，比旧的 16×4 = 64 快
+    /// 5×+ 且长跑收敛更好；详见 `velocity_iterations`/`substeps` 注释与
+    /// EXPERIMENTS）。代价 ≈ 仅法向通道 ×K。
+    pub normal_inner: u32,
+    /// 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
+    /// 主迭代后再**反序**过一遍全部约束，把底层承载沿约束图反向传播一次——
+    /// 深层堆叠（>16 层）收敛所需迭代数 ≈ 2×层数，反序一遍等效补多轮。
+    /// 0 = 关闭（默认，M0 数值行为不变）；建议 2~8（成本 ≈ shock/velocity 比例）。
+    pub shock_iterations: u32,
     /// §4.3 接触 speculative margin（skin）四档：0.02/0.01/0.005/0.002。
+    /// 默认 0.02（M1 金样对齐：= Rapier 预测距离 0.02——留缝密堆的侧向
+    /// speculative 接触从首帧即存在，2000 盒 5 层堆开局即稳、600 tick 全睡；
+    /// 0.01 需经 1200 tick 沸腾行程才入睡，实测见 docs/M1-PLAN.md）。
     pub contact_skin: f32,
     /// §4.3 GJK 收敛容差（M0 SAT 路径仅存档）。
     pub gjk_tolerance: f32,
@@ -62,14 +109,36 @@ pub struct PhysConfig {
     pub ccd_max_steps: u32,
     /// §4.4 摩擦模型（默认材质；逐材质见 BodySet::materials）。
     pub friction: FrictionModel,
-    /// §4.5 恢复系数 e ∈ [0,1]（默认材质；材质对取 max）。
+    /// §4.5 恢复系数 e ∈ `[0,1]`（默认材质；材质对取 max）。
     pub restitution: f32,
     /// §4.5 恢复速度阈值：低于它的碰撞 e 视作 0（防微弹跳）。
     pub restitution_threshold: f32,
-    /// 位置修正（Baumgarte）系数。
+    /// 位置修正（Baumgarte）系数。**M1 软接触形态后仅用于兼容旧档**：
+    /// 位置修正改走「erp 偏置速度」进速度通道（见下三参），本字段保留占位。
     pub baumgarte: f32,
-    /// 线性 slop（穿透容差，不参与 bias）。
+    /// 线性 slop（穿透容差，不参与偏置）。
     pub linear_slop: f32,
+    /// M1 软接触（TGS-Soft 语义，与 Rapier 0.35 默认同构）：接触法向的
+    /// 正则化参数。`contact_freq_hz`/`contact_damping_ratio` = 动-动接触的
+    /// 等效弹簧固有频率/阻尼比（Rapier 默认 30 Hz / ζ=10）；`static_freq_hz`
+    /// = 含静态侧的接触（更硬，防挤压穿过，Rapier 默认 60 Hz）；穿透时
+    /// 正则化自动退化为硬投影（cfm=1），speculative（浅缝）接触才施加软性。
+    pub contact_freq_hz: f32,
+    pub contact_damping_ratio: f32,
+    pub static_contact_freq_hz: f32,
+    /// 位置修正（erp）偏置速度上限（m/s；Rapier `max_corrective_velocity`
+    /// 默认 3.0）——替代旧分裂冲量通道的 0.5 上钳，偏置走速度通道 + 正则化。
+    pub max_corrective_velocity: f32,
+    /// **无偏置趟（Rapier TGS-Soft 的末趟；0 = 关闭，默认关）**：位置积分之后
+    /// 对同一批约束再解 `stabilization_iterations` 遍，**去掉去穿透偏置与切向
+    /// 漂移回拉**（对齐 Rapier `rhs_wo_bias`：法向只留 speculative 项、切向不留
+    /// 漂移偏置），即把"修正速度"从**最终速度**里移除。
+    /// 动机（2026-09-18 实测）：偏置与漂移回拉此前会作为真实动能留在体上——
+    /// 塔场景的 |v| 与 `erp_inv_dt·pen`（≈0.1–0.24 m/s）同量级，直接导致大堆
+    /// 永不入睡。Rapier 每子步 = 带偏置趟 → 位置积分 → 无偏置趟
+    /// （`num_internal_pgs_iterations` / `num_internal_stabilization_iterations`，
+    /// 默认各 1）。**0 = 关闭时整条路径逐位不变**（含三哈希）。
+    pub stabilization_iterations: u32,
     /// 限速（M0 的防隧道保守闸；CCD 落地后放宽）。
     pub max_linear_velocity: f32,
     pub max_angular_velocity: f32,
@@ -93,9 +162,14 @@ impl Default for PhysConfig {
     fn default() -> Self {
         Self {
             dt: 1.0 / 60.0,
-            substeps: 1,
-            velocity_iterations: 16,
-            contact_skin: 0.01,
+            // 2026-09-15 标定终档：2 子步 × 5 迭代 × 内层 1（10 扫掠/帧）——
+            // 更快且更稳（金字塔 4.32→3.31 ms、抖动 1.45→0.59；墙 3.72→2.77）。
+            substeps: 2,
+            velocity_iterations: 3,
+            joint_iterations: 8,
+            normal_inner: 1,
+            shock_iterations: 0,
+            contact_skin: 0.02,
             gjk_tolerance: 1e-5,
             ccd_speed_threshold: f32::INFINITY,
             ccd_extent_ratio: 0.5,
@@ -105,6 +179,11 @@ impl Default for PhysConfig {
             restitution_threshold: 1.0,
             baumgarte: 0.2,
             linear_slop: 0.005,
+            contact_freq_hz: 30.0,
+            contact_damping_ratio: 10.0,
+            static_contact_freq_hz: 60.0,
+            max_corrective_velocity: 3.0,
+            stabilization_iterations: 0,
             max_linear_velocity: 100.0,
             max_angular_velocity: 50.0,
             sleep_linear: 0.04,
@@ -182,7 +261,14 @@ mod tests {
     #[test]
     fn default_is_spec_default() {
         let c = PhysConfig::default();
-        assert_eq!(c.velocity_iterations, 16);
+        // 2026-09-15 标定：2 子步 × 3 迭代 × 内层 1（6 扫掠/帧）——见
+        // `substeps`/`velocity_iterations` 字段注释；EXPECTATIONS 记录的旧默认
+        // 16×4（单子步）已由 arena_bench 长跑判据替换。
+        assert_eq!(c.substeps, 2);
+        assert_eq!(c.velocity_iterations, 3);
+        assert_eq!(c.normal_inner, 1);
+        // 关节独立预算（见 `joint_iterations` 注释的分离-迭代标定表）。
+        assert_eq!(c.joint_iterations, 8);
         assert_eq!(c.sleep_linear, 0.04);
         assert_eq!(c.sleep_angular, 0.05);
         assert_eq!(c.sleep_time, 0.5);

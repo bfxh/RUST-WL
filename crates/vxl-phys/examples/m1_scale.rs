@@ -58,6 +58,9 @@ fn main() {
     let mut total = 0.0f64;
     let mut worst = 0.0f64;
     for t in 1..=ticks {
+        // `PhaseTimings` 是**累计值**（见 docs/M1-PLAN.md 读数陷阱）⇒ 每 tick 清零，
+        // 否则「窄相/求解」两列读到的是「自首帧起的累计」——按它调参会调错方向。
+        w.reset_timings();
         let t0 = Instant::now();
         w.step();
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -68,11 +71,14 @@ fn main() {
         let bd = w.broad.breakdown_us();
         let th = w.broad.tree_height();
         eprintln!(
-            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} | solve 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
-            tim.broadphase_us as f64 / 1000.0,
+            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | solve 岛数 {:5} 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
+            (bd.0 + bd.1 + bd.2 + bd.3) as f64 / 1000.0,
             bd.0 as f64 / 1000.0,
             bd.1 as f64 / 1000.0,
             bd.2 as f64 / 1000.0,
+            w.broad.cand_total(),
+            tim.narrowphase_us as f64 / 1000.0,
+            w.solver.island_count,
             w.solver.last_phase_us.0 as f64 / 1000.0,
             w.solver.last_phase_us.1 as f64 / 1000.0,
             w.solver.last_phase_us.2 as f64 / 1000.0,

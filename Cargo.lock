@@ -236,12 +236,18 @@ dependencies = [
  "vxl-phys-broad",
  "vxl-phys-core",
  "vxl-phys-field",
+ "vxl-phys-fluid",
  "vxl-phys-integrate",
  "vxl-phys-narrow",
  "vxl-phys-replay",
  "vxl-phys-solver",
+ "vxl-phys-splat",
  "vxl-phys-terrain",
 ]
+
+[[package]]
+name = "vxl-phys-aero"
+version = "0.1.0"
 
 [[package]]
 name = "vxl-phys-broad"
@@ -275,6 +281,9 @@ dependencies = [
 [[package]]
 name = "vxl-phys-fluid"
 version = "0.1.0"
+dependencies = [
+ "vxl-phys-core",
+]
 
 [[package]]
 name = "vxl-phys-gpu"
@@ -327,6 +336,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vxl-phys-splat"
+version = "0.1.0"
+dependencies = [
+ "vxl-phys-core",
+]
+
+[[package]]
 name = "vxl-phys-terrain"
 version = "0.1.0"
 dependencies = [
@@ -336,11 +352,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vxl-phys-vehicle"
-version = "0.1.0"
-
-[[package]]
-name = "vxl-phys-vehicles-air"
+name = "vxl-phys-wheeled"
 version = "0.1.0"
 
 [[package]]

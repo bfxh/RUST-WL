@@ -3,6 +3,7 @@ name = "vxl-phys-fluid"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vxl_phys 专项模块（骨架，见 docs/SPEC.md）"
+description = "vxl_phys 流体（§4.8 CPU 档）：WCSPH + XSPH（Monaghan 核族）+ 均匀网格邻居"
 
 [dependencies]
+vxl-phys-core = { workspace = true }

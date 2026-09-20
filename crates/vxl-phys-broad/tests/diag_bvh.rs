@@ -34,7 +34,7 @@ fn diag_bvh_bench_shape() {
     }
     let mut bp = BvhBroadPhase::new(0.01);
     let t0 = Instant::now();
-    let p = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+    let p = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
     println!(
         "首帧: {:?} pairs={} 树高={}",
         t0.elapsed(),
@@ -43,7 +43,7 @@ fn diag_bvh_bench_shape() {
     );
     for f in 0..3 {
         let t0 = Instant::now();
-        let p = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+        let p = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
         println!(
             "静置帧{f}: {:?} pairs={} 树高={}",
             t0.elapsed(),
@@ -58,7 +58,7 @@ fn diag_bvh_bench_shape() {
             }
         }
         let t0 = Instant::now();
-        let p = bp.compute_pairs(&b, &[], &SerialJobSystem).to_vec();
+        let p = bp.compute_pairs(&b, &[], &[], &SerialJobSystem).to_vec();
         println!("下落帧{f}: {:?} pairs={}", t0.elapsed(), p.len());
     }
 }
