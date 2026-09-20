@@ -80,6 +80,15 @@ pub fn shape_aabb(
                     + radius * (r.m[2][0] * r.m[2][0] + r.m[2][2] * r.m[2][2]).sqrt(),
             )
         }
+        // 复合体：同外壳（局部 AABB 并集半长 + |R| 变换保守）。
+        Shape::Compound { half, .. } => {
+            let r = vxl_phys_core::Mat3::from_quat(rot);
+            Vec3::new(
+                r.m[0][0].abs() * half.x + r.m[0][1].abs() * half.y + r.m[0][2].abs() * half.z,
+                r.m[1][0].abs() * half.x + r.m[1][1].abs() * half.y + r.m[1][2].abs() * half.z,
+                r.m[2][0].abs() * half.x + r.m[2][1].abs() * half.y + r.m[2][2].abs() * half.z,
+            )
+        }
         // 凸体外壳：局部 AABB 半长（宽相只需保守界）。
         Shape::ConvexHull { half, .. } => {
             let r = vxl_phys_core::Mat3::from_quat(rot);

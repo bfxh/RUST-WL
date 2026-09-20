@@ -24,7 +24,7 @@ pub use vxl_phys_core::{
 pub use vxl_phys_field::{FieldRegistry, ForceField, GravityField};
 pub use vxl_phys_integrate::Integrator;
 pub use vxl_phys_narrow::heightfield::HeightField;
-pub use vxl_phys_narrow::{ContactPoint, DefaultNarrowPhase, Manifold, NarrowPhase};
+pub use vxl_phys_narrow::{CompoundChild, ContactPoint, DefaultNarrowPhase, Manifold, NarrowPhase};
 pub use vxl_phys_replay::{Recorder, StateHash, Xxh3Hash};
 pub use vxl_phys_solver::joints::{Joint, JointKind, JointSet};
 pub use vxl_phys_solver::{ccd, ImpulseSolver};
@@ -61,6 +61,10 @@ fn cross_section_area(shape: &Shape) -> f32 {
             radius,
         } => radius * half_height + std::f32::consts::PI * radius * radius,
         Shape::ConvexHull { half, .. } => {
+            4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
+        }
+        // 复合体：同外壳（局部 AABB 并集半长的外接盒近似；阻力估计够用）。
+        Shape::Compound { half, .. } => {
             4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
         }
         Shape::HeightField(_) | Shape::Provider(_) => 0.0,
@@ -749,6 +753,47 @@ impl World {
             rot,
             density.max(1e-3),
         )
+    }
+
+    /// 注册复合体（子形状 = 形状 + 局部平移/旋转）→ compound id。
+    pub fn add_compound(&mut self, children: Vec<CompoundChild>) -> u32 {
+        self.narrow.add_compound(children)
+    }
+
+    /// 子形状局部 AABB 并集半长（宽相/惯量近似用；空复合体 = ZERO）。
+    pub fn compound_half_extents(&self, compound: u32) -> Vec3 {
+        self.narrow.compound_half_extents(compound)
+    }
+
+    /// 复合体子形状表（诊断/外部管线用）。
+    pub fn compound_children(&self, compound: u32) -> &[CompoundChild] {
+        self.narrow.compound_children(compound)
+    }
+
+    /// 生成**复合体动态体**：子形状已在 `add_compound` 注册。
+    /// 半长取子形状局部 AABB 并集（保守：子半长按包围球）；质量暂按该并集盒近似
+    /// （精确并集 = 按子形状质量求和 + 平行轴，待接；见 `TECH-SURVEY.md` A9 ④）。
+    pub fn spawn_compound_body(
+        &mut self,
+        compound: u32,
+        pos: Vec3,
+        rot: Quat,
+        density: f32,
+    ) -> u32 {
+        let half = self.narrow.compound_half_extents(compound);
+        self.bodies.push_dynamic(
+            Shape::Compound { compound, half },
+            pos,
+            rot,
+            density.max(1e-3),
+        )
+    }
+
+    /// 生成**复合体静态体**（同 `add_static` 语义）。
+    pub fn add_compound_static(&mut self, compound: u32, pos: Vec3, rot: Quat) -> u32 {
+        let half = self.narrow.compound_half_extents(compound);
+        self.bodies
+            .push_static(Shape::Compound { compound, half }, pos, rot)
     }
 
     /// 提供者集合只读视图（体素体诊断/可视化用）。

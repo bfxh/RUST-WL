@@ -52,6 +52,15 @@ pub enum Shape {
         hull: u32,
         half: Vec3,
     },
+    /// **复合体**（刚性多形状体）：`compound` 索引窄相 `CompoundStore`（子形状 = 形状 +
+    /// 局部平移/旋转，顺序即特征序）；`half` = 子形状局部 AABB 并集半长（宽相 + 惯量近似用）。
+    ///
+    /// 窄相按子形状**展开为子对**并递归复用配对路径（特征号按子序号左移 16 位编码，
+    /// 避免多条流形在同一暖缓存键上串号）。子形状**不得**再是复合体（构建期拒绝，防递归）。
+    Compound {
+        compound: u32,
+        half: Vec3,
+    },
 }
 
 use crate::math::Vec3;
@@ -76,6 +85,7 @@ impl Shape {
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
             Shape::ConvexHull { half, .. } => half.length(),
+            Shape::Compound { half, .. } => half.length(),
             Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
         }
     }
@@ -90,6 +100,7 @@ impl Shape {
             Shape::HeightField(_) => "heightfield",
             Shape::Provider(_) => "provider",
             Shape::ConvexHull { .. } => "hull",
+            Shape::Compound { .. } => "compound",
         }
     }
 }

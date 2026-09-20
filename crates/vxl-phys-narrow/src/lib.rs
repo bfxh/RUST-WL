@@ -76,6 +76,11 @@ impl ContactPoints {
         out.len = n as u8;
         out
     }
+
+    /// 可变逐点视图（窄相内部用：复合体要给特征号并入子形状序号）。
+    pub fn as_mut_slice(&mut self) -> &mut [ContactPoint] {
+        &mut self.buf[..self.len as usize]
+    }
 }
 
 impl core::ops::Deref for ContactPoints {
@@ -260,6 +265,10 @@ impl WorldPoly {
 pub struct DefaultNarrowPhase {
     /// 凸体外壳仓库（多边形域；点云注册后由 shape 引用）。
     hulls: HullStore,
+    /// 复合体仓库（子形状表；由 `Shape::Compound { compound, .. }` 引用）。
+    compounds: CompoundStore,
+    /// 子形状表 scratch（`kids_take`/`kids_put` 借出，避开 `&self`/`&mut self` 借用冲突）。
+    kids_buf: Vec<CompoundChild>,
     skin: f32,
     /// **速度充气视野的预测时长**（s；0 = 不预测 ＝ 现行行为）。由 `World` 每子步设为
     /// **检测间隔**（每子步检测时为 `dt`、每 tick 检测时为整 tick）：窄相的接受判据
@@ -457,6 +466,82 @@ fn closest_point_on_poly(poly: &WorldPoly, p: Vec3) -> (Vec3, f32, bool, Vec3) {
     (best, best_d2, inside, max_plane_n)
 }
 
+/// **复合体子形状**：形状 + 相对复合体原点的局部平移/旋转（顺序即特征序）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CompoundChild {
+    pub shape: Shape,
+    pub offset: Vec3,
+    pub rot: Quat,
+}
+
+/// **复合体仓库**（刚性多形状体）：注册后由 `Shape::Compound { compound, .. }` 引用。
+///
+/// 窄相按子形状展开为**子对**并递归复用 `process_pair`；子序号左移 16 位并入 `feature`
+/// （同一体对同时存在多条流形，不编码会让不同子形状的接触点在暖启动缓存上互相顶替）。
+#[derive(Clone, Default)]
+pub struct CompoundStore {
+    items: Vec<Vec<CompoundChild>>,
+}
+
+impl CompoundStore {
+    /// 注册一个复合体；返回 id。**嵌套复合体在此丢弃**（防递归；顺序即特征序，不去重）。
+    pub fn add(&mut self, children: Vec<CompoundChild>) -> u32 {
+        let id = self.items.len() as u32;
+        self.items.push(
+            children
+                .into_iter()
+                .filter(|c| !matches!(c.shape, Shape::Compound { .. }))
+                .collect(),
+        );
+        id
+    }
+
+    #[inline]
+    pub fn get(&self, id: u32) -> Option<&[CompoundChild]> {
+        self.items.get(id as usize).map(|v| v.as_slice())
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// 子形状局部 AABB 并集半长（保守：子半长取**包围球**；空复合体返回 ZERO）。
+    pub fn half_extents(&self, id: u32) -> Vec3 {
+        let Some(kids) = self.get(id) else {
+            return Vec3::ZERO;
+        };
+        if kids.is_empty() {
+            return Vec3::ZERO;
+        }
+        let mut lo = Vec3::splat(f32::INFINITY);
+        let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        for c in kids {
+            let e = Vec3::splat(c.shape.bounding_sphere_radius());
+            lo = lo.min(c.offset - e);
+            hi = hi.max(c.offset + e);
+        }
+        (hi - lo) * 0.5
+    }
+}
+
+/// 把新产出的一段流形里的接触点特征号打上**子形状序号**（左移 16 位；`0` 哨兵保持 0）。
+fn tag_child_features(ms: &mut [Manifold], ci: usize) {
+    let tag = ((ci as u32) + 1) << 16;
+    for m in ms.iter_mut() {
+        for p in m.points.as_mut_slice() {
+            if p.feature != 0 {
+                p.feature |= tag;
+            }
+        }
+    }
+}
+
 /// **凸体外壳仓库**（多边形域；窄相自持 ⇒ 零签名改动）。
 ///
 /// 外壳点云注册后由 `Shape::ConvexHull { hull, .. }` 引用；查询按 id 直取。
@@ -516,6 +601,41 @@ impl DefaultNarrowPhase {
             .get(id)
             .map(|h| h.points.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// 注册复合体（子形状 = 形状 + 局部平移/旋转）→ id；配 `Shape::Compound { compound, .. }`。
+    pub fn add_compound(&mut self, children: Vec<CompoundChild>) -> u32 {
+        self.compounds.add(children)
+    }
+
+    /// 复合体子形状表（局部；空切片 = id 无效）。
+    pub fn compound_children(&self, id: u32) -> &[CompoundChild] {
+        self.compounds.get(id).unwrap_or(&[])
+    }
+
+    /// 子形状局部 AABB 并集半长（宽相/惯量近似用；空复合体 = ZERO）。
+    pub fn compound_half_extents(&self, id: u32) -> Vec3 {
+        self.compounds.half_extents(id)
+    }
+
+    /// 子形状表借出到 scratch（递归前必须归还；嵌套复合体已在注册期丢弃 ⇒ 不会重入）。
+    fn kids_take(&mut self, id: u32) -> Option<Vec<CompoundChild>> {
+        let mut buf = std::mem::take(&mut self.kids_buf);
+        buf.clear();
+        match self.compounds.get(id) {
+            Some(kids) => {
+                buf.extend_from_slice(kids);
+                Some(buf)
+            }
+            None => {
+                self.kids_buf = buf;
+                None
+            }
+        }
+    }
+
+    fn kids_put(&mut self, buf: Vec<CompoundChild>) {
+        self.kids_buf = buf;
     }
 
     /// 外壳点云 → 局部 AABB 半长（门面构 `Shape::ConvexHull` 用）。
@@ -726,6 +846,8 @@ impl DefaultNarrowPhase {
     pub fn new(skin: f32) -> Self {
         Self {
             hulls: HullStore::default(),
+            compounds: CompoundStore::default(),
+            kids_buf: Vec::new(),
             skin,
             predict_dt: 0.0,
             inflate: 0.0,
@@ -1467,6 +1589,7 @@ impl NarrowPhase for DefaultNarrowPhase {
 }
 
 impl DefaultNarrowPhase {
+    /// 薄入口：从 `bodies` 取形状/位姿后交给 `process_pair_shaped`（复合体递归走后者）。
     fn process_pair(
         &mut self,
         a: u32,
@@ -1481,6 +1604,39 @@ impl DefaultNarrowPhase {
         let pb = bodies.position[b as usize];
         let ra = bodies.rot(a as usize);
         let rb = bodies.rot(b as usize);
+        self.process_pair_shaped(
+            a,
+            b,
+            bodies,
+            sa,
+            sb,
+            pa,
+            ra,
+            pb,
+            rb,
+            heightfields,
+            providers,
+            out,
+        );
+    }
+
+    /// **配对主入口**（形状 + 世界位姿已给定）：复合体在此按子形状展开并**递归**本函数。
+    #[allow(clippy::too_many_arguments)] // 两侧形状 + 位姿 + 上下文 + 出参
+    fn process_pair_shaped(
+        &mut self,
+        a: u32,
+        b: u32,
+        bodies: &vxl_phys_core::BodySet,
+        sa: &Shape,
+        sb: &Shape,
+        pa: Vec3,
+        ra: Quat,
+        pb: Vec3,
+        rb: Quat,
+        heightfields: &[HeightField],
+        providers: &dyn vxl_phys_core::interop::ProviderColliders,
+        out: &mut Vec<Manifold>,
+    ) {
         // 盒对专用路径开关：每对先复位（非盒对 / 圆柱对一律走通用路径）。
         self.box_axes_a = None;
         self.box_axes_b = None;
@@ -1686,6 +1842,8 @@ impl DefaultNarrowPhase {
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
                 Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => return,
+                // 复合体 × 地形：**暂不受理**（子形状展开可后续接；见 `TECH-SURVEY.md` A9 ④）。
+                Shape::Compound { .. } => return,
                 // 胶囊体 × 地形：**本切片暂不支持**（显式拒绝，不静默产空接触）。
                 // 后续接法：沿线段取 N 个样本调 `sphere_heightfield` 合并候选点。
                 Shape::Capsule { .. } => return,
@@ -1712,6 +1870,62 @@ impl DefaultNarrowPhase {
 
         // 非 heightfield 对。
         match (*sa, *sb) {
+            // —— 复合体：子形状展开为**子对**并递归复用本函数 ——
+            //
+            // 同一体对会**同时**存在多条流形（每个子形状各一条）：`feature` 是暖启动缓存键
+            // 的一部分，不并入子序号会让不同子形状的接触点互相顶替（`0` 是"无特征"哨兵）。
+            (Shape::Compound { compound, .. }, _) => {
+                let Some(kids) = self.kids_take(compound) else {
+                    return;
+                };
+                for (ci, kid) in kids.iter().enumerate() {
+                    let before = out.len();
+                    let cpos = pa + Mat3::from_quat(ra).mul_vec3(kid.offset);
+                    let crot = ra * kid.rot;
+                    self.process_pair_shaped(
+                        a,
+                        b,
+                        bodies,
+                        &kid.shape,
+                        sb,
+                        cpos,
+                        crot,
+                        pb,
+                        rb,
+                        heightfields,
+                        providers,
+                        out,
+                    );
+                    tag_child_features(&mut out[before..], ci);
+                }
+                self.kids_put(kids);
+            }
+            (_, Shape::Compound { compound, .. }) => {
+                let Some(kids) = self.kids_take(compound) else {
+                    return;
+                };
+                for (ci, kid) in kids.iter().enumerate() {
+                    let before = out.len();
+                    let cpos = pb + Mat3::from_quat(rb).mul_vec3(kid.offset);
+                    let crot = rb * kid.rot;
+                    self.process_pair_shaped(
+                        a,
+                        b,
+                        bodies,
+                        sa,
+                        &kid.shape,
+                        pa,
+                        ra,
+                        cpos,
+                        crot,
+                        heightfields,
+                        providers,
+                        out,
+                    );
+                    tag_child_features(&mut out[before..], ci);
+                }
+                self.kids_put(kids);
+            }
             (Shape::Sphere { radius: ra_ }, Shape::Sphere { radius: rb_ }) => {
                 let d = pb - pa;
                 let dist = d.length();
@@ -2166,6 +2380,105 @@ mod tests {
             m.points.len() >= 3,
             "坐底应为多点支撑（多点才不摇），实得 {} 点",
             m.points.len()
+        );
+    }
+
+    /// 复合体（哑铃：两端盒 + 中间横杆）坐地：**每个接触的子形状各出一条流形**（≥2 条），
+    /// 且特征号按**子序号左移 16 位**编码 ⇒ 不同子形状的特征空间互不重叠（暖缓存不串号）。
+    #[test]
+    fn compound_dumbbell_on_floor() {
+        let mut np = DefaultNarrowPhase::new(0.01);
+        // 两端用**盒**（而非球）：盒-盒接触带 `feature`，才能验到"子序号并入特征号"这条路径
+        // （球接触的 `feature` 恒为 0 = "无特征"哨兵，标记不碰它）。
+        let cid = np.add_compound(vec![
+            CompoundChild {
+                shape: Shape::Box {
+                    half: Vec3::splat(0.3),
+                },
+                offset: Vec3::new(-0.6, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+            CompoundChild {
+                shape: Shape::Box {
+                    half: Vec3::splat(0.3),
+                },
+                offset: Vec3::new(0.6, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+            CompoundChild {
+                shape: Shape::Box {
+                    half: Vec3::splat(0.3),
+                },
+                offset: Vec3::new(0.6, 0.0, 0.0),
+                rot: Quat::IDENTITY,
+            },
+            CompoundChild {
+                shape: Shape::Box {
+                    half: Vec3::new(0.6, 0.1, 0.1),
+                },
+                offset: Vec3::ZERO,
+                rot: Quat::IDENTITY,
+            },
+        ]);
+        let mut b = BodySet::new();
+        b.push_static(
+            Shape::Box {
+                half: Vec3::new(5.0, 0.5, 5.0),
+            },
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+        );
+        // 两球半径 0.3、横杆 1.2×0.2×0.2；球压入地面（y=0）1 cm ⇒ y0 = 0.29。
+        b.push_dynamic(
+            Shape::Compound {
+                compound: cid,
+                half: np.compound_half_extents(cid),
+            },
+            Vec3::new(0.0, 0.29, 0.0),
+            Quat::IDENTITY,
+            1000.0,
+        );
+        let mut pairs = Vec::new();
+        for i in 0..b.len() as u32 {
+            for j in (i + 1)..b.len() as u32 {
+                pairs.push((i, j));
+            }
+        }
+        let mut out = Vec::new();
+        np.collide(
+            &b,
+            &pairs,
+            &[],
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &SerialJobSystem,
+        );
+        assert!(
+            out.len() >= 2,
+            "两个球应各出一条流形（同体对多条），实得 {} 条",
+            out.len()
+        );
+        let mut tags = std::collections::BTreeSet::new();
+        for m in &out {
+            assert!(
+                m.normal.y.abs() > 0.99,
+                "地面接触法线应竖直，实得 {:?}",
+                m.normal
+            );
+            let dmax = m.points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+            assert!((dmax - 0.01).abs() < 3e-3, "压入应 ≈1 cm，实得 {dmax}");
+            for p in m.points.iter() {
+                assert!(
+                    p.feature >> 16 != 0,
+                    "特征号应带子序号标记，实得 {}",
+                    p.feature
+                );
+                tags.insert(p.feature >> 16);
+            }
+        }
+        assert!(
+            tags.len() >= 2,
+            "不同子形状的特征空间应互不相同，实得 {tags:?}"
         );
     }
 
