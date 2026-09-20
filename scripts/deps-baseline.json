@@ -1,82 +1,225 @@
 {
   "deps": {
-    "vxl-phys": {},
-    "vxl-phys-aero": {},
-    "vxl-phys-broad": {},
     "vxl-phys-core": {
-      "loom": "并发原语的模型测试（见 crates/vxl-phys-core/tests/loom_primitives.rs）。只在 cfg(loom) 下编译进去、只服务「loom (并发原语)」那一门，不进任何发布构建；它同时带来 tracing 系与 windows-sys 的传递闭包（见本文件 lock_packages）。"
+      "loom": {
+        "why": "并发原语的模型测试（见 crates/vxl-phys-core/tests/loom_primitives.rs）。只在 cfg(loom) 下编译进去、只服务「loom (并发原语)」那一门，不进任何发布构建；它同时带来 tracing 系与 windows-sys 的传递闭包（见本文件 lock_packages）。",
+        "version": "0.7.2"
+      }
     },
-    "vxl-phys-destruction": {},
-    "vxl-phys-ffi": {},
-    "vxl-phys-field": {},
-    "vxl-phys-fluid": {},
-    "vxl-phys-gpu": {},
-    "vxl-phys-integrate": {},
-    "vxl-phys-marine": {},
-    "vxl-phys-mech": {},
-    "vxl-phys-memfind": {},
-    "vxl-phys-narrow": {},
     "vxl-phys-replay": {
-      "xxhash-rust": "xxh3-128 规范化哈希的实现来源（§5：跨三编译器 + aarch64 必须逐位一致）。确定性契约要求「同一份哈希算法」，自研一份等于把契约建在自己的实现上，标准算法 + 钉版本更可审计。风险待盯：它的 SIMD 特性若随 target 变体，哈希值可能分叉——现有跨平台哈希门（determinism/hash-compare）是这条依赖的验收仪器。"
-    },
-    "vxl-phys-soft": {},
-    "vxl-phys-solver": {},
-    "vxl-phys-splat": {},
-    "vxl-phys-terrain": {},
-    "vxl-phys-wheeled": {}
+      "xxhash-rust": {
+        "why": "xxh3-128 规范化哈希的实现来源（§5：跨三编译器 + aarch64 必须逐位一致）。确定性契约要求「同一份哈希算法」，自研一份等于把契约建在自己的实现上，标准算法 + 钉版本更可审计。风险待盯：它的 SIMD 特性若随 target 变体，哈希值可能分叉——现有跨平台哈希门（determinism/hash-compare）是这条依赖的验收仪器。",
+        "version": "0.8.18"
+      }
+    }
   },
   "build_deps": {},
+  "build_scripts": [],
+  "patches": [],
   "lock_packages": [
-    "aho-corasick",
-    "cc",
-    "cfg-if",
-    "find-msvc-tools",
-    "generator",
-    "lazy_static",
-    "libc",
-    "log",
-    "loom",
-    "matchers",
-    "memchr",
-    "nu-ansi-term",
-    "once_cell",
-    "pin-project-lite",
-    "regex-automata",
-    "regex-syntax",
-    "rustversion",
-    "scoped-tls",
-    "sharded-slab",
-    "shlex",
-    "smallvec",
-    "thread_local",
-    "tracing",
-    "tracing-core",
-    "tracing-log",
-    "tracing-subscriber",
-    "valuable",
-    "vxl-phys",
-    "vxl-phys-aero",
-    "vxl-phys-broad",
-    "vxl-phys-core",
-    "vxl-phys-destruction",
-    "vxl-phys-ffi",
-    "vxl-phys-field",
-    "vxl-phys-fluid",
-    "vxl-phys-gpu",
-    "vxl-phys-integrate",
-    "vxl-phys-marine",
-    "vxl-phys-mech",
-    "vxl-phys-memfind",
-    "vxl-phys-narrow",
-    "vxl-phys-replay",
-    "vxl-phys-soft",
-    "vxl-phys-solver",
-    "vxl-phys-splat",
-    "vxl-phys-terrain",
-    "vxl-phys-wheeled",
-    "windows-link",
-    "windows-result",
-    "windows-sys",
-    "xxhash-rust"
+    [
+      "aho-corasick",
+      "1.1.5"
+    ],
+    [
+      "cc",
+      "1.4.5"
+    ],
+    [
+      "cfg-if",
+      "1.0.4"
+    ],
+    [
+      "find-msvc-tools",
+      "0.1.12"
+    ],
+    [
+      "generator",
+      "0.8.9"
+    ],
+    [
+      "lazy_static",
+      "1.5.0"
+    ],
+    [
+      "libc",
+      "0.2.189"
+    ],
+    [
+      "log",
+      "0.4.34"
+    ],
+    [
+      "loom",
+      "0.7.2"
+    ],
+    [
+      "matchers",
+      "0.2.0"
+    ],
+    [
+      "memchr",
+      "2.8.3"
+    ],
+    [
+      "nu-ansi-term",
+      "0.50.3"
+    ],
+    [
+      "once_cell",
+      "1.21.4"
+    ],
+    [
+      "pin-project-lite",
+      "0.2.17"
+    ],
+    [
+      "regex-automata",
+      "0.4.18"
+    ],
+    [
+      "regex-syntax",
+      "0.8.11"
+    ],
+    [
+      "rustversion",
+      "1.0.23"
+    ],
+    [
+      "scoped-tls",
+      "1.0.1"
+    ],
+    [
+      "sharded-slab",
+      "0.1.7"
+    ],
+    [
+      "shlex",
+      "2.0.1"
+    ],
+    [
+      "smallvec",
+      "1.16.1"
+    ],
+    [
+      "thread_local",
+      "1.1.10"
+    ],
+    [
+      "tracing",
+      "0.1.44"
+    ],
+    [
+      "tracing-core",
+      "0.1.36"
+    ],
+    [
+      "tracing-log",
+      "0.2.0"
+    ],
+    [
+      "tracing-subscriber",
+      "0.3.23"
+    ],
+    [
+      "valuable",
+      "0.1.1"
+    ],
+    [
+      "vxl-phys",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-aero",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-broad",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-core",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-destruction",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-ffi",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-field",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-fluid",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-gpu",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-integrate",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-marine",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-mech",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-memfind",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-narrow",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-replay",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-soft",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-solver",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-splat",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-terrain",
+      "0.1.0"
+    ],
+    [
+      "vxl-phys-wheeled",
+      "0.1.0"
+    ],
+    [
+      "windows-link",
+      "0.2.1"
+    ],
+    [
+      "windows-result",
+      "0.4.1"
+    ],
+    [
+      "windows-sys",
+      "0.61.2"
+    ],
+    [
+      "xxhash-rust",
+      "0.8.18"
+    ]
   ]
 }
