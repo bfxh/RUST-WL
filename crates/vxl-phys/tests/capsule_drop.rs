@@ -46,12 +46,24 @@ fn capsule_drop_trace() {
     }
     for t in 1..=180 {
         w.step();
-        if t % 15 == 0 || (w.bodies.position[i].y < 1.0 && t % 3 == 0) {
+        // 判定窗口：落地前后（t≈55–75）逐 tick 打印接触细节与速度——
+        // 「静止后向下漂移」的偏置方向问题在这一段显现（EXPERIMENTS 末节 R）。
+        if (55..=70).contains(&t) {
+            let m = w.manifolds();
+            let mut info = String::from("无流形");
+            for mm in m {
+                let dmax = mm.points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+                info = format!(
+                    "n=[{:6.3},{:6.3},{:6.3}] 深度max={:8.4}",
+                    mm.normal.x, mm.normal.y, mm.normal.z, dmax
+                );
+            }
             println!(
-                "t={t:3} y={:8.3} v={:7.3} 流形={}",
+                "t={t:3} y={:8.4} vy={:8.4} 流形={} {}",
                 w.bodies.position[i].y,
-                w.bodies.linvel[i].length(),
-                w.manifolds().len()
+                w.bodies.linvel[i].y,
+                m.len(),
+                info
             );
         }
     }
