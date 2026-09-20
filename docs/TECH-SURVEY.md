@@ -332,7 +332,12 @@ cannon-es 15/4、Jolt 13/6、PhysX 5 13/6、Oimo.js 10/9。
   `space = m.points[0].feature >> 16`（改动点：`warm_index` 类型 + 查找 + 回写条目键 + 剪枝删除，
   约 8 处）。**关键性质：对现有场景逐位中性**（其 `space` 恒为 0 ⇒ 键等价于 `(a, b, 0)`）⇒
   **三哈希不变即可作为"未扰动既有行为"的证明**；收益用现成的 `warm_match_stats_take`
-  （精确命中占比）量。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
+  （精确命中占比）量。
+  ⚠️ **先补仪器再改键**（2026-09-20 实测）：`warm_match_stats` 的三个计数只在**串行构建器**里
+  写（`vxl-phys-solver` 里两个带 `warm_index` 的构建器变体之一）；`World::step` 走**并行**那套
+  ⇒ 引擎路径上读数恒为 `(0, 0, 0)`（诊断：落地后稳定接触 4 tick，`流形=2 清醒体=2 计数=(0,0,0)`）
+  ⇒ 改键之前先给并行路径接上计数（或提供串行读数通道），否则"收益"无法测量。
+  `crates/vxl-phys/tests/compound_warm.rs` 已把这条固化成 **ignored 回归门**（解禁即判据）。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
   `compound_mass_props`（按子形状 `mass_props` 求和 + 平行轴，含 `R·diag(I)·Rᵀ` 的对角项）
   在 `spawn_compound_body` 里**覆写** `push_dynamic` 写的 AABB 兜底值；判据
   `crates/vxl-phys/tests/compound_mass.rs`（质量 = 精确并集、且显著小于并集 AABB 盒、
