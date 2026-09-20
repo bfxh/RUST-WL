@@ -1,0 +1,95 @@
+name: release
+
+# 发版工作流（提案，2026-09-21 立）。**惰性**：只在**推送 tag** 时触发；
+# 本仓当前没有任何 tag ⇒ 合入本文件不会发布任何东西。
+#
+# 约定与流程见 `docs/RELEASE.md`。要点：
+#   ① 门禁同 CI（五项 + 行为门），失败则**不建 Release**；
+#   ② 不引入新的第三方 action —— 建 Release 用 `gh` CLI（与仓内"action 全 SHA 固定"
+#      的纪律一致，少一个供应链面）；
+#   ③ 权限最小：workflow 级 `contents: read`，只有建 Release 的 job 提到 `write`。
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布/重跑的既有 tag（如 v0.1.0-m1）"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ==================== 门禁：任一项红则不建 Release ====================
+  gates:
+    name: 发版门（五项 + 行为门）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable # zizmor: ignore[unpinned-uses] ref 即工具链名，无固定 SHA 语义
+      # ⚠️ **故意不用 `Swatinem/rust-cache`**：本工作流会把产物**发布**到 Release，
+      # 缓存 + 发布是 zizmor 的 `cache-poisoning` 高危组合（`ci.yml` 里能用是因为它只
+      # `upload-artifact`、不对外发布）。发版频率低 ⇒ 从零编译几分钟换掉这一整类风险。
+      - name: fmt
+        run: cargo fmt --all --check > fmt.log 2>&1; echo "fmt=$?"; cat fmt.log
+      - name: test
+        run: cargo test --release > test.log 2>&1; echo "test=$?"; tail -40 test.log
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings > clippy.log 2>&1; echo "clippy=$?"; tail -40 clippy.log
+      - name: 门槛哈希 + 确定性（ADR 0004）
+        run: |
+          cargo run --release -q -p vxl-phys --example m0_gates 2>&1 | tee m0.log
+          cargo run --release -q -p vxl-phys --example determinism 2>&1 | tee determinism.log
+      - name: 金样三场景（保真门）
+        working-directory: gold-sample
+        run: |
+          for s in col45 pile5 tower25; do
+            echo "=== $s ===" | tee gold-$s.txt
+            cargo run --release -q -- "$s" 600 16 0.01 1 3.0 30 16 - 0 2>&1 | tee -a gold-$s.txt
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: release-gates
+          path: |
+            *.log
+            gold-sample/gold-*.txt
+
+  # ==================== 建 Release（仅当门禁全绿） ====================
+  release:
+    name: 建 GitHub Release
+    needs: gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 建 Release 必需；仅本 job、仅此一项
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: release-gates
+      - name: 建 Release（说明自动生成 + 附门禁产物）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          # 预发布号（-m1 / -日期）自动标 prerelease，与 docs/RELEASE.md §2 的约定一致。
+          case "$TAG" in
+            *-*) PRE="--prerelease" ;;
+            *)   PRE="" ;;
+          esac
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            $PRE \
+            *.log gold-sample/gold-*.txt
