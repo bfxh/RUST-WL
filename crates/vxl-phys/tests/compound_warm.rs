@@ -9,9 +9,12 @@
 //! （更早的"只有串行构建器计数"归因**已被推翻**：`build_constraint` 只有一个调用点，
 //! 就在并行驱动内。）
 //!
-//! **修法**：暖启动键改 `(a, b, space)`（`space = feature >> 16`，复合体子形状序号；
-//! 非复合体场景恒为 0 ⇒ 键退化为 `(a, b, 0)`，逐位中性）。改完解禁本测试：`exact` 应从 0
-//! 变为"每条流形都精确命中"。详见 `TECH-SURVEY.md` A9 ④。
+//! **修法**（试做过一版并**回退**，见 `TECH-SURVEY.md` A9 ④）：给流形加**显式的空间通道**
+//! （如 `Manifold.child: u16`，窄相填、求解器直接读）。⚠️ **不能**用 `feature >> 16` 当键的
+//! 空间——窄相特征号的高位不空闲（裁剪路径是**哈希**，"侧别/裁剪路/哈希"编码用高位）⇒ 空间随
+//! 几何逐帧漂移 ⇒ 普通场景暖启动被随机打掉（实测：`default_tier_stability` 的 `top_y`
+//! 2.7223 → 2.725223）。改完解禁本测试：`exact` 应从 0 变为"每条流形都精确命中"，
+//! 且 `default_tier_stability` 四个冻结读数必须逐位不变。
 
 use vxl_phys::{
     warm_match_stats_take, CompoundChild, FrictionModel, Material, PhysConfig, Quat, Shape, Vec3,

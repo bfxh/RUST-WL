@@ -341,7 +341,18 @@ cannon-es 15/4、Jolt 13/6、PhysX 5 13/6、Oimo.js 10/9。
   ⇒ 不是"第二条不暖"，而是**这一对的暖缓存整条失效**（两条流形共用 `(a, b)` 键 ⇒ 相互覆盖/
   查不到）——比原判更值得修，而**它正好是键改 `(a, b, space)` 要解决的问题**。
   判据：`crates/vxl-phys/tests/compound_warm.rs`（现为 ignored 回归门）里的 `exact` 应从 0
-  变为"每条流形都精确命中"，且 `warm_counter_probe` 的对照读数不得回退。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
+  变为"每条流形都精确命中"，且 `warm_counter_probe` 的对照读数不得回退。
+  ⚠️⚠️ **试做并回退（2026-09-20 当日）**：键改 `(a, b, space)`、`space = feature >> 16` 的方案
+  **不成立**——窄相特征号的**高位并不空闲**（裁剪路径的特征号是**哈希**，"侧别/裁剪路/哈希"
+  的编码本身就用高位）⇒ 提取出的"空间"在普通场景里是**逐帧漂移的哈希高位**，键随之漂移
+  ⇒ **普通场景的暖启动被随机打掉**。**抓住它的是仓里的冻结读数门**：`default_tier_stability`
+  的 `top_y` 从 2.7223 漂到 **2.725223**（3 mm）⇒ 教训：**"对既有场景逐位中性"不能假设，必须实测**
+  （本轮我正是先写了"逐位中性 ⇒ 三哈希不变即证明"，实测把它否了）。
+  **正确修法**：给流形加**显式的空间通道**（如 `Manifold.child: u16`，窄相填、求解器直接读），
+  不借 `feature` 的任何位。**判据三条**：① `default_tier_stability` 四个冻结读数逐位不变；
+  ② `compound_warm`（ignored 回归门）解禁后 `exact > 0`；③ `warm_counter_probe` 的 `(32, 0, 0)`
+  不回归。注：窄相那侧的子序号标记（`tag_child_features`）**仍然有效**——它是"匹配用的稳定
+  特征"，只是**不能当键用**。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
   `compound_mass_props`（按子形状 `mass_props` 求和 + 平行轴，含 `R·diag(I)·Rᵀ` 的对角项）
   在 `spawn_compound_body` 里**覆写** `push_dynamic` 写的 AABB 兜底值；判据
   `crates/vxl-phys/tests/compound_mass.rs`（质量 = 精确并集、且显著小于并集 AABB 盒、
