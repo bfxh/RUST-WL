@@ -14,7 +14,7 @@
 //!   + 参照体检查点位姿表（容差表雏形：末态 max |Δpos|）。
 
 use rapier3d::prelude::*;
-use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
+use vxl_phys::{FrictionModel, Material, PhysConfig, Quat, Shape, Vec3, World};
 
 struct Scene {
     layers: usize,
@@ -98,6 +98,21 @@ fn build_vxl(
             Quat::IDENTITY,
             1000.0,
         );
+    }
+    // 摩擦系数可用环境变量 `VXL_MU` 覆盖（默认 0.5 = 引擎默认）：睡眠/角向机制实验的
+    // **剂量-响应**用（见 `OPEN-PROBLEMS.md` P1 的角向线索）。
+    let mu = std::env::var("VXL_MU")
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.5);
+    if (mu - 0.5).abs() > 1e-6 {
+        let m = w.add_material(Material {
+            friction: FrictionModel::Coulomb { mu },
+            restitution: 0.0,
+        });
+        for b in 0..w.bodies.len() {
+            w.bodies.set_material(b, m);
+        }
     }
     let ids: Vec<usize> = (0..w.bodies.len())
         .filter(|&i| w.bodies.is_dynamic(i))
