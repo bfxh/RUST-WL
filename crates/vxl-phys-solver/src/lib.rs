@@ -101,6 +101,26 @@ static WB_CLIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 static WB_HASH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static WB_SAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **睡眠诊断计数**（只计数、不改行为 ⇒ 不影响哈希）。用途：分辨"岛为什么没睡"。
+/// 动机（`PLAN-solver-limits.md`）：`16/1/128` 塔末态 **0 体超阈**却仍有 ~625 体不睡，
+/// 而"牵连唤醒清零"假说已否证 ⇒ 必须**先量**：是"有人快"（`all_slow=false`），
+/// 还是"`all_slow=true` 但 `min_timer` 攒不满 `sleep_time`"（成员 churn 拖低）。
+static SLEEP_D_FAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLEEP_D_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLEEP_D_SLEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLEEP_D_WAIT_MAX_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 取睡眠诊断：(有人快而拒, 全慢但未满, 入睡, 等待中 `min_timer` 最大值(ms))。
+pub fn sleep_diag_take() -> (u64, u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        SLEEP_D_FAST.swap(0, Relaxed),
+        SLEEP_D_WAIT.swap(0, Relaxed),
+        SLEEP_D_SLEPT.swap(0, Relaxed),
+        SLEEP_D_WAIT_MAX_MS.swap(0, Relaxed),
+    )
+}
+
 /// **参考面变化的代理**（诊断；只计数）：匹配上的点里，"接触法向变了"（`dot < 0.99999`）
 /// 与"法向几乎不变"各占多少。
 ///
@@ -954,7 +974,11 @@ impl ImpulseSolver {
                     bodies.sleep_timer[i] += dt;
                     min_timer = min_timer.min(bodies.sleep_timer[i]);
                 }
+                use std::sync::atomic::Ordering::Relaxed;
+                SLEEP_D_WAIT.fetch_add(1, Relaxed);
+                SLEEP_D_WAIT_MAX_MS.fetch_max((min_timer * 1000.0) as u64, Relaxed);
                 if min_timer >= config.sleep_time {
+                    SLEEP_D_SLEPT.fetch_add(1, Relaxed);
                     for &bi in &island.bodies {
                         let i = bi as usize;
                         bodies.awake[i] = false;
@@ -963,6 +987,7 @@ impl ImpulseSolver {
                     }
                 }
             } else {
+                SLEEP_D_FAST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 for &bi in &island.bodies {
                     let i = bi as usize;
                     bodies.sleep_timer[i] = 0.0;
