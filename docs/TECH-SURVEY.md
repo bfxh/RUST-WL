@@ -261,6 +261,34 @@ contact reduction。**对应本仓 DESIGN 阶段 2（P5，未做）**：点数 �
 | **A6** | **窄相改"特征稳定流形"** | Box2D【文档】 | G1 的结构性前置 | 大（多会话） | **已实测收窄**（`EXPERIMENTS` 末节 K）：平面堆稳态 85.1% 精确命中（已相当稳定），**塔只有 69.6%、回退 18.7%** ⇒ 前置不是"重写窄相"，而更可能是"**参考面选择的跨帧稳定性**"（`ref_base` 翻转 ⇒ 特征 ID 变）；先按门分类定位塔那 30% 失配
 | **A7** | 平台侧：静态地形分层网格 + 动态 TLAS/BLAS | VoxelRT / Embree【文档】 | 平台宽相 | 大（M2 排期） | 与 M2 一起，不在本仓 M1 判据内 |
 | **A8** | 理论入口：精读 VBD/AVBD 判断"块"怎么取 | VBD TOG 2024【文档】 | G1/G2 机制 | 读+推演（无实验） | 产出一份"能否映射到本仓"的判断（可写进 DESIGN） |
+| **A9** | **形状保真：真 capsule / cone / 圆柱 / 复合体**（当前全是凸包近似） | Rapier 0.35.3【**源码，本机 vendored**】+ Jolt/PhysX/Havok（同场 9 引擎） | **能力缺口（非性能）** | 按形状拆，一次一个（capsule 最易） | **现成判据**：`ARENA_TAG=x node scripts/arena-drive.mjs selftest` 里 `shape-capsule / shape-cylinder / shape-cone / shape-compound` 四项 **degraded → pass**（`out/selftest-*.json`），外加三哈希与五项门禁 |
+
+**A9 的证据（2026-09-20 实测，浏览器对拍全矩阵）**：vxl-phys = **15 pass / 4 degraded / 0 fail**，
+而 19 项探针里**只有形状组有缺口**：
+
+| 分组 | 通过 | degraded |
+|---|---|---|
+| 形状（9） | sphere / box / convex / wide-hull / **trimesh** | **capsule / cylinder / cone / compound** |
+| 约束（5） | spherical / revolute / fixed / prismatic / distance —— **全过** | — |
+| 稳定性（5） | stack / ccd / **sleep** / energy / distinct —— **全过** | — |
+
+同场对照：**Rapier 19/0/0（唯一全过）**、Crashcat 18/1、Bullet 16/3、Havok 15/4、
+cannon-es 15/4、Jolt 13/6、PhysX 5 13/6、Oimo.js 10/9。
+⇒ 本仓的**唯一被扣分项就是形状保真**；关节与稳定性两块在浏览器侧已全绿。
+
+**缺口的确切形状**（读源码核过）：`vxl-phys-core::Shape` 只有
+`Box / Sphere / Cylinder / HeightField / Provider / ConvexHull` —— **没有 `Capsule`、没有 `Cone`**；
+而 `Cylinder` 在窄相走的是**多面体（分面凸包）**路径 ⇒ 圆柱滚动实际是"多边形在滚"；
+复合体在 arena 适配层退化为"子体各取 AABB 角点的并集凸包"。arena 侧 `src/engines/vxl.ts`
+对此有如实注释（"capsule degrade through adaptShape to a convex hull"）。
+
+**技术路线（复用已有件）**：本仓已有 `narrow` 的 GJK/EPA（`gjk.rs`，外壳×外壳 = EPA 单法线
++ 近面顶点细化）⇒ 把各形状实现成**支撑函数**（capsule = 线段 ⊕ 半径；cylinder = 圆盘 ⊕
+线段；cone = 顶点+底圆盘），GJK/EPA **不需要改**（支撑函数多态是标准做法）。质量/惯量
+（`mass.rs`）有闭式解；宽相只要 AABB 支持；最后接 wasm 桥与 arena 适配层（去掉 degrade 注释）。
+
+**建议顺序**（按"最易 → 最难"，每步独立可判）：① capsule（线段⊕球，最简，且是角色/胶囊体
+最常用）→ ② 真 cylinder（替换分面凸包）→ ③ cone → ④ 复合体（多形状体）。
 
 **排序理由（已按 A1/A2/A3/A5 的实测修订）**：A1（摩擦）、A2（岛内染色）、A5（接触点裁量）
 实测否证；**A3（冷热分离）已落地**（位不变 + pyramid 9/9 轮 −4.3%）。

@@ -98,6 +98,22 @@ A/B 跑完必须 `npm run build:vxl && npm run build` 把 `public/` 与 `dist/` 
 当前构建（否则浏览器测的是旧 wasm——本轮与上一轮都踩过）。**换代哈希的改动还要
 过金样**（见下），两道门都贴读数才算过。
 
+## 浏览器对拍自检（PhysArena，19 探针 × 9 引擎）
+
+```bash
+cd /d/开发/physarena
+npm run build:vxl && npm run build      # 刷成当前构建（先做，否则测的是旧 wasm）
+(npx vite preview --port 4173 &)        # 自检脚本走 http://localhost:4173
+ARENA_TAG=verify node scripts/arena-drive.mjs selftest   # 落盘 out/selftest-verify.json
+```
+**基线（2026-09-20 实测，当前 HEAD）**：vxl-phys = **15 pass / 4 degraded / 0 fail**（boot 4.5 ms），
+4 项 degraded **全部是形状近似**：`shape-capsule` / `shape-cylinder` / `shape-cone` /
+`shape-compound`（capsule/cone 引擎侧没有这两种形状；cylinder 走多面体路径；复合体退化为
+AABB 角点并集凸包）。**关节 5/5 与稳定性 5/5 全过**（含 `stability-sleep`）。同场：Rapier
+19/0/0、Crashcat 18/1、Bullet 16/3、Havok 15/4、cannon-es 15/4、Jolt 13/6、PhysX 13/6、Oimo 10/9。
+脚本另报 1 条资源加载失败（HTTP 未找到；判定"失败项 0"，不影响结论）。
+⇒ **形状保真 = 本仓在浏览器对拍里的唯一缺口**（`TECH-SURVEY.md` §6 的 A9）。
+
 ## 金样（保真度门，换代哈希时必跑）
 
 ```bash
