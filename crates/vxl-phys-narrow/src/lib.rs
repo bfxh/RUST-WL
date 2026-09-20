@@ -530,14 +530,16 @@ impl CompoundStore {
     }
 }
 
-/// 把新产出的一段流形里的接触点特征号打上**子形状序号**（左移 16 位；`0` 哨兵保持 0）。
+/// 把新产出的一段流形里的接触点特征号打上**子形状序号**（`(ci+1) << 16`）。
+///
+/// 对**全部**点位生效（含原本 `feature == 0` 的）：球类接触的特征号恒为 0（"无特征"哨兵），
+/// 而复合体里两个球子形状的接触点在同一个体对上会互相顶替 ⇒ 子序号必须成为可区分信息。
+/// 低 16 位保持窄相原编码不变（`0` 时置为纯 tag）。
 fn tag_child_features(ms: &mut [Manifold], ci: usize) {
     let tag = ((ci as u32) + 1) << 16;
     for m in ms.iter_mut() {
         for p in m.points.as_mut_slice() {
-            if p.feature != 0 {
-                p.feature |= tag;
-            }
+            p.feature = if p.feature == 0 { tag } else { p.feature | tag };
         }
     }
 }
@@ -2708,6 +2710,15 @@ mod tests {
                 "地形法线应竖直，实得 {:?}",
                 m.normal
             );
+            // 球子形状的特征号恒为 0 ⇒ 子序号标记必须对**全部**点位生效，否则两个子形状
+            // 的接触点在同一个体对（暖启动缓存键）上无法区分。
+            for p in m.points.iter() {
+                assert!(
+                    p.feature >> 16 != 0,
+                    "地形接触也应带子序号标记，实得 {}",
+                    p.feature
+                );
+            }
         }
     }
 
