@@ -53,6 +53,24 @@ pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
                 local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
             }
         }
+        // 圆锥：实心锥（高 H = 2·half_height，m = ρ·πr²H/3）。惯量按**关于体原点**给
+        // （本仓无质心偏移字段）：绕轴 3/10·m·r²；横向 = 质心项 (3/20·m·r² + 3/80·m·H²)
+        // + 平行轴 m·(H/4)² = m·(0.15·r² + 0.40·h²)。⚠️ 锥质心在底面上方 H/4，与体原点
+        // 不重合（见 `shape.rs` 的说明）。
+        Shape::Cone {
+            half_height,
+            radius,
+        } => {
+            let h = 2.0 * half_height;
+            let m = density * core::f32::consts::PI * radius * radius * h / 3.0;
+            let iy = 0.3 * m * radius * radius;
+            let ixz = m * (0.15 * radius * radius + 0.40 * half_height * half_height);
+            MassProps {
+                mass: m,
+                inv_mass: 1.0 / m,
+                local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
+            }
+        }
         // 胶囊体：中段圆柱 + 两片半球（闭式解；退化自检：h→0 给出球 2/5·m·r²、
         // r→0 给出细杆 m·h²/3 ⇒ 两端极限都对）。
         Shape::Capsule {

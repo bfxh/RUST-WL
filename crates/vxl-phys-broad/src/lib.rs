@@ -64,6 +64,22 @@ pub fn shape_aabb(
                 r.m[2][1].abs() * half_height + radius,
             )
         }
+        // 圆锥：顶点 ∪ 底圆盘（凸包 ⇒ 取两者极值即**精确**）。顶点贡献 |R[i][1]·h|，
+        // 底圆盘再外扩 r·√(R[i][0]² + R[i][2]²)（旋转矩阵行 i 单位长）。
+        Shape::Cone {
+            half_height,
+            radius,
+        } => {
+            let r = vxl_phys_core::Mat3::from_quat(rot);
+            Vec3::new(
+                r.m[0][1].abs() * half_height
+                    + radius * (r.m[0][0] * r.m[0][0] + r.m[0][2] * r.m[0][2]).sqrt(),
+                r.m[1][1].abs() * half_height
+                    + radius * (r.m[1][0] * r.m[1][0] + r.m[1][2] * r.m[1][2]).sqrt(),
+                r.m[2][1].abs() * half_height
+                    + radius * (r.m[2][0] * r.m[2][0] + r.m[2][2] * r.m[2][2]).sqrt(),
+            )
+        }
         // 凸体外壳：局部 AABB 半长（宽相只需保守界）。
         Shape::ConvexHull { half, .. } => {
             let r = vxl_phys_core::Mat3::from_quat(rot);

@@ -359,6 +359,10 @@ fn poly_key(s: &Shape) -> u64 {
             half_height,
             radius,
         } => mix(2, half_height, radius, CYLINDER_SEGMENTS as f32),
+        Shape::Cone {
+            half_height,
+            radius,
+        } => mix(3, half_height, radius, CYLINDER_SEGMENTS as f32),
         _ => 0,
     }
 }
@@ -769,6 +773,10 @@ impl DefaultNarrowPhase {
                 half_height,
                 radius,
             } => ConvexPolytope::cylinder_polytope(radius, half_height, CYLINDER_SEGMENTS),
+            Shape::Cone {
+                half_height,
+                radius,
+            } => ConvexPolytope::cone_polytope(radius, half_height, CYLINDER_SEGMENTS),
             _ => return None,
         };
         self.polys.push(poly);
@@ -1670,7 +1678,7 @@ impl DefaultNarrowPhase {
             };
             let ok = match *body_shape {
                 Shape::Sphere { radius } => self.sphere_heightfield(bpos, radius, hf),
-                Shape::Box { .. } | Shape::Cylinder { .. } => {
+                Shape::Box { .. } | Shape::Cylinder { .. } | Shape::Cone { .. } => {
                     let idx = match self.poly_for(body_shape) {
                         Some(i) => i,
                         None => return,
@@ -1813,10 +1821,10 @@ impl DefaultNarrowPhase {
                 }
             }
             (
-                Shape::Box { .. } | Shape::Cylinder { .. },
-                Shape::Box { .. } | Shape::Cylinder { .. },
+                Shape::Box { .. } | Shape::Cylinder { .. } | Shape::Cone { .. },
+                Shape::Box { .. } | Shape::Cylinder { .. } | Shape::Cone { .. },
             ) => {
-                // 圆柱参与的对：走通用路径（多面体填充 + 逐顶点/通用 SAT）。
+                // 圆柱/圆锥参与的对：走通用路径（多面体填充 + 逐顶点/通用 SAT）。
                 let ia = match self.poly_for(sa) {
                     Some(i) => i,
                     None => return,
@@ -2117,6 +2125,47 @@ mod tests {
         assert!(
             (d - 0.01).abs() < 2e-3,
             "深度应 ≈1 cm（0.3 − 端点距 0.29），实得 {d}"
+        );
+    }
+
+    /// 圆锥 × 盒地板（坐底）：底圆盘多面化 ⇒ 应给出**多点**支撑（单点会晃）、法线竖直、
+    /// 最深压入 ≈ 压入量。
+    #[test]
+    fn cone_on_box_floor() {
+        let mut b = BodySet::new();
+        b.push_static(
+            Shape::Box {
+                half: Vec3::new(5.0, 0.5, 5.0),
+            },
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+        );
+        // 底面在 y0 − h；要让底圆盘压入地面（y=0）1 cm ⇒ y0 = 0.5 − 0.01 = 0.49。
+        b.push_dynamic(
+            Shape::Cone {
+                half_height: 0.5,
+                radius: 0.4,
+            },
+            Vec3::new(0.0, 0.49, 0.0),
+            Quat::IDENTITY,
+            1000.0,
+        );
+        let out = manifolds_for(&b, &[]);
+        assert!(!out.is_empty(), "圆锥坐底应有接触");
+        let m = &out[0];
+        let floor_is_a = m.a == 0;
+        let want = if floor_is_a { 1.0 } else { -1.0 };
+        assert!(
+            m.normal.y * want > 0.99,
+            "法线应竖直（a→b），实得 {:?}",
+            m.normal
+        );
+        let dmax = m.points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+        assert!((dmax - 0.01).abs() < 3e-3, "最深压入应 ≈1 cm，实得 {dmax}");
+        assert!(
+            m.points.len() >= 3,
+            "坐底应为多点支撑（多点才不摇），实得 {} 点",
+            m.points.len()
         );
     }
 

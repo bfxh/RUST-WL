@@ -133,6 +133,51 @@ impl ConvexPolytope {
         p.finish()
     }
 
+    /// **圆锥**（底面 r 在 `y = −h`、顶点在 `y = +h`）：底盖 n 边形 + n 个三角侧面
+    /// `[b_{i+1}, b_i, apex]`（此绕序给出**朝外且朝上**的法线）。
+    ///
+    /// 为什么多面化而不是解析支撑：锥侧面是**光滑**面，喂 EPA 会复现胶囊那类不适定
+    /// （`EXPERIMENTS.md` R.2）。代价是滚动时的"打摆"（与圆柱同族，`TECH-SURVEY.md` A9 记录）。
+    pub fn cone_polytope(radius: f32, half_height: f32, segments: u32) -> Self {
+        let n = segments.max(8);
+        let mut p = ConvexPolytope::default();
+        let apex = Vec3::new(0.0, half_height, 0.0);
+        let mut b: Vec<Vec3> = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let th = 2.0 * core::f32::consts::PI * (i as f32) / (n as f32);
+            let (s, c) = th.sin_cos();
+            b.push(Vec3::new(radius * c, -half_height, radius * s));
+        }
+        let ni = n as i32;
+        // 底盖（外法线 −Y）：与圆柱同款，角度递增序。
+        p.face_start.push(0);
+        p.face_normal.push(-Vec3::Y);
+        for k in 0..ni {
+            p.verts.push(b[k as usize]);
+        }
+        // 侧面三角：法线用该三角的**真实面法线**（朝外 + 朝上），不是纯径向。
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let bi = b[i as usize];
+            let bj = b[j as usize];
+            let e1 = bi - bj;
+            let e2 = apex - bj;
+            let nrm = Vec3::new(
+                e1.y * e2.z - e1.z * e2.y,
+                e1.z * e2.x - e1.x * e2.z,
+                e1.x * e2.y - e1.y * e2.x,
+            )
+            .normalize();
+            p.face_start.push(p.verts.len() as u32);
+            p.face_normal.push(nrm);
+            p.verts.push(bj);
+            p.verts.push(bi);
+            p.verts.push(apex);
+        }
+        p.face_start.push(p.verts.len() as u32);
+        p.finish()
+    }
+
     pub fn face_range(&self, f: usize) -> (usize, usize) {
         (self.face_start[f] as usize, self.face_start[f + 1] as usize)
     }

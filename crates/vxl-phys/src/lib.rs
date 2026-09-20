@@ -54,6 +54,12 @@ fn cross_section_area(shape: &Shape) -> f32 {
             half_height,
             radius,
         } => 2.0 * radius * (2.0 * half_height) / 2.0 + std::f32::consts::PI * radius * radius,
+        // 锥：侧面投影按三角剖面（底宽 2r、高 2h ⇒ 面积 r·h）另加底圆盘；
+        // 锥尖一端无面 ⇒ 比同尺寸圆柱略低估（阻力估计够用）。
+        Shape::Cone {
+            half_height,
+            radius,
+        } => radius * half_height + std::f32::consts::PI * radius * radius,
         Shape::ConvexHull { half, .. } => {
             4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
         }

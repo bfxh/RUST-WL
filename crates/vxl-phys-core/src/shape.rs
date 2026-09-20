@@ -32,6 +32,16 @@ pub enum Shape {
         half_height: f32,
         radius: f32,
     },
+    /// **圆锥**（本地方向 = +Y）：底面（半径 `radius`）在 `y = −half_height`，顶点在
+    /// `y = +half_height`（高 = `2·half_height`）。
+    /// 碰撞走**多面化**（`ConvexPolytope::cone_polytope`，与圆柱同族的棱面近似）——锥侧面是
+    /// **光滑**面，直接喂 EPA 会复现胶囊那类不适定（`TECH-SURVEY.md` A9 / `EXPERIMENTS.md` R.2）。
+    /// ⚠️ 本仓"体原点＝质心"这一前提对锥**不成立**（锥质心在底面上方 `H/4` 处）；惯量按
+    /// **关于体原点**给出（含平行轴项），质心偏移的力矩效应不建模。
+    Cone {
+        half_height: f32,
+        radius: f32,
+    },
     HeightField(HeightFieldId),
     /// **外部碰撞提供者体**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）：
     /// id 索引 `interop::ProviderColliders`。静态 Marker 体，AABB 由提供者给。
@@ -60,6 +70,11 @@ impl Shape {
                 half_height,
                 radius,
             } => half_height + radius,
+            // 顶点距原点 `half_height`、底圈距原点 `√(h²+r²)` ⇒ 取后者。
+            Shape::Cone {
+                half_height,
+                radius,
+            } => (half_height * half_height + radius * radius).sqrt(),
             Shape::ConvexHull { half, .. } => half.length(),
             Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
         }
@@ -71,6 +86,7 @@ impl Shape {
             Shape::Sphere { .. } => "sphere",
             Shape::Cylinder { .. } => "cylinder",
             Shape::Capsule { .. } => "capsule",
+            Shape::Cone { .. } => "cone",
             Shape::HeightField(_) => "heightfield",
             Shape::Provider(_) => "provider",
             Shape::ConvexHull { .. } => "hull",
