@@ -28,6 +28,7 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 | 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6219d1866b20c002d806d3d699a487ff`、末态活跃 0、PASS；压力 `0x63e5eb35b71b8c84ade4a053aeecb900`（report-only） |
 | 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0xd8601988ad7989ffb58ba8b956c2f8db`（10 轮逐位一致） |
 | T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.39×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
+| **默认档长跑稳定性**（新增 2026-09-20） | `cargo test --release -p vxl-phys --test default_tier_stability` | 两个测试：① 冻结读数 `top_y 2.7223 / Σv² 2.1488 / awake 216 / manifolds 835`（6×6×6、3000 步、默认档，两次连跑逐位一致）；② **金丝雀**——降到 4 扫掠必须明显不同（实测流形 835→514、Σv²→2.5626、清醒→192），否则场景不灵敏、门无效。**为什么要它**：金样配方自带 `16` 迭代 ⇒ 默认档（6 扫掠）的改动**金样门看不见**（`EXPERIMENTS` 记过的覆盖缺口）。改动默认档时更新那四个冻结值并按 ADR 0004 记换代理由；`--nocapture` 可读实际读数 |
 
 **2026-09-15 参与式降点换代**（`vxl_phys_solver::point_reduce_after = 3`）：
 `0x6219d186…` / `0x63e5eb35…` / `0xd8601988…`（当前）←
