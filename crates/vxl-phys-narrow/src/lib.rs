@@ -758,7 +758,8 @@ impl DefaultNarrowPhase {
     /// - 流形点 = 外壳点云中落在对方支撑面 `plane ± skin` 带内的顶点，
     ///   逐点深度 `plane − n̂·v`（n̂ = 对方 → 外壳）；取最深 4 点。
     /// - `feature = 顶点序号 + 1`（点云序稳定 ⇒ 跨帧可续接）。
-    /// - 外壳 × 高度场：暂不受理（列裁剪对任意凸壳未实现，见 ROUTE §3）。
+    /// - 外壳 × 高度场：**已支持**——走 `hull_heightfield`（逐顶点采样，与 `poly_heightfield`
+    ///   同款），不再走本函数。
     #[allow(clippy::too_many_arguments)] // 与 process_pair 同形（两侧位姿 + 形状 + 出参）
     fn hull_pair(
         &mut self,
@@ -1551,6 +1552,35 @@ impl DefaultNarrowPhase {
         }
         self.select_contacts(self.min_point_sep)
     }
+
+    /// 外壳 × 高度场：**逐顶点采样**（与 `poly_heightfield` 同款，只是顶点来自外壳点云）。
+    /// 此前该组合**不受理**（`hull_pair` 的注："列裁剪对任意凸壳未实现"）。
+    /// 特征 = 顶点序号 + 1（点云序稳定 ⇒ 跨帧可续接）。点云较密时接触点靠 `select_contacts`
+    /// 截断到 ≤4。
+    fn hull_heightfield(&mut self, hull: u32, pos: Vec3, rot: Quat, hf: &HeightField) -> bool {
+        self.cand.clear();
+        let r = Mat3::from_quat(rot);
+        let Some(h) = self.hulls.get(hull) else {
+            return false;
+        };
+        for (idx, &p) in h.points.iter().enumerate() {
+            let v = pos + r.mul_vec3(p);
+            if let Some((hgt, _)) = hf.sample(v.x, v.z) {
+                let depth = hgt - v.y;
+                if depth > -self.skin {
+                    self.cand.push(ContactPoint {
+                        point: Vec3::new(v.x, hgt, v.z),
+                        depth,
+                        feature: idx as u32 + 1,
+                    });
+                }
+            }
+        }
+        if self.cand.is_empty() {
+            return false;
+        }
+        self.select_contacts(self.min_point_sep)
+    }
 }
 
 /// 内部时「最大平面距」（全部为负；面数小，代价可忽略）。
@@ -1944,7 +1974,8 @@ impl DefaultNarrowPhase {
                     };
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
-                Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => return,
+                Shape::ConvexHull { hull, .. } => self.hull_heightfield(hull, bpos, brot, hf),
+                Shape::HeightField(_) | Shape::Provider(_) => return,
                 // 复合体已在上游按子形状展开（本臂不可达，留作穷尽性）。
                 Shape::Compound { .. } => return,
                 // 胶囊体 × 地形：**本切片暂不支持**（显式拒绝，不静默产空接触）。
@@ -2387,6 +2418,56 @@ mod tests {
             (d - 0.01).abs() < 2e-3,
             "深度应 ≈1 cm（0.3 − 端点距 0.29），实得 {d}"
         );
+    }
+
+    /// 外壳 × 地形：此前 `hull_pair` 明确不受理（"列裁剪对任意凸壳未实现"）⇒ 静默无接触。
+    /// 现走**逐顶点采样**（与 `poly_heightfield` 同款）。判据：有接触、法线竖直、正压入。
+    #[test]
+    fn hull_on_heightfield() {
+        let mut np = DefaultNarrowPhase::new(0.01);
+        // 外壳：3×3×3 立方点云（半 0.3）。
+        let mut pts: Vec<Vec3> = Vec::with_capacity(27);
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    pts.push(Vec3::new(x as f32, y as f32, z as f32) * 0.3);
+                }
+            }
+        }
+        let hid = np.add_hull(pts);
+        let mut b = BodySet::new();
+        let hf = HeightField::flat(-5.0, -5.0, 11, 11, 1.0, 0.0);
+        // 底面压入地面（y=0）1 cm ⇒ 中心 y = 0.29。
+        b.push_dynamic(
+            Shape::ConvexHull {
+                hull: hid,
+                half: Vec3::splat(0.3),
+            },
+            Vec3::new(0.0, 0.29, 0.0),
+            Quat::IDENTITY,
+            1.0,
+        );
+        let _marker = b.push_static(Shape::HeightField(0), Vec3::ZERO, Quat::IDENTITY);
+        let mut pairs = Vec::new();
+        for i in 0..b.len() as u32 {
+            for j in (i + 1)..b.len() as u32 {
+                pairs.push((i, j));
+            }
+        }
+        let mut out = Vec::new();
+        np.collide(
+            &b,
+            &pairs,
+            &[hf],
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &SerialJobSystem,
+        );
+        assert!(!out.is_empty(), "外壳 × 地形应有接触（此前为静默无接触）");
+        let m = &out[0];
+        assert!(m.normal.y.abs() > 0.99, "法线应竖直，实得 {:?}", m.normal);
+        let dmax = m.points.iter().map(|p| p.depth).fold(f32::MIN, f32::max);
+        assert!(dmax > 0.0, "应有正压入，实得 {dmax}");
     }
 
     /// 外壳 × 圆柱：曾因 `support_of` 缺圆柱/锥分支而**静默无接触**（`TECH-SURVEY.md` A9 ④ 留档）。
