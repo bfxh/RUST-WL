@@ -106,13 +106,18 @@ npm run build:vxl && npm run build      # 刷成当前构建（先做，否则�
 (npx vite preview --port 4173 &)        # 自检脚本走 http://localhost:4173
 ARENA_TAG=verify node scripts/arena-drive.mjs selftest   # 落盘 out/selftest-verify.json
 ```
-**基线（2026-09-20 实测，当前 HEAD）**：vxl-phys = **15 pass / 4 degraded / 0 fail**（boot 4.5 ms），
-4 项 degraded **全部是形状近似**：`shape-capsule` / `shape-cylinder` / `shape-cone` /
-`shape-compound`（capsule/cone 引擎侧没有这两种形状；cylinder 走多面体路径；复合体退化为
-AABB 角点并集凸包）。**关节 5/5 与稳定性 5/5 全过**（含 `stability-sleep`）。同场：Rapier
-19/0/0、Crashcat 18/1、Bullet 16/3、Havok 15/4、cannon-es 15/4、Jolt 13/6、PhysX 13/6、Oimo 10/9。
-脚本另报 1 条资源加载失败（HTTP 未找到；判定"失败项 0"，不影响结论）。
-⇒ **形状保真 = 本仓在浏览器对拍里的唯一缺口**（`TECH-SURVEY.md` §6 的 A9）。
+**基线（2026-09-20 实测，当前 HEAD）**：vxl-phys = **19 pass / 0 degraded / 0 fail**。
+形状四项全部转为**真实现**：`shape-capsule`（解析支撑 + 窄相解析最近点）、`shape-cylinder`
+（多面体棱柱 + 桥/适配层接线）、`shape-cone`（新增 `Shape::Cone`，多面化）、
+`shape-compound`（新增 `Shape::Compound`，窄相按子形状展开）。**关节 5/5 与稳定性 5/5 全过**
+（含 `stability-sleep`）。同场：Rapier 19/0/0、Crashcat 18/1、Bullet 16/3、Havok 15/4、
+cannon-es 15/4、Jolt 13/6、PhysX 13/6、Oimo 10/9。脚本另报 1 条资源加载失败（HTTP 未找到；
+判定"失败项 0"，不影响结论）。
+
+**历史基线（同日早先，A9 收口之前）**：15 pass / 4 degraded / 0 fail（boot 4.5 ms）——4 项
+degraded **全是形状近似**（capsule / cone 引擎侧没有这两种形状；cylinder 未接线；复合体退化为
+AABB 角点并集凸包）。那正是 `TECH-SURVEY.md` §6 的 **A9**，当日四项全部收口。
+⇒ **形状保真不再是本仓在浏览器对拍里的缺口**；下一步看的是稳定性/性能类探针。
 
 ## 金样（保真度门，换代哈希时必跑）
 
