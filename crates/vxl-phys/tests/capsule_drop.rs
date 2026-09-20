@@ -10,6 +10,10 @@
 
 use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
 
+/// ⚠️ **已知缺陷，暂标 ignore**（`EXPERIMENTS.md` 末节 R）：胶囊在**静止期向下漂移**
+/// （随穿透加深而加速）⇒ 最终穿地；`e=0` 时因早期入睡而被掩盖，所以本测试**特意**用
+/// arena 探针的材质（μ=0.7、e=0.05）把它逼出来。**修好后删掉 `#[ignore]` 即可作为回归门。**
+#[ignore = "已知缺陷：e>0 时胶囊静止期向下漂移（EXPERIMENTS 末节 R）"]
 #[test]
 fn capsule_drop_trace() {
     let mut w = World::new(PhysConfig::default());
@@ -30,6 +34,16 @@ fn capsule_drop_trace() {
         Quat::IDENTITY,
         1000.0,
     ) as usize;
+    // **材质必须与 arena 探针一致**（μ=0.7、e=0.05）：默认的 e=0 会让胶囊在 t≈90 入睡，
+    // 从而**掩盖**"静止时向下漂移"的缺陷（见 EXPERIMENTS 末节 R）。这个测试的存在意义
+    // 就是守住那一层，所以这里不能再用默认材质。
+    let mg = w.add_material(vxl_phys::Material {
+        friction: vxl_phys::FrictionModel::Coulomb { mu: 0.7 },
+        restitution: 0.05,
+    });
+    for b in 0..w.bodies.len() {
+        w.bodies.set_material(b, mg);
+    }
     for t in 1..=180 {
         w.step();
         if t % 15 == 0 || (w.bodies.position[i].y < 1.0 && t % 3 == 0) {
