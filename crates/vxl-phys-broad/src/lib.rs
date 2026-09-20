@@ -52,6 +52,18 @@ pub fn shape_aabb(
             )
         }
         Shape::Sphere { radius } => Vec3::splat(radius),
+        // 胶囊体：**精确** AABB —— 线段（局部 ±Y·h）的 |R| 投影 ⊕ radius。
+        Shape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let r = vxl_phys_core::Mat3::from_quat(rot);
+            Vec3::new(
+                r.m[0][1].abs() * half_height + radius,
+                r.m[1][1].abs() * half_height + radius,
+                r.m[2][1].abs() * half_height + radius,
+            )
+        }
         // 凸体外壳：局部 AABB 半长（宽相只需保守界）。
         Shape::ConvexHull { half, .. } => {
             let r = vxl_phys_core::Mat3::from_quat(rot);

@@ -49,6 +49,11 @@ fn cross_section_area(shape: &Shape) -> f32 {
             half_height,
             radius,
         } => 2.0 * radius * (2.0 * half_height) / 2.0 + std::f32::consts::PI * radius * radius,
+        // 胶囊：中段按圆柱（含帽时略低估，阻力估计够用）。
+        Shape::Capsule {
+            half_height,
+            radius,
+        } => 2.0 * radius * (2.0 * half_height) / 2.0 + std::f32::consts::PI * radius * radius,
         Shape::ConvexHull { half, .. } => {
             4.0 * (half.x * half.y + half.y * half.z + half.z * half.x) / 3.0
         }

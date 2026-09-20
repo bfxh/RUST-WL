@@ -53,6 +53,29 @@ pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
                 local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
             }
         }
+        // 胶囊体：中段圆柱 + 两片半球（闭式解；退化自检：h→0 给出球 2/5·m·r²、
+        // r→0 给出细杆 m·h²/3 ⇒ 两端极限都对）。
+        Shape::Capsule {
+            half_height,
+            radius,
+        } => {
+            let (h, r) = (half_height, radius);
+            let pi = core::f32::consts::PI;
+            let m_c = density * pi * r * r * 2.0 * h; // 中段圆柱
+            let m_h = density * (2.0 / 3.0) * pi * r * r * r; // 单片半球
+            let m = m_c + 2.0 * m_h;
+            // 轴向（Y）：圆柱 ½m_c r² + 两半球各 (2/5)m_h r²。
+            let iy = 0.5 * m_c * r * r + 0.8 * m_h * r * r;
+            // 横向：柱绕心 + 两半球「绕自身质心 83/320·r² + 平行轴到 h+3r/8」。
+            let i_hemi_own = m_h * r * r * (83.0 / 320.0);
+            let d = h + 3.0 * r / 8.0;
+            let ixz = m_c * (3.0 * r * r + 4.0 * h * h) / 12.0 + 2.0 * (i_hemi_own + m_h * d * d);
+            MassProps {
+                mass: m,
+                inv_mass: 1.0 / m,
+                local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
+            }
+        }
         // 凸体外壳：按局部 AABB 盒惯量近似（点云实惯量待 M1 复合体）。
         Shape::ConvexHull { half, .. } => {
             let ex = 2.0 * half.x.max(1e-4);

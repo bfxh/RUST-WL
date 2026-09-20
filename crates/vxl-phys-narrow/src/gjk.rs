@@ -528,11 +528,48 @@ impl Support for SphereSupport {
     }
 }
 
+/// 胶囊体支撑（解析）：局部 **Y 轴线段 `±half_height` ⊕ 半径球**。
+///
+/// 关键：**不做多边形化**——多边形化的圆弧在滚动/倾斜承载时会"打摆"（每过一个面片
+/// 一次冲击），这正是当前 cylinder 走多面体路径的代价。支撑函数式接入 GJK/EPA 即可拿到
+/// 光滑外形的精确最远点（`TECH-SURVEY.md` A9）。
+pub struct CapsuleSupport {
+    pub half_height: f32,
+    pub radius: f32,
+    pub pos: Vec3,
+    pub rot: Mat3,
+}
+
+impl Support for CapsuleSupport {
+    fn support(&self, dir: Vec3) -> Vec3 {
+        // 线段端点：局部 Y 方向取号（`dir = 0` 取 +h ⇒ 确定性）。
+        let ld = self.rot.transpose_mul_vec3(dir);
+        let sy = if ld.y >= 0.0 {
+            self.half_height
+        } else {
+            -self.half_height
+        };
+        let seg = self.rot.mul_vec3(Vec3::new(0.0, sy, 0.0));
+        // 球帽：沿世界方向偏移 radius（`dir = 0` 退回线段端点 ⇒ 确定性）。
+        let l = dir.length();
+        let n = if l < 1e-12 {
+            Vec3::ZERO
+        } else {
+            dir * (1.0 / l)
+        };
+        self.pos + seg + n * self.radius
+    }
+    fn interior(&self) -> Vec3 {
+        self.pos
+    }
+}
+
 /// 形状 → 支撑体（窄相统一入口）。
 pub enum ShapeSupport<'a> {
     Hull(HullSupport<'a>),
     Box(BoxSupport),
     Sphere(SphereSupport),
+    Capsule(CapsuleSupport),
 }
 
 impl Support for ShapeSupport<'_> {
@@ -541,6 +578,7 @@ impl Support for ShapeSupport<'_> {
             ShapeSupport::Hull(s) => s.support(dir),
             ShapeSupport::Box(s) => s.support(dir),
             ShapeSupport::Sphere(s) => s.support(dir),
+            ShapeSupport::Capsule(s) => s.support(dir),
         }
     }
     fn interior(&self) -> Vec3 {
@@ -548,6 +586,7 @@ impl Support for ShapeSupport<'_> {
             ShapeSupport::Hull(s) => s.interior(),
             ShapeSupport::Box(s) => s.interior(),
             ShapeSupport::Sphere(s) => s.interior(),
+            ShapeSupport::Capsule(s) => s.interior(),
         }
     }
 }

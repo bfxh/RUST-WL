@@ -572,6 +572,15 @@ impl DefaultNarrowPhase {
                 radius,
                 pos,
             })),
+            Shape::Capsule {
+                half_height,
+                radius,
+            } => Some(gjk::ShapeSupport::Capsule(gjk::CapsuleSupport {
+                half_height,
+                radius,
+                pos,
+                rot: Mat3::from_quat(rot),
+            })),
             _ => None,
         }
     }
@@ -1179,6 +1188,36 @@ impl DefaultNarrowPhase {
         }
     }
 
+    /// **胶囊体 × 凸体：GJK 距离**。返回 `(n_cap→other, dist, p_cap, p_other)`；
+    /// 线段与对方重叠（`Intersecting`）时改用 EPA 求穿透法线（返回 `dist = -depth`）。
+    ///
+    /// 为什么不能用 SAT/裁剪：胶囊是**光滑**外形，SAT 需要有限面集。为什么不能直接用
+    /// EPA：EPA 只在**重叠**时可用，而"胶囊接触"的定义是**线段到对方的距离 < radius**
+    /// （此时线段本身可能完全没碰到对方）。GJK 距离恰好给出这个量。
+    fn capsule_reach(
+        cap: &gjk::CapsuleSupport,
+        other: &dyn gjk::Support,
+    ) -> Option<(Vec3, f32, Vec3, Vec3)> {
+        match gjk::gjk(cap, other) {
+            gjk::Gjk::Separated {
+                point_a,
+                point_b,
+                dist,
+            } => {
+                let n = if dist > 1e-9 {
+                    (point_b - point_a) * (1.0 / dist)
+                } else {
+                    Vec3::Y
+                };
+                Some((n, dist, point_a, point_b))
+            }
+            gjk::Gjk::Intersecting => {
+                let (n, depth, p) = gjk::epa(cap, other, 32)?;
+                Some((n, -depth, p, p))
+            }
+        }
+    }
+
     /// 接触点统一选点：按深度降序 + 空间去重（min_sep 内视为同一点）+ 截断 ≤4。
     /// 展平多面体的同一顶点会以浮点噪声级差异重复出现，不去重会造成
     /// 单角多倍冲量 → 永续 rocking（能量泵）。
@@ -1590,6 +1629,9 @@ impl DefaultNarrowPhase {
                     self.poly_heightfield(idx, bpos, brot, hf)
                 }
                 Shape::HeightField(_) | Shape::Provider(_) | Shape::ConvexHull { .. } => return,
+                // 胶囊体 × 地形：**本切片暂不支持**（显式拒绝，不静默产空接触）。
+                // 后续接法：沿线段取 N 个样本调 `sphere_heightfield` 合并候选点。
+                Shape::Capsule { .. } => return,
             };
             if !ok {
                 return;
@@ -1769,11 +1811,158 @@ impl DefaultNarrowPhase {
                     }
                 }
             }
+            // —— 胶囊体 × {盒|球|外壳|胶囊|圆柱}：**GJK 距离路径** ——
+            // 光滑外形不能走 SAT/裁剪；接触判据 = **线段到对方的距离 < radius**
+            // （此时线段本身可能并未碰到对方，故 EPA 也不适用）。流形点 = 线段两端
+            // 各自的表面点（贴平躺给 2 点支撑，竖直时只有一端落进 skin 带 ⇒ 退化为 1 点）。
+            (
+                Shape::Capsule {
+                    half_height,
+                    radius,
+                },
+                _,
+            ) => {
+                let cap = gjk::CapsuleSupport {
+                    half_height,
+                    radius,
+                    pos: pa,
+                    rot: Mat3::from_quat(ra),
+                };
+                // 借用作用域：`support_of` 借 `self.hulls` ⇒ 先把结论算成局部值。
+                let (reach, plane) = match self.support_of(sb, pb, rb) {
+                    Some(other) => {
+                        let r = Self::capsule_reach(&cap, &other);
+                        // 对方**朝向胶囊那一侧**的表面沿 n 的偏移（胶囊在 a ⇒ 朝
+                        // −n 侧）。与外壳路径同款取支撑平面，只取平面常数。
+                        let pl = r.map(|(n, _, _, _)| n.dot(gjk::Support::support(&other, -n)));
+                        (r, pl)
+                    }
+                    None => (None, None),
+                };
+                let (Some((_n, _dist, p_cap, p_other)), Some(plane)) = (reach, plane) else {
+                    return;
+                };
+                // 法线 a→b：胶囊在 a ⇒ 由胶囊指向对方。**穿透时 GJK 见证点会换序**
+                // （`point_b − point_a` 的符号翻转）⇒ 一律用两体中心定号。
+                let mut n_ab = p_other - p_cap;
+                if n_ab.length_squared() < 1e-18 {
+                    n_ab = pb - pa;
+                }
+                if n_ab.length_squared() < 1e-18 {
+                    return;
+                }
+                let mut n_ab = n_ab.normalize();
+                if n_ab.dot(pb - pa) < 0.0 {
+                    n_ab = -n_ab;
+                }
+                let axis = Mat3::from_quat(ra).mul_vec3(Vec3::Y);
+                let mut local: Vec<ContactPoint> = Vec::with_capacity(2);
+                for (i, s) in [pa - axis * cap.half_height, pa + axis * cap.half_height]
+                    .into_iter()
+                    .enumerate()
+                {
+                    // 该端帽压入量（n 由胶囊指向对方）：`n·端点 + radius − plane`；
+                    // 平面取对方朝胶囊那侧，故压入为正。
+                    let depth = n_ab.dot(s) + cap.radius - plane;
+                    if depth > -self.skin {
+                        local.push(ContactPoint {
+                            // 接触点 = 朝向对方那侧的帽面（+n 侧）。
+                            point: s + n_ab * cap.radius,
+                            depth,
+                            feature: i as u32 + 1,
+                        });
+                    }
+                }
+                if local.is_empty() {
+                    return;
+                }
+                self.cand.clear();
+                self.cand.extend_from_slice(&local);
+                if !self.select_contacts(self.min_point_sep) {
+                    return;
+                }
+                out.push(Manifold {
+                    a,
+                    b,
+                    normal: n_ab,
+                    points: ContactPoints::from_slice(&self.cand),
+                });
+            }
+            (
+                _,
+                Shape::Capsule {
+                    half_height,
+                    radius,
+                },
+            ) => {
+                let cap = gjk::CapsuleSupport {
+                    half_height,
+                    radius,
+                    pos: pb,
+                    rot: Mat3::from_quat(rb),
+                };
+                let (reach, plane) = match self.support_of(sa, pa, ra) {
+                    Some(other) => {
+                        let r = Self::capsule_reach(&cap, &other);
+                        // 对方**朝向胶囊那一侧**的表面沿 n 的偏移（胶囊在 b ⇒ 朝 +n 侧）。
+                        let pl = r.map(|(n, _, _, _)| n.dot(gjk::Support::support(&other, n)));
+                        (r, pl)
+                    }
+                    None => (None, None),
+                };
+                let (Some((_n, _dist, p_cap, p_other)), Some(plane)) = (reach, plane) else {
+                    return;
+                };
+                // 法线 a→b：胶囊在 b ⇒ 由对方指向胶囊（同上：中心定号，别信见证点序）。
+                let mut n_ab = p_cap - p_other;
+                if n_ab.length_squared() < 1e-18 {
+                    n_ab = pb - pa;
+                }
+                if n_ab.length_squared() < 1e-18 {
+                    return;
+                }
+                let mut n_ab = n_ab.normalize();
+                if n_ab.dot(pb - pa) < 0.0 {
+                    n_ab = -n_ab;
+                }
+                let axis = Mat3::from_quat(rb).mul_vec3(Vec3::Y);
+                let mut local: Vec<ContactPoint> = Vec::with_capacity(2);
+                for (i, s) in [pb - axis * cap.half_height, pb + axis * cap.half_height]
+                    .into_iter()
+                    .enumerate()
+                {
+                    // 该端帽压入量（n 由对方指向胶囊）：`plane − (n·端点 − radius)`。
+                    let depth = plane - (n_ab.dot(s) - cap.radius);
+                    if depth > -self.skin {
+                        local.push(ContactPoint {
+                            // 接触点 = 朝向对方那侧的帽面（−n 侧）。
+                            point: s - n_ab * cap.radius,
+                            depth,
+                            feature: i as u32 + 1,
+                        });
+                    }
+                }
+                if local.is_empty() {
+                    return;
+                }
+                self.cand.clear();
+                self.cand.extend_from_slice(&local);
+                if !self.select_contacts(self.min_point_sep) {
+                    return;
+                }
+                out.push(Manifold {
+                    a,
+                    b,
+                    normal: n_ab,
+                    points: ContactPoints::from_slice(&self.cand),
+                });
+            }
             _ => {}
         }
     }
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1798,6 +1987,92 @@ mod tests {
             &SerialJobSystem,
         );
         out
+    }
+
+    /// 胶囊 × 盒地板（竖直）：接触判据 = **线段端点到地面的距离 < radius**（线段本身
+    /// 并未碰到地面）；应给出 1 个接触点、法线向上、深度 ≈ 压入量。
+    #[test]
+    fn capsule_vs_box_floor_vertical() {
+        let mut b = BodySet::new();
+        b.push_static(
+            Shape::Box {
+                half: Vec3::new(5.0, 0.5, 5.0),
+            },
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+        );
+        // 下帽端点 y = y0 − 0.4；下帽表面 = 端点 − 0.3 ⇒ 压住地面 1 cm 时 y0 = 0.69。
+        b.push_dynamic(
+            Shape::Capsule {
+                half_height: 0.4,
+                radius: 0.3,
+            },
+            Vec3::new(0.0, 0.69, 0.0),
+            Quat::IDENTITY,
+            1000.0,
+        );
+        let out = manifolds_for(&b, &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "应有 1 个流形（胶囊 × 地板），实得 {}",
+            out.len()
+        );
+        let m = &out[0];
+        // 法线约定 **a→b**：期望符号由流形自身推导（别假定地板一定是 `a`——
+        // 配对索引是 `(i, j)` 生成序，而本测试的 push 序不保证与之对应）。
+        let floor_is_a = m.a == 0;
+        let want = if floor_is_a { 1.0 } else { -1.0 };
+        assert!(
+            m.normal.y * want > 0.99,
+            "法线应指向 a→b（地板→胶囊），a={} b={} 实得 {:?}",
+            m.a,
+            m.b,
+            m.normal
+        );
+        assert_eq!(
+            m.points.len(),
+            1,
+            "竖直胶囊只有下帽接触，实得 {} 点",
+            m.points.len()
+        );
+        let d = m.points[0].depth;
+        assert!(
+            (d - 0.01).abs() < 2e-3,
+            "深度应 ≈1 cm（0.3 − 端点距 0.29），实得 {d}"
+        );
+    }
+
+    /// 平躺胶囊：应给出**两个**接触点（两帽各一）——这是它稳定静置（不摇）的前提。
+    #[test]
+    fn capsule_flat_gives_two_points() {
+        let mut b = BodySet::new();
+        b.push_static(
+            Shape::Box {
+                half: Vec3::new(5.0, 0.5, 5.0),
+            },
+            Vec3::new(0.0, -0.5, 0.0),
+            Quat::IDENTITY,
+        );
+        // 绕 Z 转 90° ⇒ 局部 +Y 变成世界 +X ⇒ 胶囊水平平躺，压入 1 cm（0.3 − 0.29）。
+        let rot = Quat::from_axis_angle(Vec3::Z, core::f32::consts::FRAC_PI_2);
+        b.push_dynamic(
+            Shape::Capsule {
+                half_height: 0.4,
+                radius: 0.3,
+            },
+            Vec3::new(0.0, 0.29, 0.0),
+            rot,
+            1000.0,
+        );
+        let out = manifolds_for(&b, &[]);
+        assert_eq!(out.len(), 1, "应有 1 个流形，实得 {}", out.len());
+        assert_eq!(
+            out[0].points.len(),
+            2,
+            "平躺胶囊应给 2 点支撑，实得 {}",
+            out[0].points.len()
+        );
     }
 
     #[test]

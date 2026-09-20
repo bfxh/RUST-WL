@@ -24,6 +24,14 @@ pub enum Shape {
         half_height: f32,
         radius: f32,
     },
+    /// **胶囊体**（本地方向 = +Y）：半径 `radius` 的球心沿 Y 轴线段
+    /// `±half_height` 扫掠而成（两段半球帽 + 中段圆柱）。
+    /// 碰撞走**解析支撑函数**（`gjk::CapsuleSupport`）——GJK/EPA 原样复用，
+    /// 不做多边形化（多边形化的圆弧滚动会"打摆"，见 TECH-SURVEY A9）。
+    Capsule {
+        half_height: f32,
+        radius: f32,
+    },
     HeightField(HeightFieldId),
     /// **外部碰撞提供者体**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）：
     /// id 索引 `interop::ProviderColliders`。静态 Marker 体，AABB 由提供者给。
@@ -48,6 +56,10 @@ impl Shape {
                 half_height,
                 radius,
             } => (half_height * half_height + radius * radius).sqrt(),
+            Shape::Capsule {
+                half_height,
+                radius,
+            } => half_height + radius,
             Shape::ConvexHull { half, .. } => half.length(),
             Shape::HeightField(_) | Shape::Provider(_) => f32::INFINITY,
         }
@@ -58,6 +70,7 @@ impl Shape {
             Shape::Box { .. } => "box",
             Shape::Sphere { .. } => "sphere",
             Shape::Cylinder { .. } => "cylinder",
+            Shape::Capsule { .. } => "capsule",
             Shape::HeightField(_) => "heightfield",
             Shape::Provider(_) => "provider",
             Shape::ConvexHull { .. } => "hull",
