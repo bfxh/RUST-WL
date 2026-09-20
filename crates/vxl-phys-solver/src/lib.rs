@@ -71,6 +71,15 @@ const DRIFT_BIAS_SCALE: f32 = 1.0;
 /// （0.34→0.26 变 0.22→0.29）——M1 验收主体是塔，取无死区。
 const DRIFT_DEADZONE: f32 = 0.0;
 
+/// **切向回拉的粘着判定阈值**：`|pt| ≥ 此值 × μ·pn` ⇒ 该接触视为**滑动**、不做切向回拉。
+///
+/// 依据（`OPEN-PROBLEMS.md` P1）：滑动接触的锚点分离**就是**真实材料滑移，回拉等于
+/// **抹掉真实滑动**、且因力臂而 ∝ μ 地注入转矩——那是角向残差的主项（实测塔角向超阈
+/// 202→93、总数 406→269）；粘着接触的分离才是数值错位，才是回拉的正当对象。
+/// 判定用**上一子步的暖启动冲量**（零额外状态、不需材料查表）。
+/// 实测该阈值 0.99 在各轴上最好（0.90 全面变差：角 122→137、总数 247→315）。
+const DRIFT_STICK_RATIO: f32 = 0.99;
+
 /// **warm 匹配分支计数**（诊断；atomic 宽松序，只计数、不改行为 ⇒ 哈希不变）。
 ///
 /// 用途：判定「本仓流形是否**特征稳定**」——这是"检测每步一次 / 便宜子步"能否成立的
@@ -1258,7 +1267,13 @@ fn build_constraint(
         // 切向锚点漂移回拉（Rapier 切向 rhs 同义）：目标 `v_t = (pa−pb)·t·inv_dt`，
         // 由摩擦在锥内执行——粘着接触的材料点错位被回正（回收锚点 ⇒ 漂移为
         // 真实滑移量，非裁剪几何噪声；旧 shortcut 无锚点实测变差已回退）。
-        let drift_eff = if drift.length_squared() > DRIFT_DEADZONE * DRIFT_DEADZONE {
+        // **切向回拉只在"非滑动"接触上做**（见 `DRIFT_STICK_RATIO` 注）：滑动接触的锚点
+        // 分离是**真实材料滑移**，回拉等于抹掉真实滑动、并 ∝ μ 地注转矩（角向残差主项）；
+        // 粘着接触的分离才是数值错位。判定用上一子步的暖启动冲量（零额外状态）。
+        let sliding = warm_pt.is_none_or(|w| {
+            (w.pt1 * w.pt1 + w.pt2 * w.pt2).sqrt() >= DRIFT_STICK_RATIO * mu * w.pn.max(0.0)
+        });
+        let drift_eff = if !sliding && drift.length_squared() > DRIFT_DEADZONE * DRIFT_DEADZONE {
             drift * (DRIFT_BIAS_SCALE * sp.inv_dt)
         } else {
             Vec3::ZERO

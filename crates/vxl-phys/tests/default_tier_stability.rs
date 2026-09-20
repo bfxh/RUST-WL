@@ -87,10 +87,17 @@ fn run_stack(cfg: PhysConfig, layers: usize, side: usize, ticks: usize) -> Readi
 #[test]
 fn default_tier_stays_stable_on_long_run() {
     let r = run_stack(PhysConfig::default(), 6, 6, 3000);
-    // 冻结读数（6×6×6 = 216 体、3000 步、默认档；2026-09-20 标定，逐位可复现）。
+    // 冻结读数（6×6×6 = 216 体、3000 步、默认档；**2026-09-21 换代**，逐位可复现）。
+    // **换代理由（ADR 0004）**：切向漂移回拉改为**只对非滑动（粘着）接触**生效
+    // （`vxl-phys-solver` 的 `DRIFT_STICK_RATIO`：滑动接触的锚点分离是真实材料滑移，
+    // 回拉会抹掉真实滑动、并因力臂 ∝ μ 地注入转矩）。换代前后：
+    //   top_y 2.7223 → **2.7285**（堆顶低 6 mm）· Σv² 2.1488 → **1.8124（−16%）** ·
+    //   awake 216 → 216（不变）· manifolds 835 → **919（+10%）**。
+    // **质量侧同口径对照**（`arena_bench pyramid --steps 3000`）：最大穿透不变（−0.0199 m）、
+    // 末态 Σv² 1.4718 → **1.0517（−29%）** ⇒ 这是**残差更小**的换代，不是退化。
     // 注：`awake = 216`（全醒）**反映的是已知的睡眠缺口**，不是"目标值"——本门的作用是
     // 让默认档长跑行为的**任何**变化都必须是有意为之（改了就来更新这四个数并按 ADR 0004 记录）。
-    let (top_y, sum_v2, awake, manifolds) = (2.7223, 2.1488, 216, 835);
+    let (top_y, sum_v2, awake, manifolds) = (2.7285, 1.8124, 216, 919);
     // 标定用：`cargo test -- --nocapture` 可读实际读数。
     println!(
         "[默认档 3000 步] top_y {:.4} | Σv² {:.4} | awake {} | manifolds {}",

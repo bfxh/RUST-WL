@@ -25,10 +25,10 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 
 | 场景 | 命令 | 基线（2026-09-15，参与式降点档） |
 |---|---|---|
-| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6219d1866b20c002d806d3d699a487ff`、末态活跃 0、PASS；压力 `0x63e5eb35b71b8c84ade4a053aeecb900`（report-only） |
-| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0xd8601988ad7989ffb58ba8b956c2f8db`（10 轮逐位一致） |
+| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6a932b44622d9bb5b06cd2d6005c9c64`、末态活跃 **4**、PASS；压力 `0x417be20a8e49c9b0436987415ac9961a`（report-only） |
+| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x7acbdfac46b03aaaebc04ca0c30bfc4f`（10 轮逐位一致） |
 | T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.39×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
-| **默认档长跑稳定性**（新增 2026-09-20） | `cargo test --release -p vxl-phys --test default_tier_stability` | 两个测试：① 冻结读数 `top_y 2.7223 / Σv² 2.1488 / awake 216 / manifolds 835`（6×6×6、3000 步、默认档，两次连跑逐位一致）；② **金丝雀**——降到 4 扫掠必须明显不同（实测流形 835→514、Σv²→2.5626、清醒→192），否则场景不灵敏、门无效。**为什么要它**：金样配方自带 `16` 迭代 ⇒ 默认档（6 扫掠）的改动**金样门看不见**（`EXPERIMENTS` 记过的覆盖缺口）。改动默认档时更新那四个冻结值并按 ADR 0004 记换代理由；`--nocapture` 可读实际读数 |
+| **默认档长跑稳定性**（新增 2026-09-20） | `cargo test --release -p vxl-phys --test default_tier_stability` | 两个测试：① 冻结读数 `top_y 2.7285 / Σv² 1.8124 / awake 216 / manifolds 919`（6×6×6、3000 步、默认档，两次连跑逐位一致；**2026-09-21 换代**，旧世代 `2.7223 / 2.1488 / 216 / 835`）；② **金丝雀**——降到 4 扫掠必须明显不同（实测流形 919→455、Σv²→2.2089、清醒→188、top_y→2.7347），否则场景不灵敏、门无效。**为什么要它**：金样配方自带 `16` 迭代 ⇒ 默认档（6 扫掠）的改动**金样门看不见**（`EXPERIMENTS` 记过的覆盖缺口）。改动默认档时更新那四个冻结值并按 ADR 0004 记换代理由；`--nocapture` 可读实际读数 |
 
 **2026-09-15 参与式降点换代**（`vxl_phys_solver::point_reduce_after = 3`）：
 `0x6219d186…` / `0x63e5eb35…` / `0xd8601988…`（当前）←
@@ -46,6 +46,23 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 12×2（`0xa2b4a080…` / `0x72c6e73b…` / `0x98d32c4a…`）→
 16×4（`0xbdf0cee6…` / `0x2cc8c488…` / `0x8142fe05…`）→
 `0x443778a6…` / `0x067ed531…` / `0x7684f708…`。
+
+**2026-09-21 换代：切向漂移回拉「只对粘着接触生效」**（`vxl_phys_solver` 的
+`DRIFT_STICK_RATIO = 0.99`——滑动接触的锚点分离**就是**真实材料滑移，回拉会**抹掉真实滑动**
+并因力臂 ∝ μ 地注入转矩，是角向残差的主项）：
+门槛 `0x6219d186…` → **`0x6a932b44…`** · 压力 `0x63e5eb35…` → **`0x417be20a…`** ·
+确定性 `0xd8601988…` → **`0x7acbdfac…`** · 默认档冻结 `2.7223/2.1488/216/835` →
+**`2.7285/1.8124/216/919`**。
+**换来的质量（同口径对照）**：金样三场景——塔超阈总数 483→**247**（其中角向 261→**122**，
+tower 2000 tick 角向 202→**93**）、col45 Δpos 0.0118→**0.0048**、
+pile5 **满睡 2000/2000**（基线 1980）且 Δpos 0.0157→**0.0059**；
+默认档 `arena_bench pyramid --steps 3000` 最大穿透**不变**（−0.0199 m）、
+Σv² 1.4718→**1.0517（−29%）**；`m0_gates` 末态活跃 51→**4**；arena 自检 **19/0/0**
+（逐探针与基线相同）。
+**代价**：塔 ms/活跃tick **+3.6%**（135.6→140.5）；`m0_gates` **瞬态**最大深度
+0.2561→**0.6587**（末态深穿透仍 0）。
+**注**：上表旧基线写的"末态活跃 0"是**陈旧读数**（同哈希下实测基线为 51），本次照实记为 4。
+存档：`OPEN-PROBLEMS.md` P1（含可复现改动全文、四种变体 Pareto 对照、位置级路线为何关闭）。
 
 哈希按行为变化更新是**预期流程**（ADR 0004）：落地记录里必须显式写出新旧值与原因。
 
