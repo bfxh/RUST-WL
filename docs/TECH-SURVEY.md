@@ -333,11 +333,15 @@ cannon-es 15/4、Jolt 13/6、PhysX 5 13/6、Oimo.js 10/9。
   约 8 处）。**关键性质：对现有场景逐位中性**（其 `space` 恒为 0 ⇒ 键等价于 `(a, b, 0)`）⇒
   **三哈希不变即可作为"未扰动既有行为"的证明**；收益用现成的 `warm_match_stats_take`
   （精确命中占比）量。
-  ⚠️ **先补仪器再改键**（2026-09-20 实测）：`warm_match_stats` 的三个计数只在**串行构建器**里
-  写（`vxl-phys-solver` 里两个带 `warm_index` 的构建器变体之一）；`World::step` 走**并行**那套
-  ⇒ 引擎路径上读数恒为 `(0, 0, 0)`（诊断：落地后稳定接触 4 tick，`流形=2 清醒体=2 计数=(0,0,0)`）
-  ⇒ 改键之前先给并行路径接上计数（或提供串行读数通道），否则"收益"无法测量。
-  `crates/vxl-phys/tests/compound_warm.rs` 已把这条固化成 **ignored 回归门**（解禁即判据）。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
+  ⚠️ **归因更正 + 更硬的动机**（2026-09-20 实测，两轮读数）：先前"只有串行构建器计数"的归因
+  **已被推翻**——`build_constraint` 只有一个调用点（就在并行驱动内），且判别探针
+  `crates/vxl-phys/tests/warm_counter_probe.rs` 显示**引擎路径计数正常**：单盒与"单子形状
+  复合体"都读到 `(32, 0, 0)`（4 tick × 4 点 × 2 子步）。
+  真正异常的是**同体对两条流形**那一种：两球复合体在同一场景下读到 **`(0, 0, 0)`**
+  ⇒ 不是"第二条不暖"，而是**这一对的暖缓存整条失效**（两条流形共用 `(a, b)` 键 ⇒ 相互覆盖/
+  查不到）——比原判更值得修，而**它正好是键改 `(a, b, space)` 要解决的问题**。
+  判据：`crates/vxl-phys/tests/compound_warm.rs`（现为 ignored 回归门）里的 `exact` 应从 0
+  变为"每条流形都精确命中"，且 `warm_counter_probe` 的对照读数不得回退。② ~~质量/惯量按并集 AABB 盒近似~~ **已改为精确并集**：
   `compound_mass_props`（按子形状 `mass_props` 求和 + 平行轴，含 `R·diag(I)·Rᵀ` 的对角项）
   在 `spawn_compound_body` 里**覆写** `push_dynamic` 写的 AABB 兜底值；判据
   `crates/vxl-phys/tests/compound_mass.rs`（质量 = 精确并集、且显著小于并集 AABB 盒、
