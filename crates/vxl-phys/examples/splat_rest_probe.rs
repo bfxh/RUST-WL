@@ -284,7 +284,8 @@ fn main() {
         let mut acc = 0.0f32;
         for k in 0..200_000u32 {
             let yq = 0.6 + (k % 64) as f32 * 0.02;
-            acc += f.density_grad(Vec3::new(0.1, yq, 0.1)).0;
+            // 量 **sdf**（接触真正用的入口；近场细化会在这里触发）
+            acc += f.sdf(Vec3::new(0.1, yq, 0.1));
         }
         let dt = t0.elapsed().as_secs_f64() * 1000.0;
         println!(
@@ -295,6 +296,8 @@ fn main() {
             0.5 * cut.sqrt() - y
         );
     }
+
+    f_error_profile();
 }
 
 /// **无截断**参考密度：本探针按与 `flat_field` 同一批核参数自己求和
@@ -325,4 +328,30 @@ fn iso_height_untruncated(x: f32, z: f32) -> f32 {
         }
     }
     0.5 * (lo + hi)
+}
+
+/// ⑥ **`f` 的误差规律**（残留"球沉 ≈0.4·r"的量化）：把场给的 `sdf(p)` 与**真实距离**
+/// （p 到等值面的竖直距离，由无截断参考二分求）逐深度对比。若 f 随深度**系统性偏大**，
+/// 则球停在 `f = r` 处必然比真实面深 —— 这正是实测的 0.4·r，且解释"球越大沉得越多"。
+fn f_error_profile() {
+    println!("\n⑥ `f` 误差规律（平场；真实距离由无截断参考沿竖直二分求得）：");
+    let mut f = flat_field(0.5);
+    f.cut = 16.0;
+    let y_surface = iso_height_untruncated(0.0, 0.0);
+    println!("   无截断等值面 y = {y_surface:.4}");
+    println!("   中心 y     深度(面下)    f(p)      真实距离   f/真实");
+    for y in [2.0f32, 1.8, 1.6, 1.5, 1.3963, 1.3, 1.2, 1.0, 0.8, 0.5, 0.0] {
+        let p = Vec3::new(0.0, y, 0.0);
+        let fv = f.sdf(p);
+        let d_true = y - y_surface; // 正 = 面之上
+        let ratio = if d_true.abs() > 1e-6 {
+            fv / d_true
+        } else {
+            f32::NAN
+        };
+        println!(
+            "   {y:8.4}  {:+9.4}   {fv:+9.4}  {d_true:+9.4}   {ratio:7.3}",
+            -d_true
+        );
+    }
 }
