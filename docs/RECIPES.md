@@ -24,12 +24,20 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 ## 金样门（2026-09-21 新增；**保真/睡眠轴的唯一自动门**）
 
 ```bash
+bash scripts/gate_gold.sh          # 一条命令；逐项打印退出码，失败即打诊断并非零退出
+```
+
+脚本做的就是下面四步（内部 `CARGO_TARGET_DIR` 默认 `C:/vxl-wl-target-gold`，可用
+`CARGO_TARGET_DIR_GOLD` 覆盖；日志落 `/tmp/g_*.log`，可用 `GOLD_LOG_DIR` 覆盖）：
+
+```bash
 cd "/d/开发/RUST WL/gold-sample"
 export CARGO_TARGET_DIR=C:/vxl-wl-target-gold
-cargo fmt --all && cargo clippy --release -- -D warnings; echo "gold_clippy=$?"
-cargo run --release -q -- col45  600 16 0.01 4 3.0 30 4   > /tmp/g_col45.log  2>&1; echo "gold_col45=$?"
-cargo run --release -q -- pile5  600 16 0.01 4 3.0 30 4   > /tmp/g_pile5.log  2>&1; echo "gold_pile5=$?"
-cargo run --release -q -- tower25 2400 16 0.01 1 3.0 30 16 > /tmp/g_tower.log 2>&1; echo "gold_tower=$?"
+cargo fmt --all -- --check                              ; echo "gold_fmt=$?"
+cargo clippy --release -q -- -D warnings                 ; echo "gold_clippy=$?"
+cargo run --release -q -- col45  600 16 0.01 4 3.0 30 4  ; echo "gold_col45=$?"
+cargo run --release -q -- pile5  600 16 0.01 4 3.0 30 4  ; echo "gold_pile5=$?"
+cargo run --release -q -- tower25 2400 16 0.01 1 3.0 30 16; echo "gold_tower=$?"
 ```
 
 **为什么加它**：金样读数此前**只写在 `OPEN-PROBLEMS.md` 的 T5 行里、没有任何门看着**
@@ -37,6 +45,9 @@ cargo run --release -q -- tower25 2400 16 0.01 1 3.0 30 16 > /tmp/g_tower.log 2>
 现在 harness **自带冻结基线自检**：与基线同配方时逐项比对，不符即打印 `❌ … ≠ 基线 …`
 并 **`exit(1)`**（失败路径已验：把 col45 基线临时改成 46 ⇒ FAIL + exit 1）；
 换任一旋钮（配方不符）则打印"跳过基线判定"并**照常退出 0** ⇒ 实验用法不受影响。
+⚠️ 但**门里出现"跳过"即失败**（`exit 3`）：否则配方写错会静默全绿——
+本脚本第一版就踩了（把场景名 `shift` 掉只当日志名用 ⇒ harness 收到的 argv 从 `600` 开始、
+三个场景全跑错，而退出码全是 0）。
 
 **冻结基线（2026-09-21 复测；全部为确定性读数——塔的 Δpos 已在 600/1200/2400/4800 tick
 四点同值核过）**：
