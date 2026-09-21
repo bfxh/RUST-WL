@@ -64,7 +64,25 @@ if [ -n "$floaters" ]; then
   FAIL=1
 fi
 
+# ⑥ **本地门链不许退化**：一条命令链里的承重件——三步静态门（discipline / deps_lock /
+#    ci_shape）+ 计时门的**机器级独占锁**（2026-09-21 实测：另一个仓的 cargo build 会让
+#    计时门假红 ⇒ 那把锁是承重的，谁删谁红）+ 提交通道的两份钩子。
+GA="$ROOT/scripts/gate_all.sh"
+if [ -f "$GA" ]; then
+  for needle in "scripts/discipline_scan.sh" "scripts/deps_lock.py" "scripts/ci_shape_lock.sh" \
+                "perf-gate.lock" "acquire_timed"; do
+    grep -qF -- "$needle" "$GA" || { echo "❌ 本地门链退化：gate_all.sh 缺 $needle"; FAIL=1; }
+  done
+else
+  echo "❌ 本地门链缺 scripts/gate_all.sh（一条命令跑全量验证的入口）"
+  FAIL=1
+fi
+for hook in .githooks/pre-commit .githooks/pre-push; do
+  [ -f "$ROOT/$hook" ] || { echo "❌ 提交通道缺 $hook"; FAIL=1; }
+done
+
 if [ "$FAIL" -eq 0 ]; then
-  echo "✅ CI 形状锁通过（四提交门 + 汇总门 needs 完整 / 关键命令在 / 安全与成本基线在 / action 全钉 SHA）"
+  echo "✅ CI 形状锁通过（四提交门 + 汇总门 needs 完整 / 关键命令在 / 安全与成本基线在 /" \
+       "action 全钉 SHA / 本地门链与钩子齐全）"
 fi
 exit "$FAIL"
