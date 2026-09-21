@@ -377,6 +377,12 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
     let (d_island, d_solve, d_sleep, _) = w.solver.last_phase_us;
     let dd = w.solver.last_detail_us;
     let dd_sum = (dd[0] + dd[1] + dd[2] + dd[3]).max(1) as f64;
+    if dd[1] + dd[2] + dd[3] == 0 {
+        println!(
+            "  ⚠️ 逐岛三段细分已关（`vxl_phys_solver::ISLAND_SEG_PROBE` = {}）⇒ 下面「约束构建/热启动/迭代」三列恒 0：这是**默认**（该探针每岛读 6 次钟，10 万岛场景实测 ≈26–30 ms/tick）；需要细分就把它置 true 重编。",
+            vxl_phys_solver::ISLAND_SEG_PROBE
+        );
+    }
     println!(
         "  求解细分/步：建岛 {:>6.1} µs  约束构建 {:>6.1} µs（{:>4.0}%）  热启动预施加 {:>6.1} µs（{:>4.0}%）  迭代扫掠 {:>6.1} µs（{:>4.0}%）",
         dd[0] as f64 / MEASURE as f64,

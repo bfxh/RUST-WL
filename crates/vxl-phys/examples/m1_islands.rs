@@ -190,6 +190,12 @@ fn main() {
         // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠)。
         let d4 = w.solver.last_detail_us;
         let tot_d: f64 = d4.iter().map(|&x| x as f64).sum::<f64>().max(1.0);
+        if d4[1] + d4[2] + d4[3] == 0 {
+            println!(
+                "   ⚠️ 逐岛三段细分已关（`vxl_phys_solver::ISLAND_SEG_PROBE` = {}）⇒ 下面的「约束构建/热启动/迭代」三列恒 0（默认；该探针每岛 6 次读钟）。",
+                vxl_phys_solver::ISLAND_SEG_PROBE
+            );
+        }
         println!(
             "   解算细分（累计 µs）：建岛 {}（{:.0}%）｜约束构建 {}（{:.0}%）｜热启动预施加 {}（{:.0}%）｜迭代扫掠 {}（{:.0}%）",
             d4[0],

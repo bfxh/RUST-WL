@@ -95,6 +95,16 @@ const SUBISLAND_SLEEP: bool = true;
 /// 若唤醒阈值与睡眠阈值相同，边界体每子步都会被叫醒 ⇒ 子块睡眠失效。取 2×。
 const SUBISLAND_WAKE_MULT: f32 = 2.0;
 
+/// **逐岛解算三段计时**（`IslandDiag.build/warm/iter` 的每岛探针）：每岛要读 **6 次时钟**
+/// （`Instant::now()` ≈ 20–25 ns/次，`us()` 内部再读一次）。
+/// **实测代价**（2026-09-22，8B 场景 `m1_scale`）：下落相每个清醒体自成一个**单体岛**
+/// ⇒ 10 万岛 × 6 × ~25 ns ≈ **13–15 ms/子步（≈26–30 ms/tick）**——与 `group_us` 实测
+/// **13.08 ms/子步**吻合 ⇒ 该相"解算"的大头**是探针自己**，不是约束求解。
+/// `false`（默认）= **不读那 6 次钟**（三段细分归零，`group_us` 整段墙钟保留）；
+/// `true` = 需要 build/warm/iter 细分时（如 `arena_bench` 的求解细分打印）临时打开。
+/// ⚠️ 探针**不参与物理与状态哈希** ⇒ 本开关切换应逐位不变（已按此判据验证）。
+pub const ISLAND_SEG_PROBE: bool = false;
+
 /// **warm 匹配分支计数**（诊断；atomic 宽松序，只计数、不改行为 ⇒ 哈希不变）。
 ///
 /// 用途：判定「本仓流形是否**特征稳定**」——这是"检测每步一次 / 便宜子步"能否成立的
@@ -1711,7 +1721,7 @@ fn solve_island_group(
     for &ii in awake {
         let isl = &islands[ii];
         // 每岛构建约束（岛内流形序 = 全局流形序，§4.14）。
-        let t_build = vxl_phys_core::probe::start();
+        let t_build = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
         cbuf.clear();
         for &mi in &isl.manifs {
             build_constraint(
@@ -1725,9 +1735,11 @@ fn solve_island_group(
                 sp,
             );
         }
-        detail[0] += vxl_phys_core::probe::us(t_build);
+        if let Some(t) = t_build {
+            detail[0] += vxl_phys_core::probe::us(t);
+        }
         // warm starting 预施加（每约束一次）。
-        let t_warm = vxl_phys_core::probe::start();
+        let t_warm = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
         for c in cbuf.iter() {
             let (ai, bi) = (c.a as usize, c.b as usize);
             for p in &c.points[..c.npts as usize] {
@@ -1741,7 +1753,9 @@ fn solve_island_group(
                 }
             }
         }
-        detail[1] += vxl_phys_core::probe::us(t_warm);
+        if let Some(t) = t_warm {
+            detail[1] += vxl_phys_core::probe::us(t);
+        }
         // 顺序冲量迭代（岛内顺序 = 流形序 = 约束构建序，§4.14）。
         // 对称扫掠：偶数迭代正序、奇数迭代反序（约束序 + 接触点序同时反转）——
         // 4 点面接触是冗余约束 + 强转动耦合，单向 GS 16 次迭代后残留可观
@@ -1752,7 +1766,7 @@ fn solve_island_group(
         // 跑满 `early_min_iters` 后残差 < eps 即提前结束剩余外层迭代——安静
         // 堆叠期（金字塔/砖墙的稳态段）12 次外层纯属浪费；判据只依赖状态，
         // 同状态必在同一迭代退出 ⇒ 确定性不受影响。
-        let t_it = vxl_phys_core::probe::start();
+        let t_it = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
         let eps = early_exit_eps();
         let min_iters = early_min_iters();
         let reduce_after = point_reduce_after();
@@ -1805,7 +1819,9 @@ fn solve_island_group(
             }
         }
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
-        detail[2] += vxl_phys_core::probe::us(t_it);
+        if let Some(t) = t_it {
+            detail[2] += vxl_phys_core::probe::us(t);
+        }
         for c in cbuf.iter() {
             // 诊断（零开销）：被解算的点数 / 其中法向冲量≈0 的点数（padding 槽
             // 不算——只数 `npts` 内的有效点，否则补零槽会被当成"零冲量点"）。
