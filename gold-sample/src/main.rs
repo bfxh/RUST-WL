@@ -399,8 +399,11 @@ fn main() {
         // 睡眠诊断（只计数）：分辨"岛为什么没睡"——有人快（`all_slow=false`）
         // vs `all_slow=true` 但 `min_timer` 攒不满 `sleep_time`（成员 churn 拖低）。
         let (s_fast, s_wait, s_slept, s_wait_max) = vxl_phys_solver::sleep_diag_take();
+        // ⚠️ 这三个计数**只在岛级原子睡眠路径**里累加，而当前默认是**子块睡眠**（`SUBISLAND_SLEEP = true`，
+        // 走另一条分支并 `continue`）⇒ 本行**恒为 0**。别把"入睡 0"读成"没有体入睡"——入睡数看上面的
+        // 「入睡」列。要复活本诊断须把计数搬进子块路径（未做）。
         println!(
-            "== 睡眠诊断（全程累计）：有人快而拒 {s_fast} | 全慢但未满 {s_wait} | 入睡 {s_slept} | 等待中 min_timer 峰值 {s_wait_max} ms"
+            "== 睡眠诊断（全程累计；⚠️ 只在岛级原子路径累加——子块睡眠为当前默认 ⇒ 三计数恒 0，非「没睡」）：有人快而拒 {s_fast} | 全慢但未满 {s_wait} | 入睡 {s_slept} | 等待中 min_timer 峰值 {s_wait_max} ms"
         );
         // 深档（默认关）：逐体超阈的**比例**——判定"逐体判据（路 A）的前提是否成立"。
         let (d_fast, d_all) = vxl_phys_solver::sleep_diag_deep_take();
