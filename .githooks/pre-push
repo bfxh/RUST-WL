@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 推送前：跑仓库那条**一条命令全量验证**（编译类门 + 行为门 + 金样门；计时门自带机器级独占锁）。
+# 若本机正忙于别的构建，计时门会以 exit 8 报「未能判定」——**别把 8 当成通过**，等本机空下来再推。
+# 启用（一次性）：git config core.hooksPath .githooks
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/gate_all.sh
+rc=$?
+if [ "$rc" -eq 8 ]; then
+  echo "推送前门未能判定（机器忙，计时门没跑）——等本机空下来重跑：bash scripts/gate_all.sh" >&2
+fi
+exit "$rc"

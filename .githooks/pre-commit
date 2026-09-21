@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# 提交前：只跑**纯静态/文本**判定（秒级）——拦低级错误与「CI 被削弱」，不跑编译。
+# 编译类（clippy/test/行为门/金样门）留给推送前的 scripts/gate_all.sh。
+# 启用（一次性）：git config core.hooksPath .githooks
+# 确认要跳过：git commit --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/discipline_scan.sh .
+bash scripts/vocab_scan.sh .
+python scripts/deps_lock.py
+bash scripts/ci_shape_lock.sh .
+cargo fmt --all -- --check
+echo "✅ 提交前静态门全绿（编译类门见推送前 gate_all.sh）"

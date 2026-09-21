@@ -12,6 +12,8 @@
 #
 # ⚠️ 跑它时**别编辑源码**（fmt/test/clippy 期间改文件会让它以编译错失败——踩过），
 #    也**别并发其它 cargo 构建**（金样门会因 Windows 锁 `.exe` 报 os error 5——踩过）。
+#    ⇒ 后半段的计时门由**机器级锁**（~/.rx/perf-gate.lock）兜住：拿不到就等，等到超时
+#      以 exit 8 明确报「未能判定」（不是通过）。
 
 set -u
 
@@ -56,12 +58,44 @@ if [ $rc -ne 0 ]; then
     exit $rc
 fi
 
-step clippy 0 cargo clippy --workspace --all-targets -- -D warnings
+step clippy 0 cargo clippy --workspace --all-targets -- -D warnings -D clippy::todo -D clippy::unimplemented -D clippy::dbg_macro -D clippy::mem_forget -D clippy::undocumented_unsafe_blocks -D clippy::let_underscore_must_use
 step test 0 cargo test --release
 step vocab 0 bash scripts/vocab_scan.sh .
+# 纪律扫描（forbid 覆盖 / 零 unsafe / 零 f64 / 零 SIMD 内建 / 零 fast-math）——
+# 此前只在 CI 里跑，本地漏跑就会「本地绿、CI 红」（本地与 CI 不许漂移）。
+step discipline 0 bash scripts/discipline_scan.sh .
+# 依赖红线（外部依赖/构建依赖只准减；构建脚本与补丁单独对账；理由登记在 spec 同目录的基线里）
+step deps_lock 0 python scripts/deps_lock.py
+# CI 形状锁：硬门、汇总门 needs、安全/成本基线、action 钉 SHA 不被悄悄退役
+step ci_shape 0 bash scripts/ci_shape_lock.sh .
 step typos 0 /c/vxl-wl-tools/typos.exe .
 
 echo "-- 行为门（三命令）"
+# **计时类门必须独占**：determinism / m0_gates / m1_islands / 金样门的判据都含时间，同机
+# 别的 cargo 构建会把读数弄脏（上面那条「别并发其它 cargo 构建」的警告，2026-09-21 起由
+# 这把**机器级锁**执行：锁在 ~/.rx/perf-gate.lock，跨仓可见，与 scripts/perf_lock 语义一致）。
+LOCK="${PERF_LOCK:-$HOME/.rx/perf-gate.lock}"
+acquire_timed() {
+    mkdir -p "$(dirname "$LOCK")" 2>/dev/null || true
+    for _ in $(seq 1 120); do
+        if ( set -o noclobber; printf 'pid=%s ts=%s\n' "$$" "$(date +%s)" >"$LOCK" ) 2>/dev/null; then
+            trap 'rm -f "$LOCK"' EXIT INT TERM
+            return 0
+        fi
+        # 过期回收：锁文件 30 分钟没动过（持有者崩了也会过期），不让它永久卡住
+        if find "$LOCK" -mmin +30 >/dev/null 2>&1; then
+            echo "⚠️  回收过期锁：$LOCK" >&2
+            rm -f "$LOCK"
+            continue
+        fi
+        echo "⏳ 机器忙：$LOCK 被别的构建占着——计时门等独占（5s 一轮，最多 10 分钟）" >&2
+        sleep 5
+    done
+    echo "❌ 拿不到独占锁（$LOCK）：性能类门的判据是时间，此时判红绿都会被污染——等本机空下来再重跑" >&2
+    exit 8
+}
+acquire_timed
+
 # `determinism` / `m0_gates` 自报 PASS 且哈希与档内基线一致；`m1_islands` 只报比值（见下）。
 step determinism 0 cargo run --release -q -p vxl-phys --example determinism
 if ! grep -q "FINAL_HASH=0x711be572cfe0e7eefb2cf51550fd4dd5" "${out}/gate_determinism.log"; then
