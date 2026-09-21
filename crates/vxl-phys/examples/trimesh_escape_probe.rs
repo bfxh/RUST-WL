@@ -51,8 +51,12 @@ fn terrain() -> vxl_phys_terrain::mesh::TriMesh {
     vxl_phys_terrain::mesh::TriMesh::new(verts, tris)
 }
 
-/// 单点投放：返回末态 (y, |v|, 清醒)。
-fn drop_one(x: f32, z: f32, ticks: usize) -> (f32, f32, bool) {
+/// 单点投放：`shape` 给出形状与"半尺寸"（盒的半高 / 球半径），返回末态 (y, |v|, 清醒)。
+///
+/// **为什么用"半尺寸"做自变量**：假设是"网格接触按**体中心**而非**支撑面**"
+/// ⇒ 预测**沉降量 ≈ 半尺寸**（尺寸变、沉降跟着变）。若沉降是常数（例如只与 skin 有关），
+/// 假设不成立。这就是本探针的可判别点。
+fn drop_one(x: f32, z: f32, shape: Shape, half_size: f32, ticks: usize) -> (f32, f32, bool) {
     let mut w = World::new(PhysConfig::default());
     w.add_mesh(terrain());
     let m = w.add_material(vxl_phys_core::Material {
@@ -61,10 +65,8 @@ fn drop_one(x: f32, z: f32, ticks: usize) -> (f32, f32, bool) {
     });
     let i = w.bodies.len();
     w.add_dynamic(
-        Shape::Box {
-            half: Vec3::splat(0.32),
-        },
-        Vec3::new(x, h(x, z) + 2.0, z),
+        shape,
+        Vec3::new(x, h(x, z) + 2.0 + half_size, z),
         vxl_phys_core::Quat::IDENTITY,
         1000.0,
     );
@@ -85,9 +87,9 @@ fn main() {
     let cx = gx + step * 0.5;
     let cz = gz + step * 0.5;
     let ticks = 400usize;
-    println!(
-        "地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；盒半高 0.32；投放高度 h+2.0；{ticks} tick"
-    );
+    println!("地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；投放高度 h+2+半尺寸；{ticks} tick");
+
+    println!("【A】落点对照（盒半高 0.32）");
     let cases: [(&str, f32, f32); 4] = [
         ("① 四边形形心", cx, cz),
         ("② 对角线中点", gx + step * 0.25, gz + step * 0.25),
@@ -95,7 +97,15 @@ fn main() {
         ("④ 边中点（x 向）", gx + step * 0.5, gz),
     ];
     for (name, x, z) in cases {
-        let (y, v, awake) = drop_one(x, z, ticks);
+        let (y, v, awake) = drop_one(
+            x,
+            z,
+            Shape::Box {
+                half: Vec3::splat(0.32),
+            },
+            0.32,
+            ticks,
+        );
         let surface = h(x, z);
         let rest = surface + 0.32;
         let sink = rest - y; // >0 = 比"支撑面贴地"更低（陷进网格）
@@ -108,6 +118,37 @@ fn main() {
         };
         println!(
             "{name:16} x {x:6.2} z {z:6.2} | 地面 {surface:6.3} 期望静置 {rest:6.3} | 末态 y {y:9.3} 沉降 {sink:+.3} |v| {v:6.2} 清醒 {awake} ⇒ {verdict}"
+        );
+    }
+
+    // 【B】尺寸扫描（形心处）：FALSIFY 点——"按体中心求接触"预测**沉降 ≈ 半尺寸**；
+    //      若沉降是常数（例如只与 skin 有关），则预测不成立、假设被否证。
+    println!("【B】尺寸扫描（形心 x {cx:.2} z {cz:.2}）：假设＝「按体中心求接触」⇒ 沉降 ≈ 半尺寸");
+    println!("  形状        半尺寸   地面 h   末态 y   **沉降**   沉降/半尺寸");
+    for half in [0.12f32, 0.24, 0.48, 0.80] {
+        let (y, _v, _a) = drop_one(
+            cx,
+            cz,
+            Shape::Box {
+                half: Vec3::splat(half),
+            },
+            half,
+            ticks,
+        );
+        let surface = h(cx, cz);
+        let sink = surface + half - y;
+        println!(
+            "  盒(半高)    {half:5.2}   {surface:7.3}  {y:7.3}   {sink:+7.3}     {:6.2}",
+            sink / half
+        );
+    }
+    for r in [0.20f32, 0.40, 0.70] {
+        let (y, _v, _a) = drop_one(cx, cz, Shape::Sphere { radius: r }, r, ticks);
+        let surface = h(cx, cz);
+        let sink = surface + r - y;
+        println!(
+            "  球(半径)    {r:5.2}   {surface:7.3}  {y:7.3}   {sink:+7.3}     {:6.2}",
+            sink / r
         );
     }
 }
