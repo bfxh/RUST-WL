@@ -80,6 +80,21 @@ const DRIFT_DEADZONE: f32 = 0.0;
 /// 实测该阈值 0.99 在各轴上最好（0.90 全面变差：角 122→137、总数 247→315）。
 const DRIFT_STICK_RATIO: f32 = 0.99;
 
+/// **子块睡眠（逐体入睡）**：`true`（默认）= 三件一起生效：① **逐体计时**（各自累加/清零，
+/// 取代"整岛一起清零"）；② **逐体入睡**（不要求整岛齐）；③ **唤醒改为"实质相互作用"**
+/// （连通本身不唤醒，带滞回），且求解期把睡眠体**按静态处理**（否则"位置冻结、速度被写"）。
+///
+/// **为什么**（`PLAN-solver-limits.md` / `OPEN-PROBLEMS.md` P1）：岛级原子入睡被**极少数**仍在
+/// 微动的体卡死——实测**逐体超阈仅 2.21%**（每子步约 50/2500 体），而 2500 体的岛出现
+/// ≥1 个超阈体的概率是 `1 − 0.978^2500 ≈ 100%` ⇒ 整岛门被 2% 的尾巴拒绝。
+/// 落地读数（塔 2400 tick、参考配方 `16/1/16`）：**超阈 483 → 1**、**入睡 0 → 2396/2500（96%）**、
+/// **KE ~99 J → 1.2 J**；代价 Δpos max 0.0849 → 0.0950（+12%）；稳定（y 带完整、无发散）。
+const SUBISLAND_SLEEP: bool = true;
+
+/// 唤醒**滞回**倍数：闪烁体的接触面速度（`ω×r ≈ 0.0125–0.05 m/s`）正卡在睡眠阈值上，
+/// 若唤醒阈值与睡眠阈值相同，边界体每子步都会被叫醒 ⇒ 子块睡眠失效。取 2×。
+const SUBISLAND_WAKE_MULT: f32 = 2.0;
+
 /// **warm 匹配分支计数**（诊断；atomic 宽松序，只计数、不改行为 ⇒ 哈希不变）。
 ///
 /// 用途：判定「本仓流形是否**特征稳定**」——这是"检测每步一次 / 便宜子步"能否成立的
@@ -771,6 +786,16 @@ impl ImpulseSolver {
                 for &bi in &islands[ii].bodies {
                     let i = bi as usize;
                     local_of[i] = group_lv[g].len() as u32;
+                    if SUBISLAND_SLEEP && !bodies.awake[i] {
+                        // 睡眠体落在清醒岛里（子块睡眠开启时会发生）：**求解期按静态处理**
+                        // （质量/惯量置 0 + 速度置 0），否则它会被每子步写入速度
+                        // ——"位置冻结、速度被写"的僵尸体，唤醒时会跳。
+                        group_lv[g].push(Vec3::ZERO);
+                        group_av[g].push(Vec3::ZERO);
+                        group_iw[g].push(Mat3::world_inv_inertia(bodies.rot(i), Vec3::ZERO));
+                        group_im[g].push(0.0);
+                        continue;
+                    }
                     group_lv[g].push(bodies.linvel[i]);
                     group_av[g].push(bodies.angvel(i));
                     // 每帧一次：世界逆惯量矩阵（帧内姿态不变，求解只改速度；
@@ -969,6 +994,47 @@ impl ImpulseSolver {
         //    sleep_timer 每次子步双倍累积 ⇒ 入睡提前，属非本意行为改变）。
         let sleep_islands: &[Island] = if cleanup { &[] } else { islands };
         for island in sleep_islands {
+            if SUBISLAND_SLEEP {
+                // —— 实验：子块睡眠（见 `SUBISLAND_SLEEP` 注）——
+                // ① 唤醒 = "实质相互作用"：与**清醒**邻居的相对运动显著才唤醒（连通本身不唤醒），
+                //    并带**滞回**（阈值 ×`SUBISLAND_WAKE_MULT`），否则边界体被闪烁体每子步叫醒。
+                for &mi in &island.manifs {
+                    let m = &manifolds[mi];
+                    let (a, b) = (m.a as usize, m.b as usize);
+                    let (sa, sb) = (bodies.awake[a], bodies.awake[b]);
+                    if sa == sb {
+                        continue; // 双醒：无需唤醒；双睡：不在清醒岛内
+                    }
+                    let (s, w) = if sa { (b, a) } else { (a, b) };
+                    let rel = (bodies.linvel[w] - bodies.linvel[s]).length();
+                    if rel > SUBISLAND_WAKE_MULT * config.sleep_linear
+                        || bodies.angvel(w).length() > SUBISLAND_WAKE_MULT * config.sleep_angular
+                    {
+                        bodies.awake[s] = true;
+                        bodies.sleep_timer[s] = 0.0;
+                    }
+                }
+                // ② 逐体计时 + 逐体入睡（不要求整岛齐）
+                for &bi in &island.bodies {
+                    let i = bi as usize;
+                    if !bodies.awake[i] {
+                        continue; // 睡着的：本轮不动它（上面的唤醒已判过）
+                    }
+                    let lin = bodies.linvel[i].length();
+                    let ang = bodies.angvel(i).length();
+                    if lin < config.sleep_linear && ang < config.sleep_angular {
+                        bodies.sleep_timer[i] += dt;
+                        if bodies.sleep_timer[i] >= config.sleep_time {
+                            bodies.awake[i] = false;
+                            bodies.linvel[i] = Vec3::ZERO;
+                            bodies.set_angvel_raw(i, Vec3::ZERO);
+                        }
+                    } else {
+                        bodies.sleep_timer[i] = 0.0;
+                    }
+                }
+                continue;
+            }
             for &bi in &island.bodies {
                 let i = bi as usize;
                 if !bodies.awake[i] {

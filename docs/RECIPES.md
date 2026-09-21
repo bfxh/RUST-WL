@@ -25,8 +25,8 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 
 | 场景 | 命令 | 基线（2026-09-15，参与式降点档） |
 |---|---|---|
-| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6a932b44622d9bb5b06cd2d6005c9c64`、末态活跃 **4**、PASS；压力 `0x417be20a8e49c9b0436987415ac9961a`（report-only） |
-| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x7acbdfac46b03aaaebc04ca0c30bfc4f`（10 轮逐位一致） |
+| 门槛 + 压力 | `cargo run --release -p vxl-phys --example m0_gates` | 门槛 `0x6536fa7211a315187180182438237dda`、末态活跃 **5**、PASS；压力 `0x417be20a8e49c9b0436987415ac9961a`（report-only） |
+| 确定性 | `cargo run --release -p vxl-phys --example determinism` | `FINAL_HASH=0x711be572cfe0e7eefb2cf51550fd4dd5`（10 轮逐位一致） |
 | T4 碎片雨 | `cargo run --release -p vxl-phys --example m1_islands` | 解算扩展 ≥3×（实测 4.39×）+ 串行/并行末态哈希逐位一致。**别加 `--` 参数**：会被当成第一个位置参数（clusters），4000 会跑到 ticks 上 |
 | **默认档长跑稳定性**（新增 2026-09-20） | `cargo test --release -p vxl-phys --test default_tier_stability` | 两个测试：① 冻结读数 `top_y 2.7285 / Σv² 1.8124 / awake 216 / manifolds 919`（6×6×6、3000 步、默认档，两次连跑逐位一致；**2026-09-21 换代**，旧世代 `2.7223 / 2.1488 / 216 / 835`）；② **金丝雀**——降到 4 扫掠必须明显不同（实测流形 919→455、Σv²→2.2089、清醒→188、top_y→2.7347），否则场景不灵敏、门无效。**为什么要它**：金样配方自带 `16` 迭代 ⇒ 默认档（6 扫掠）的改动**金样门看不见**（`EXPERIMENTS` 记过的覆盖缺口）。改动默认档时更新那四个冻结值并按 ADR 0004 记换代理由；`--nocapture` 可读实际读数 |
 
@@ -63,6 +63,17 @@ pile5 **满睡 2000/2000**（基线 1980）且 Δpos 0.0157→**0.0059**；
 0.2561→**0.6587**（末态深穿透仍 0）。
 **注**：上表旧基线写的"末态活跃 0"是**陈旧读数**（同哈希下实测基线为 51），本次照实记为 4。
 存档：`OPEN-PROBLEMS.md` P1（含可复现改动全文、四种变体 Pareto 对照、位置级路线为何关闭）。
+
+**2026-09-21 第二次换代：子块睡眠（逐体入睡）**（`vxl_phys_solver` 的 `SUBISLAND_SLEEP`——
+逐体计时 + 逐体入睡 + 带滞回的"实质相互作用"唤醒 + 求解期睡眠体按静态处理）：
+门槛 `0x6a932b44…` → **`0x6536fa72…`** · 确定性 `0x7acbdfac…` → **`0x711be572…`** ·
+**压力 `0x417be20a…` 与 T4 `0xb27cd6ff…` 未变**（那两个场景不入睡 ⇒ 睡眠规则无影响）·
+**默认档四个冻结值未变**（`default_tier_stability` 三项精确断言仍通过 ⇒ 6×6×6 场景不受影响）。
+**换来的质量**：塔 2400 tick、参考配方 `16/1/16` —— **超阈 483 → 1**、**入睡 0 → 2396/2500（96%）**、
+**KE ~99 J → 1.2 J**；col45/pile5 仍满睡（位置相当）；`m0_gates` 末态活跃 4 → 5（同量级）；
+arena 自检 **19/0/0**；长跑 2400 tick 稳定（y 带完整、最深 0.006）。
+**代价**：塔 `max|Δpos|` 0.0849 → **0.0950**、`mean|Δpos|` 0.0504 → **0.0572**（约 +12%）。
+存档：`OPEN-PROBLEMS.md` P1 与 `PLAN-solver-limits.md`「A」段（含 2.21% 的前提读数与三条实现要求）。
 
 哈希按行为变化更新是**预期流程**（ADR 0004）：落地记录里必须显式写出新旧值与原因。
 
