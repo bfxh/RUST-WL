@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
+use vxl_phys::{Manifold, PhysConfig, Quat, Shape, Vec3, World};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -57,6 +57,12 @@ fn main() {
     }
     let mut total = 0.0f64;
     let mut worst = 0.0f64;
+    // 相位时间累计（供末尾的工作集/达成吞吐读数； 每 tick 被清零 ⇒ 这里自己累加）。
+    let (mut tb_sum, mut tn_sum, mut ts_sum) = (0.0f64, 0.0f64, 0.0f64);
+    // ⚠️ **必须跨 tick 取峰值**：末帧快照会失真——盒子落定并入睡后求解器被清空
+    //（）⇒ 8B 场景末帧读到 warm 0 条、流形 0.0 MB（实测踩过）。
+    let (mut mfp_max, mut warm_max, mut pts_max, mut cands_max) = (0usize, 0usize, 0u64, 0usize);
+    let (mut active_ticks, mut active_ms) = (0u32, 0.0f64);
     for t in 1..=ticks {
         // `PhaseTimings` 是**累计值**（见 docs/M1-PLAN.md 读数陷阱）⇒ 每 tick 清零，
         // 否则「窄相/求解」两列读到的是「自首帧起的累计」——按它调参会调错方向。
@@ -68,7 +74,19 @@ fn main() {
         worst = worst.max(ms);
         // 每 tick 一行 stderr（无缓冲，长跑可观测）。
         let tim = w.timings();
+        tb_sum += (tim.broadphase_us) as f64;
+        tn_sum += (tim.narrowphase_us) as f64;
+        ts_sum += (tim.solve_us) as f64;
         let bd = w.broad.breakdown_us();
+        mfp_max = mfp_max.max(w.manifolds().len());
+        warm_max = warm_max.max(w.solver.island_diag.warm_count as usize);
+        pts_max = pts_max.max(w.solver.island_diag.points as u64);
+        cands_max = cands_max.max(w.broad.cand_total());
+        let hh = w.health();
+        if hh.awake_bodies > 0 {
+            active_ticks += 1;
+            active_ms += ms;
+        }
         let th = w.broad.tree_height();
         eprintln!(
             "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | solve 岛数 {:5} 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
@@ -103,6 +121,77 @@ fn main() {
         h.nan_bodies,
         h.deep_penetrations
     );
+
+    // ── **工作集与达成吞吐**（2026-09-21 加；数据布局工程的第一步：把"访存受限"定量）──
+    //
+    // 为什么看这两个数：P2/P3/P4/T4 的共同真因是**访存延迟**（不是带宽饱和——把四个相位的
+    // 达成吞吐算出来只有 1–2 GB/s，远低于单核 10–20 GB/s）。本段把"每 tick 要触碰多少字节"
+    // 与"实际达到多少 GB/s"打出来，作为后续一切数据布局改动的**基准读数**。
+    //
+    // ⚠️ 口径：**字节数是模型**（按各相位的访问模式估），不是实测计数器——
+    //   热组 32B/体（位姿）+ 32B/体（速度）见 `body.rs` 文档；冷组按字段 size_of 求和；
+    //   求解按 200 B/接触点（约束写入约 120 + 体读取约 80）；宽相按 24B/体（叶盒）+ 32B/候选。
+    //   要更准需要硬件计数器（本机没有 perf），故此处的用途是**比较不同规模/不同改动的相对值**。
+    {
+        let n = w.bodies.len() as f64;
+        let act = active_ticks.max(1) as f64;
+        println!(
+            "活跃期（awake>0 的 {} / {ticks} tick）：均 {:.2} ms/tick → {:.1} FPS | 峰值（跨 tick）流形 {} ｜ warm 槽 {} ｜ 接触点 {} ｜ 候选 {}",
+            active_ticks,
+            active_ms / act,
+            1000.0 / (active_ms / act).max(0.001),
+            mfp_max,
+            warm_max,
+            pts_max,
+            cands_max
+        );
+        let hot = n * (32.0 + 32.0);
+        let cold = n
+            * (std::mem::size_of::<Shape>() as f64
+                + std::mem::size_of::<vxl_phys_core::BodyType>() as f64
+                + 4.0  // inv_mass
+                + 12.0 // local_inv_inertia
+                + 12.0 // force
+                + 12.0 // torque
+                + 1.0  // awake
+                + 4.0  // sleep_timer
+                + 4.0); // material id
+        let mfs = mfp_max as f64 * std::mem::size_of::<Manifold>() as f64;
+        let warm = warm_max as f64 * 256.0; // WarmManifold ≈ 4 点 × 60B + 16B
+        let total_mb = (hot + cold + mfs + warm) / 1e6;
+        println!(
+            "工作集（模型）：热组 {:.1} MB ｜ 冷组 {:.1} MB ｜ 流形 {:.1} MB ｜ warm 槽 {} 条 ≈ {:.1} MB ｜ **合计 {total_mb:.1} MB**（本机 L2/L3 ≈ 2/36 MB，见 sys_topology）",
+            hot / 1e6,
+            cold / 1e6,
+            mfs / 1e6,
+            warm_max,
+            warm / 1e6
+        );
+        // 每 tick 触碰（模型）与达成吞吐：用累计相位时间（下方按 tick 累加）。
+        let mfp = mfp_max as f64;
+        let pts = pts_max as f64;
+        let cands = cands_max as f64;
+        let bytes_broad = n * 24.0 + cands * 32.0;
+        let bytes_narrow = mfp * (96.0 + std::mem::size_of::<Manifold>() as f64);
+        let bytes_solve = pts * 200.0;
+        // 达成吞吐 = 字节/tick ÷ 每 tick 秒数（相位时间是**全程累计** ⇒ 先除 ticks）。
+        // GB/s = b·ticks / (us_total · 1000)（b 字节，us_total 累计微秒）。
+        let tk = ticks as f64;
+        for (name, b, us_total) in [
+            ("宽相", bytes_broad, tb_sum),
+            ("窄相", bytes_narrow, tn_sum),
+            ("解算", bytes_solve, ts_sum),
+        ] {
+            let us_per_tick = us_total / tk;
+            println!(
+                "  {name}：触碰 {:.2} MB/tick ｜ 耗时 {:.2} ms/tick ｜ **达成 {:.2} GB/s**",
+                b / 1e6,
+                us_per_tick / 1000.0,
+                b * tk / (us_total.max(1.0) * 1000.0)
+            );
+        }
+    }
+
     if avg < 33.33 {
         println!("✅ §3 最低通过档（10万+10万 ≥30FPS）");
     } else {
