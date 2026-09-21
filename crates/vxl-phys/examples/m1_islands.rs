@@ -49,6 +49,7 @@ fn build(clusters: usize, threads: usize) -> World {
 }
 
 fn run(clusters: usize, ticks: usize, threads: usize) -> (f64, f64, u128, usize) {
+    // 返回 (总 ms, 解算 ms, 末态哈希, 清醒数)；相位细分在 main 里另取（见下）。
     let mut w = build(clusters, threads);
     for _ in 0..10 {
         w.step();
@@ -62,6 +63,30 @@ fn run(clusters: usize, ticks: usize, threads: usize) -> (f64, f64, u128, usize)
     let h = w.state_hash();
     let awake = w.health().awake_bodies as usize;
     (total_ms, solve_ms, h, awake)
+}
+
+/// 只跑不打印的相位版：返回 `(宽相, 窄相, 求解, 积分, 其它, 合计)` µs 供 main 汇总。
+/// **为什么需要它**：T4 门量的是"解算相位"耗时比，若该相位在 tick 里占比很小
+/// （实测本机 2026-09-21 仅 0.5%），门的分子/分母口径就先于并行度成为瓶颈 —— 见相位占比行。
+#[allow(clippy::type_complexity)]
+fn run_phases(clusters: usize, ticks: usize, threads: usize) -> (u64, u64, u64, u64, u64, u64) {
+    let mut w = build(clusters, threads);
+    for _ in 0..10 {
+        w.step();
+    }
+    w.reset_timings();
+    for _ in 0..ticks {
+        w.step();
+    }
+    let t = w.timings();
+    (
+        t.broadphase_us,
+        t.narrowphase_us,
+        t.solve_us,
+        t.integrate_vel_us + t.integrate_pos_us,
+        t.fields_us + t.ccd_us,
+        t.total_us(),
+    )
 }
 
 fn main() {
@@ -82,6 +107,40 @@ fn main() {
     println!("threads=1 : 总 {t1:8.1}ms | 解算 {s1:8.1}ms | 末态清醒 {a1:5} | hash {h1:#x}");
     println!("threads={hi} : 总 {th:8.1}ms | 解算 {sh:8.1}ms | 末态清醒 {ah:5} | hash {hh:#x}");
     println!("扩展比：解算 **{sp_solve:.2}×** | 总 tick {sp_total:.2}×");
+    let (bp, np, sv, ig, misc, tt) = run_phases(clusters, ticks, hi);
+    println!(
+        "相位占比（threads={hi}，{ticks} tick）：宽相 {:.1}% | 窄相 {:.1}% | 求解 {:.1}% | 积分 {:.1}% | 其它 {:.1}% | 合计 {:.1} ms（求解 {:.1} ms = {:.4} ms/tick）",
+        100.0 * bp as f64 / tt.max(1) as f64,
+        100.0 * np as f64 / tt.max(1) as f64,
+        100.0 * sv as f64 / tt.max(1) as f64,
+        100.0 * ig as f64 / tt.max(1) as f64,
+        100.0 * misc as f64 / tt.max(1) as f64,
+        tt as f64 / 1000.0,
+        sv as f64 / 1000.0,
+        sv as f64 / 1000.0 / ticks as f64
+    );
+    // **fork-join 平台开销**（T4 上限的直接嫌疑）：求解器每子步一次性开  个
+    // scoped worker（solver 注释按 Windows 实测 ≈90 µs/个估），这里在本机同形量一遍——
+    // 若远高于 90 µs，则"≥3×"在负载轻的场景里会先被 spawn/join 吃掉。
+    {
+        let n = 100usize;
+        let t0 = Instant::now();
+        for _ in 0..n {
+            std::thread::scope(|sc| {
+                for _ in 1..hi {
+                    sc.spawn(|| {});
+                }
+            });
+        }
+        let per = t0.elapsed().as_secs_f64() * 1e6 / n as f64;
+        println!(
+            "fork-join 开销（本机、{hi} 线程、空活）：**{:.1} µs/次**（每次开 {} 个 worker；             求解器每子步一次）⇒ 每 tick ≈ {:.2} ms（substeps={}）",
+            per,
+            hi - 1,
+            per * 1e-3 * 2.0,
+            2
+        );
+    }
     let same = h1 == hh;
     println!(
         "串行/并行末态哈希：{}（{}）",
