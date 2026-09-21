@@ -134,9 +134,10 @@ fn sat_scan_sse2(
         let flags: i32; // bit k: 1 = 该 lane 用 −n（sep2 更大；下面 unsafe 块内赋值）
         let degen: i32; // bit k: 1 = 该 lane 退化（标量侧 continue）
                         // SAFETY: 本块（含内部 `dot_lane`）只调用 x86_64 基线 SSE2 内建——函数在
-                        // `#[cfg(target_arch = "x86_64")]` 下编译，故无需运行时特性探测；`_mm_loadu_ps`
-                        // 的输入是上方长度为 4 的本地 `f32` 数组（未对齐读 16 字节仍在界内），其余内建
-                        // 只消费 `__m128` 寄存器值：无裸指针运算、无生命周期擦除、无别名假设。
+                        // `#[cfg(target_arch = "x86_64")]` 下编译，故无需运行时特性探测；指针入参只有两处：
+                        // `_mm_loadu_ps` 读 `cx/cy/cz`、`_mm_storeu_ps` 写 `sep_arr`，都是长度 4 的本地
+                        // `f32` 数组（16 字节未对齐访问仍在界内），其余内建只消费 `__m128` 寄存器值：
+                        // 无裸指针运算、无生命周期擦除、无别名假设。
         unsafe {
             let nx = _mm_loadu_ps(cx.as_ptr());
             let ny = _mm_loadu_ps(cy.as_ptr());
@@ -180,7 +181,12 @@ fn sat_scan_sse2(
             let sep2 = _mm_sub_ps(_mm_sub_ps(ca, ra), _mm_add_ps(cb, rb)); // min_a − max_b
                                                                            // 标量是 `if sep1 >= sep2 {sep1} else {sep2}`；flip = !(sep1 >= sep2)
             flags = _mm_movemask_ps(_mm_cmpnge_ps(sep1, sep2));
-            let sep = _mm_max_ps(sep1, sep2);
+            // 操作数顺序是承重的：标量取 sep1（平局时 `sep1 >= sep2` 为真），而 Intel
+            // MAXPS 在相等时返回**第二操作数** ⇒ 必须写成 `max(sep2, sep1)` 才让平局也取
+            // sep1。非平局时 max 对称、结果不变；平局带符号零时（sep1 = +0.0、sep2 = −0.0）
+            // 顺序写反会让 best_sep 的符号位与标量分叉，而那个值进确定性哈希。
+            // 见 tests::sat_tie_break_matches_scalar_on_signed_zero（随机采样撞不到这个平局）。
+            let sep = _mm_max_ps(sep2, sep1);
             _mm_storeu_ps(sep_arr.as_mut_ptr(), sep);
         }
         // 标量侧：按轴序复刻三条规则（退化跳过 / 早退 / 严格择优）。
@@ -311,6 +317,52 @@ mod tests {
         // 两类都必须被覆盖到（否则测试没有鉴别力）。
         assert!(sep_cnt > 100, "分离样本太少：{sep_cnt}");
         assert!(hit_cnt > 100, "命中样本太少：{hit_cnt}");
+    }
+
+    /// **符号零平局**：两条 sep 恰好都为零、符号相反时，`_mm_max_ps` 的平局规则
+    /// （Intel：相等取**第二操作数**）与标量参考的 `if sep1 >= sep2 { sep1 }` 会分叉，
+    /// 使 `best_sep` 的符号位不同——而它进确定性哈希。
+    ///
+    /// 随机采样**撞不到**这个平局（`simd_matches_scalar_bitwise` 的 4000 个样本里概率 ~0），
+    /// 所以这里给确定性的构造输入把它钉住：轴取 +X、两盒半宽均为零、A 心 x = −0.0、B 心 x = 0.0 ⇒
+    /// `sep1 = (cb − rb) − (ca + ra) = 0.0 − (−0.0) = +0.0`，
+    /// `sep2 = (ca − ra) − (cb + rb) = (−0.0 − 0.0) − 0.0 = −0.0`（IEEE：混号零相加归 +0.0，
+    /// 但 `(−0.0) − (+0.0)` 仍是 −0.0）。两条路径必须逐位同结果。
+    #[test]
+    fn sat_tie_break_matches_scalar_on_signed_zero() {
+        let ax = [v(1.0, 0.0, 0.0), v(0.0, 1.0, 0.0), v(0.0, 0.0, 1.0)];
+        let axes = vec![v(1.0, 0.0, 0.0)];
+        let zero = v(0.0, 0.0, 0.0);
+        let neg_zero_x = v(-0.0, 0.0, 0.0);
+        let s = sat_scan_scalar(&axes, zero, &ax, neg_zero_x, zero, &ax, zero, 0.01)
+            .expect("应有分离解（sep 为零、不被 skin 早退）");
+        let d = sat_scan_sse2(&axes, zero, &ax, neg_zero_x, zero, &ax, zero, 0.01)
+            .expect("应有分离解（sep 为零、不被 skin 早退）");
+        assert_eq!(
+            s.0.to_bits(),
+            d.0.to_bits(),
+            "平局时 best_sep 的符号位分叉：标量 {}（{:#010x}）vs SIMD {}（{:#010x}）",
+            s.0,
+            s.0.to_bits(),
+            d.0,
+            d.0.to_bits()
+        );
+        assert_eq!(s.2, d.2, "平局时 best_idx 不等");
+        // 构造前提自检：两条路径都必须给 **+0.0**。若构造失效（例如两个 sep 同号），
+        // 上面那条等式就退化成恒真、失去鉴别力——所以把期望值也钉死。
+        // 若 MAXPS 的操作数顺序写反（平局取 sep2 = −0.0），这里会以符号位不同报红。
+        assert_eq!(
+            s.0.to_bits(),
+            0.0f32.to_bits(),
+            "标量平局应取 sep1（+0.0），实为 {}",
+            s.0
+        );
+        assert_eq!(
+            d.0.to_bits(),
+            0.0f32.to_bits(),
+            "SIMD 平局必须与标量同取 +0.0，实为 {}",
+            d.0
+        );
     }
 
     /// 轴数不是 4 的倍数（21、12、13）时尾组 lane 不得被消费——与标量对比。
