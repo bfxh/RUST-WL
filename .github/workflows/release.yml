@@ -39,12 +39,33 @@ jobs:
       # ⚠️ **故意不用 `Swatinem/rust-cache`**：本工作流会把产物**发布**到 Release，
       # 缓存 + 发布是 zizmor 的 `cache-poisoning` 高危组合（`ci.yml` 里能用是因为它只
       # `upload-artifact`、不对外发布）。发版频率低 ⇒ 从零编译几分钟换掉这一整类风险。
+      # 每个门禁步骤：**先打诊断再退出**。默认 `bash -e` 会在命令失败时立即中止，
+      # 使 `cat <log>` 永不执行 ⇒ 只看到 "exit code 1"、看不到原因
+      # （2026-09-21 首次发版踩到：fmt 红了却看不到 diff）。
       - name: fmt
-        run: cargo fmt --all --check > fmt.log 2>&1; echo "fmt=$?"; cat fmt.log
+        run: |
+          set +e
+          cargo fmt --all --check > fmt.log 2>&1
+          rc=$?
+          echo "fmt=$rc"
+          cat fmt.log
+          exit $rc
       - name: test
-        run: cargo test --release > test.log 2>&1; echo "test=$?"; tail -40 test.log
+        run: |
+          set +e
+          cargo test --release > test.log 2>&1
+          rc=$?
+          echo "test=$rc"
+          tail -40 test.log
+          exit $rc
       - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings > clippy.log 2>&1; echo "clippy=$?"; tail -40 clippy.log
+        run: |
+          set +e
+          cargo clippy --workspace --all-targets -- -D warnings > clippy.log 2>&1
+          rc=$?
+          echo "clippy=$rc"
+          tail -40 clippy.log
+          exit $rc
       - name: 门槛哈希 + 确定性（ADR 0004）
         run: |
           cargo run --release -q -p vxl-phys --example m0_gates 2>&1 | tee m0.log
