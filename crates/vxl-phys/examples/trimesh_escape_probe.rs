@@ -84,6 +84,33 @@ fn drop_one_cfg(
     let i = w.bodies.len() - 1;
     let (pos, _) = w.bodies.pose(i);
     let v = w.bodies.linvel[i];
+    // **故障域判别（P5）**：把稳定后**实际产生的接触**打出来。
+    // 若接触报 depth ≈ 0（无穿透）而体已陷下去 ⇒ **提供者查询侧**；
+    // 若接触报 depth ≈ 实际压入量（正）而体不出来 ⇒ **消费/求解侧**。
+    if std::env::var("PROBE_CONTACTS").is_ok() {
+        println!(
+            "    接触明细（体 {i} 末态 y {:.4}）：{} 条流形",
+            pos.y,
+            w.manifolds().len()
+        );
+        for mf in w.manifolds() {
+            let (a, b) = (mf.a as usize, mf.b as usize);
+            if a != i && b != i {
+                continue;
+            }
+            print!(
+                "      manifold({a},{b}) n=({:.3},{:.3},{:.3})",
+                mf.normal.x, mf.normal.y, mf.normal.z
+            );
+            for p in &mf.points {
+                print!(
+                    " [p=({:.2},{:.2},{:.2}) depth {:.4} feat {}]",
+                    p.point.x, p.point.y, p.point.z, p.depth, p.feature
+                );
+            }
+            println!();
+        }
+    }
     (pos.y, v.length(), w.bodies.awake[i])
 }
 
@@ -97,6 +124,19 @@ fn main() {
     println!("地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；投放高度 h+2+半尺寸；{ticks} tick");
 
     println!("【A】落点对照（盒半高 0.32，默认档）");
+    // ⚠️ 要"看接触"就必须**不让它睡**：睡眠体不做检测 ⇒ 末态 0 条流形（本探针实测），
+    //    而沉降是在醒着的时候形成的（体带着压入量睡进去）。故 PROBE_CONTACTS 时用
+    //    `sleep_time` 极大的配置重跑本段。
+    let probe_contacts = std::env::var("PROBE_CONTACTS").is_ok();
+    let cfg_a = if probe_contacts {
+        println!("   （PROBE_CONTACTS：sleep_time=1e9，保持清醒以便打印接触）");
+        PhysConfig {
+            sleep_time: 1e9,
+            ..PhysConfig::default()
+        }
+    } else {
+        PhysConfig::default()
+    };
     let cases: [(&str, f32, f32); 4] = [
         ("① 四边形形心", cx, cz),
         ("② 对角线中点", gx + step * 0.25, gz + step * 0.25),
@@ -112,7 +152,7 @@ fn main() {
             },
             0.32,
             ticks,
-            PhysConfig::default(),
+            cfg_a.clone(),
         );
         let surface = h(x, z);
         let rest = surface + 0.32;
