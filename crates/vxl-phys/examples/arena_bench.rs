@@ -218,17 +218,54 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         }
     }
     let mut max_y = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
     let mut kin = 0.0f64;
     let mut awake_n = 0usize;
+    // 逐体明细（诊断 P5：判定"掉穿地形"还是"斜坡滚动"——见 `OPEN-PROBLEMS.md` P5）。
+    let mut ys: Vec<(f32, f32, f32, f32)> = Vec::new(); // (y, x, z, |v|)
     for i in 0..bodies {
         let (pos, _) = w.bodies.pose(i);
         if w.bodies.is_dynamic(i) {
             max_y = max_y.max(pos.y);
+            min_y = min_y.min(pos.y);
             let v = w.bodies.linvel[i];
             kin += (v.x * v.x + v.y * v.y + v.z * v.z) as f64;
             if w.bodies.awake[i] {
                 awake_n += 1;
             }
+            ys.push((pos.y, pos.x, pos.z, v.length()));
+        }
+    }
+    {
+        let q = |p: f32| -> f32 {
+            let k = ((ys.len() as f32 - 1.0) * p).clamp(0.0, ys.len() as f32 - 1.0) as usize;
+            ys[k].0
+        };
+        println!(
+            "   y 分布：min {:.3} | p05 {:.3} | p50 {:.3} | p95 {:.3} | max {:.3}",
+            min_y,
+            q(0.05),
+            q(0.50),
+            q(0.95),
+            max_y
+        );
+        let mut by_y = ys.clone();
+        by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
+        println!("   最低 5 体（y, x, z, |v|）：");
+        for r in by_y.iter().take(5) {
+            println!(
+                "      y {:.3}  x {:.2}  z {:.2}  |v| {:.2}",
+                r.0, r.1, r.2, r.3
+            );
+        }
+        let mut by_v = ys.clone();
+        by_v.sort_by(|a, b| b.3.total_cmp(&a.3));
+        println!("   最快 5 体（|v|, y, x, z）：");
+        for r in by_v.iter().take(5) {
+            println!(
+                "      |v| {:.2}  y {:.3}  x {:.2}  z {:.2}",
+                r.3, r.0, r.1, r.2
+            );
         }
     }
     println!(
