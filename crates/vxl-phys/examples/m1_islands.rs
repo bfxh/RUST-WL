@@ -132,6 +132,20 @@ fn main() {
             "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
             if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
         );
+        // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠) —— 找降访存的第一刀落在哪。
+        let d4 = w.solver.last_detail_us;
+        let tot_d: f64 = d4.iter().map(|&x| x as f64).sum::<f64>().max(1.0);
+        println!(
+            "   解算细分（累计 µs）：建岛 {}（{:.0}%）｜约束构建 {}（{:.0}%）｜热启动预施加 {}（{:.0}%）｜迭代扫掠 {}（{:.0}%）",
+            d4[0],
+            100.0 * d4[0] as f64 / tot_d,
+            d4[1],
+            100.0 * d4[1] as f64 / tot_d,
+            d4[2],
+            100.0 * d4[2] as f64 / tot_d,
+            d4[3],
+            100.0 * d4[3] as f64 / tot_d
+        );
     }
     let (bp, np, sv, ig, misc, tt) = run_phases(clusters, ticks, hi);
     println!(
