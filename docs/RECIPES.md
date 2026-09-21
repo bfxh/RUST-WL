@@ -500,6 +500,10 @@ cargo run --release -p vxl-phys --example m1_scale -- 8 102400 100000 40 <iters>
 
 读数陷阱：`m1_scale` 的 `broad` 列 = 四项之和（每 tick）；但**别用累计值做逐相位
 分析**（PhaseTimings 默认累计，harness 内部已 `reset_timings()`）。
+**⚠️ 窗口决定读数（2026-09-22）**：该场景是"雨落+沉降"，**~tick 120 后全体入睡**（此后
+`岛数 0 / 窄相 0.00`、~2.0 ms/tick）。同一份码：**120 tick 窗口 = 161.14 ms/tick（6.2 FPS）、
+600 tick 窗口 = 35.32 ms/tick（28.3 FPS）**、活跃期（103 tick）均 **187–196 ms/tick**。
+⇒ 报 8B 的数**必须同时说窗口与相位**（详见 `OPEN-PROBLEMS.md` P3）。
 
 ## 其余验收基准
 
@@ -508,8 +512,10 @@ cargo run --release -p vxl-phys --example m1_scale -- 8 102400 100000 40 <iters>
 cargo run --release -p vxl-phys --example m1_islands
 # T6 8A 碰撞行（10×1200 静态格 + 10k tiles + 100 探针；验收 p95 ≤1.5ms）
 cargo run --release -p vxl-phys --example m1_collision_row
-# T1 验收主体（10k 动力堆 600 tick；当前不达标：pile5 1195/2000）
-cargo run --release -p vxl-phys --example m1_pile
+# T1 万级验收主体（10k 动力堆 600 tick）。⚠️ **必须带配方**：默认 `substeps=1` 是"延伸目标"、
+# 落在稳定区之外（实测沸腾：|v|max 77、494/600 tick 深穿透）；稳定区在 **substeps ≥ 8**。
+# 当前状态（2026-09-22，本代）：`16 4 8` = 干净 ✓（0 深穿透 tick）但**不睡**（5411/10001 体幅值在阈上）
+cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 0
 ```
 
 ## 宽相研究资产（不在生产路径，ADR 0001）
