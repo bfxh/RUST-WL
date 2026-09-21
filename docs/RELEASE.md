@@ -88,6 +88,25 @@ Diff in .../crates/vxl-phys-narrow/src/simd.rs:133
 **不需要加 `rust-toolchain.toml`**（它不修这个问题，还会无端给全仓钉工具链）；
 "是否固定工具链"仍可作为独立议题，但**不是本次红的成因**。
 
+### 首发已完成（2026-09-21）
+
+**`v0.1.0-m1` 已发布**：<https://github.com/bfxh/RUST-WL/releases/tag/v0.1.0-m1>
+（`prerelease: true`、`draft: false`、作者 `github-actions[bot]`）。
+附产物：`clippy.log` / `determinism.log` / `gold-col45.txt` / `gold-pile5.txt` /
+`gold-tower25.txt` / `m0.log` / `test.log` —— **门禁证据随版本存档**。
+
+首发踩到并修掉的两个**工作流自身**缺陷（都记在此以免复发）：
+1. **`bash -e` 吞诊断**：`cargo fmt ... ; cat fmt.log` 在 `-e` 下，前者失败即中止 ⇒
+   `cat` 永不执行，只看到 "exit code 1"。⇒ 各门步骤改为 `set +e` → 取 `$?` → **先打诊断再 `exit $rc`**。
+2. **附空文件会被拒**：门禁全绿时 `fmt.log` 是**空文件**，`gh release create` 附它会
+   `HTTP 400: Bad Content-Length`，**整个 Release 被回滚**（现象像"没建成"）。
+   ⇒ 只附**非空**文件（`find ... -size +0c`），并让步骤**幂等**
+   （Release 已存在时改用 `gh release upload --clobber`）。
+
+**另一个可复用的教训**：`workflow_dispatch` 的手动重跑用的是**默认分支**上的工作流文件，
+而本仓的开发在 feature 分支 ⇒ 补建/重跑最实际的办法是**重指 tag**（删+重建+推），
+而不是 `gh workflow run`。本档 §4 的流程因此以"重指 tag"为主。
+
 ### 与本档流程的关系
 
 - 打 tag **不等于**发布完成：`release` job `needs: gates`，门红 ⇒ **不建 Release**（设计如此）。
