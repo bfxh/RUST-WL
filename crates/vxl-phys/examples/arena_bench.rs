@@ -191,8 +191,38 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
     // 长跑稳定性：窗口后再推 extra_steps，观察是否继续收敛（抖动/穿透/堆高）。
-    for _ in 0..extra_steps {
+    // **离场轨迹追踪**（诊断 P5：那 ~10 个体到底是"被接触打飞"还是"自己滑出地形边缘"）：
+    // 记录每个体**第一次落到 y < −5**（地形最低点约 −4）时的**上一 tick 速度**——
+    // 那是它"离开台面"的瞬时状态，与它此刻在哪无关。|v| 温和（≤10 m/s）⇒ 滑出边缘后自由落体；
+    // |v| 数十上百 ⇒ 接触把能量打进去了。
+    let nb = w.bodies.len();
+    let mut exits: Vec<(usize, f32, Vec3, Vec3)> = Vec::new(); // (步, |v|上一tick, v上一tick, 位置)
+    let mut was_in: Vec<bool> = (0..nb).map(|_| true).collect();
+    for step in 0..extra_steps {
+        let prev_v: Vec<Vec3> = (0..nb).map(|i| w.bodies.linvel[i]).collect();
+        let prev_p: Vec<Vec3> = (0..nb).map(|i| w.bodies.pose(i).0).collect();
         w.step();
+        for i in 0..nb {
+            if !was_in[i] || !w.bodies.is_dynamic(i) {
+                continue;
+            }
+            if w.bodies.pose(i).0.y < -5.0 {
+                was_in[i] = false;
+                exits.push((step, prev_v[i].length(), prev_v[i], prev_p[i]));
+            }
+        }
+    }
+    if !exits.is_empty() {
+        println!(
+            "   离场事件 {} 起（y < −5 时的**上一 tick**状态）：",
+            exits.len()
+        );
+        for (step, sp, v, p) in exits.iter().take(10) {
+            println!(
+                "      第 {step:5} 步  |v| {sp:8.3}  v=({:+8.3},{:+8.3},{:+8.3})  位置=({:+8.2},{:+8.2},{:+8.2})",
+                v.x, v.y, v.z, p.x, p.y, p.z
+            );
+        }
     }
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let p50 = samples[samples.len() / 2];
