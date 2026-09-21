@@ -56,8 +56,15 @@ fn terrain() -> vxl_phys_terrain::mesh::TriMesh {
 /// **为什么用"半尺寸"做自变量**：假设是"网格接触按**体中心**而非**支撑面**"
 /// ⇒ 预测**沉降量 ≈ 半尺寸**（尺寸变、沉降跟着变）。若沉降是常数（例如只与 skin 有关），
 /// 假设不成立。这就是本探针的可判别点。
-fn drop_one(x: f32, z: f32, shape: Shape, half_size: f32, ticks: usize) -> (f32, f32, bool) {
-    let mut w = World::new(PhysConfig::default());
+fn drop_one_cfg(
+    x: f32,
+    z: f32,
+    shape: Shape,
+    half_size: f32,
+    ticks: usize,
+    cfg: PhysConfig,
+) -> (f32, f32, bool) {
+    let mut w = World::new(cfg);
     w.add_mesh(terrain());
     let m = w.add_material(vxl_phys_core::Material {
         friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.6 },
@@ -89,7 +96,7 @@ fn main() {
     let ticks = 400usize;
     println!("地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；投放高度 h+2+半尺寸；{ticks} tick");
 
-    println!("【A】落点对照（盒半高 0.32）");
+    println!("【A】落点对照（盒半高 0.32，默认档）");
     let cases: [(&str, f32, f32); 4] = [
         ("① 四边形形心", cx, cz),
         ("② 对角线中点", gx + step * 0.25, gz + step * 0.25),
@@ -97,7 +104,7 @@ fn main() {
         ("④ 边中点（x 向）", gx + step * 0.5, gz),
     ];
     for (name, x, z) in cases {
-        let (y, v, awake) = drop_one(
+        let (y, v, awake) = drop_one_cfg(
             x,
             z,
             Shape::Box {
@@ -105,6 +112,7 @@ fn main() {
             },
             0.32,
             ticks,
+            PhysConfig::default(),
         );
         let surface = h(x, z);
         let rest = surface + 0.32;
@@ -126,7 +134,7 @@ fn main() {
     println!("【B】尺寸扫描（形心 x {cx:.2} z {cz:.2}）：假设＝「按体中心求接触」⇒ 沉降 ≈ 半尺寸");
     println!("  形状        半尺寸   地面 h   末态 y   **沉降**   沉降/半尺寸");
     for half in [0.12f32, 0.24, 0.48, 0.80] {
-        let (y, _v, _a) = drop_one(
+        let (y, _v, _a) = drop_one_cfg(
             cx,
             cz,
             Shape::Box {
@@ -134,6 +142,7 @@ fn main() {
             },
             half,
             ticks,
+            PhysConfig::default(),
         );
         let surface = h(cx, cz);
         let sink = surface + half - y;
@@ -143,12 +152,75 @@ fn main() {
         );
     }
     for r in [0.20f32, 0.40, 0.70] {
-        let (y, _v, _a) = drop_one(cx, cz, Shape::Sphere { radius: r }, r, ticks);
+        let (y, _v, _a) = drop_one_cfg(
+            cx,
+            cz,
+            Shape::Sphere { radius: r },
+            r,
+            ticks,
+            PhysConfig::default(),
+        );
         let surface = h(cx, cz);
         let sink = surface + r - y;
         println!(
             "  球(半径)    {r:5.2}   {surface:7.3}  {y:7.3}   {sink:+7.3}     {:6.2}",
             sink / r
+        );
+    }
+
+    // 【C】迭代预算判别：假设＝"网格接触的去穿透受**迭代数**限制（软接触）"
+    //      ⇒ 换到参考配方（16 迭代 / 16 子步）后**沉降应大幅缩小**。
+    //      若沉降几乎不变 ⇒ 不是迭代预算问题，而是**几何/压入量本身算错**。
+    let mut fine = PhysConfig::default();
+    fine.velocity_iterations = 16;
+    fine.normal_inner = 1;
+    fine.substeps = 16;
+    println!("【C】参考配方对照（iters 16 / inner 1 / substeps 16，形心处）");
+    println!("  形状        半尺寸  默认档沉降   **参考配方沉降**");
+    for half in [0.24f32, 0.48, 0.80] {
+        let (y0, _v0, _a0) = drop_one_cfg(
+            cx,
+            cz,
+            Shape::Box {
+                half: Vec3::splat(half),
+            },
+            half,
+            ticks,
+            PhysConfig::default(),
+        );
+        let (y1, _v1, _a1) = drop_one_cfg(
+            cx,
+            cz,
+            Shape::Box {
+                half: Vec3::splat(half),
+            },
+            half,
+            ticks,
+            fine.clone(),
+        );
+        let surface = h(cx, cz);
+        println!(
+            "  盒(半高)    {half:5.2}   {:+8.3}     {:+8.3}",
+            surface + half - y0,
+            surface + half - y1
+        );
+    }
+    for r in [0.20f32, 0.40, 0.70] {
+        let (y0, _v0, _a0) = drop_one_cfg(
+            cx,
+            cz,
+            Shape::Sphere { radius: r },
+            r,
+            ticks,
+            PhysConfig::default(),
+        );
+        let (y1, _v1, _a1) =
+            drop_one_cfg(cx, cz, Shape::Sphere { radius: r }, r, ticks, fine.clone());
+        let surface = h(cx, cz);
+        println!(
+            "  球(半径)    {r:5.2}   {:+8.3}     {:+8.3}",
+            surface + r - y0,
+            surface + r - y1
         );
     }
 }
