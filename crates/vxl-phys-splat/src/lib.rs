@@ -11,8 +11,22 @@
 //!    —— 与 SPH 核同形（都是各向同性/异性核叠加），故该场可直接复用作介质采样源。
 //!
 //! 确定性：全部遍历按 splat 注册序；无 HashMap/无浮点归约顺序变化。
-//! 性能边界：点查询 O(#splats·cut)（cut = 3σ 外截断）；加速结构（均匀网格/BVH）见
+//! 性能边界：点查询 O(#splats·cut)（√cut·σ 外截断）；加速结构（均匀网格/BVH）见
 //! CATALOG「待办」——当前档位面向演示与中等规模（≤ 数千颗）。
+//!
+//! ## 截断半径的**余量规则**（2026-09-21，P6 根因修复；`cut` 是基础参数，别单独改它）
+//!
+//! 截断半径 = `σ·√cut`。**多核叠加**的场里，等值面可以浮到接近截断半径的高度
+//! （平铺一层核时等值面在 ≈1.31·σ·√cut 处），于是等值面**上方的有效余量**
+//! = `σ·(√cut − 1.31)` 会小于常见体半径 ⇒ 体的**查询点**（球心、盒角点/面心）
+//! 落进"读不到任何核（σ=0、∇σ=0）"的**死区** ⇒ `sdf()` 走退化分支给出**正**值
+//! ⇒ 接触不生成 ⇒ 体在场上**不可能稳定静置**（实测平场上 σ=0.5 的球：余量 0.186 m
+//! < 半径 0.25/0.35 ⇒ 落在"掉下去—被推开"的极限环里，读数 |v| 0.2–0.5 永不静置）。
+//! ⇒ **规则**：`σ·(√cut − 1.31) ≳ 最大查询偏移`（球半径 / 盒半长 + 皮肤带），
+//! 默认据此取 `cut = 16`（4σ ⇒ σ=0.5 时余量 0.69 m）。
+//! **耦合面**（改 `cut` 必须同时改这三处，否则网格会漏核、界盒会截断场）：
+//! ① `density_grad` 的逐核截断；② `rebuild_grid` 的 bin 与逐核登记范围；
+//! ③ `world_bounds` 的外包盒。三者都按 `√cut·σ` 计算。
 
 #![forbid(unsafe_code)]
 
@@ -102,7 +116,9 @@ impl GaussianSplatField {
         Self {
             splats: Vec::new(),
             iso,
-            cut: 9.0,
+            // 4σ 截断（模块头"余量规则"）：3σ 时等值面上方只剩 0.19·σ 余量，
+            // 撑不住常见体半径 ⇒ 体心落进死区、永不静置（实测见 P6/splat_rest_probe）。
+            cut: 16.0,
             grid: None,
             grid_min_splats: 64,
             medium_density: 0.0,
@@ -128,7 +144,9 @@ impl GaussianSplatField {
         for s in &self.splats {
             max_s = max_s.max(s.scale.x).max(s.scale.y).max(s.scale.z);
         }
-        let bin = max_s * 3.0;
+        // bin 与登记半径都跟 `cut` 走（模块头"耦合面"②）：bin = 最大截断半径 ⇒
+        // 单格查询即可覆盖"覆盖查询点"的核；逐核登记 `center ± √cut·σ` 的盒子。
+        let bin = max_s * self.cut.sqrt();
         if bin <= 1e-6 {
             return;
         }
@@ -145,7 +163,7 @@ impl GaussianSplatField {
         let mut bins: Vec<Vec<u32>> = vec![Vec::new(); n_bins as usize];
         let inv_bin = 1.0 / bin;
         for (i, s) in self.splats.iter().enumerate() {
-            let r = max_s * 3.0;
+            let r = max_s * self.cut.sqrt();
             let lo = s.center - Vec3::splat(r);
             let hi = s.center + Vec3::splat(r);
             let c0 = (
@@ -286,13 +304,14 @@ impl GaussianSplatField {
         (self.iso - s) / gl // 内部 σ > iso ⇒ 负 ✓（外层负号在 caller 展开）
     }
 
-    /// 场外包盒（k·σ + margin；空场 = 退化盒）。
+    /// 场外包盒（`√cut·σ + margin`；空场 = 退化盒）。
     /// 注意与 `ProviderColliders::bounds(id)` 同名不同签名 ⇒ 这里用独立名避免遮蔽。
     pub fn world_bounds(&self) -> Aabb {
         let mut lo = Vec3::splat(f32::INFINITY);
         let mut hi = Vec3::splat(f32::NEG_INFINITY);
+        let rc = self.cut.sqrt();
         for s in &self.splats {
-            let r = s.scale.x.max(s.scale.y).max(s.scale.z) * 3.0;
+            let r = s.scale.x.max(s.scale.y).max(s.scale.z) * rc;
             lo = lo.min(s.center - Vec3::splat(r));
             hi = hi.max(s.center + Vec3::splat(r));
         }
@@ -475,9 +494,13 @@ mod tests {
         // r = 0.5 → α = 1 → e^-0.5
         let (s1, _) = f.density_grad(Vec3::new(0.5, 0.0, 0.0));
         assert!((s1 - (-0.5f32).exp()).abs() < 1e-6, "σ(0.5)={s1}");
-        // 截断（3σ = 1.5）
-        let (s2, _) = f.density_grad(Vec3::new(2.0, 0.0, 0.0));
-        assert_eq!(s2, 0.0);
+        // 截断：把半径写成**场自己的参数**（√cut·σ）而不是数字——2026-09-21 把 cut 从 9 提到
+        // 16（模块头"余量规则"）时，这里曾因写死"3σ = 1.5"而红；测契约而不是测常量。
+        let rc = 0.5 * f.cut.sqrt();
+        let (s_in, _) = f.density_grad(Vec3::new(rc * 0.98, 0.0, 0.0));
+        let (s_out, _) = f.density_grad(Vec3::new(rc * 1.02, 0.0, 0.0));
+        assert!(s_in > 0.0, "截断半径内应仍计入（σ={s_in}）");
+        assert_eq!(s_out, 0.0, "截断半径外应为 0（σ={s_out}）");
     }
 
     #[test]

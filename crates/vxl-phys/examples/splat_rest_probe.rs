@@ -53,9 +53,17 @@ fn iso_height_at(f: &GaussianSplatField, x: f32, z: f32) -> f32 {
 fn main() {
     let field = flat_field(0.5);
     let y_ref = iso_height_at(&field, 0.0, 0.0);
+    // **死区判据**（P6 根因的量化形式）：截断半径 = σ·√cut；若它在等值面上方的余量
+    // 小于体半径，则体心会落进"读不到任何核（s=0）"的死区 ⇒ 该体在此域上不可能稳定接触。
+    // 3σ（cut=9）对**多核叠加**的场不够：等值面本身可以浮到接近 3σ 高（这里是 1.31 / 1.5）。
+    let cut_r = 0.5 * field.cut.sqrt();
     println!(
         "【喷溅域静置高度】平场（y=0 面铺 σ=0.5 核、iso={ISO}）⇒ 中心处等值面 y = {y_ref:.4}\n\
-         （参考面由场自己的 `sdf()` 二分求得，逐角点各算）\n"
+         截断：cut = {:.1} ⇒ 截断半径 σ√cut = **{cut_r:.4}**、等值面上方的**有效余量 = {:.4} m**\n\
+         （余量 < 体半径 ⇒ 体心落进\"s=0 死区\" ⇒ 该体在此域上不可能有稳定接触）\n\
+         （参考面由场自己的 `sdf()` 二分求得，逐角点各算）\n",
+        field.cut,
+        cut_r - y_ref
     );
     println!("  形状           末态 y      **最小离面间隙**   清醒  |v|");
 
@@ -260,4 +268,61 @@ fn main() {
             );
         }
     }
+
+    // ⑤ **截断收敛 + 开销**（P6 根因修复的判据）：把"等值面位置"随 `cut` 的变化量
+    //    与**无截断参考**比——参考由本探针**自己**按同一批核参数求和（不经过 crate 的 cut）。
+    //    收敛说明"4σ 之后表面不再移动"；同时给查询开销（相对 cut=9）。
+    println!("\n⑤ 截断收敛与开销（平场，无截断参考由本探针自算）：");
+    let y_unt = iso_height_untruncated(0.0, 0.0);
+    println!("   无截断等值面 y = {y_unt:.4}");
+    println!("   cut  √cut   有截断等值面   Δ(有−无截断)   余量(√cut·σ−面)   200k 查询用时");
+    for cut in [4.0f32, 9.0, 16.0, 25.0, 36.0] {
+        let mut f = flat_field(0.5);
+        f.cut = cut;
+        let y = iso_height_at(&f, 0.0, 0.0);
+        let t0 = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for k in 0..200_000u32 {
+            let yq = 0.6 + (k % 64) as f32 * 0.02;
+            acc += f.density_grad(Vec3::new(0.1, yq, 0.1)).0;
+        }
+        let dt = t0.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "   {cut:4.0} {:.2}   {:10.4}   {:+11.4}      {:+10.4}       {dt:8.1} ms  (acc {acc:.1})",
+            cut.sqrt(),
+            y,
+            y - y_unt,
+            0.5 * cut.sqrt() - y
+        );
+    }
+}
+
+/// **无截断**参考密度：本探针按与 `flat_field` 同一批核参数自己求和
+/// （σ=0.5、幅值 1.0、0.25 m 铺距、±2.5 m），不经过 crate 的 `cut` ⇒ 独立参考。
+fn untruncated_density(x: f32, y: f32, z: f32) -> f32 {
+    let mut s = 0.0f32;
+    for ix in -10..=10 {
+        for iz in -10..=10 {
+            let d = ((x - ix as f32 * 0.25).powi(2) + y * y + (z - iz as f32 * 0.25).powi(2))
+                / (2.0 * 0.25);
+            s += (-d).exp();
+        }
+    }
+    s
+}
+
+/// 无截断等值面高度（沿 (x, ·, z) 二分本探针自算的密度）。
+fn iso_height_untruncated(x: f32, z: f32) -> f32 {
+    let (mut lo, mut hi) = (-1.0f32, 3.0f32);
+    let flo = untruncated_density(x, lo, z) - ISO;
+    for _ in 0..64 {
+        let mid = 0.5 * (lo + hi);
+        let fm = untruncated_density(x, mid, z) - ISO;
+        if (fm > 0.0) == (flo > 0.0) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
 }
