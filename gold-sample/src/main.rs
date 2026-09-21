@@ -399,6 +399,14 @@ fn main() {
         println!(
             "== 睡眠诊断（全程累计）：有人快而拒 {s_fast} | 全慢但未满 {s_wait} | 入睡 {s_slept} | 等待中 min_timer 峰值 {s_wait_max} ms"
         );
+        // 深档（默认关）：逐体超阈的**比例**——判定"逐体判据（路 A）的前提是否成立"。
+        let (d_fast, d_all) = vxl_phys_solver::sleep_diag_deep_take();
+        if d_all > 0 {
+            println!(
+                "== 睡眠诊断（深档）：逐体超阈 {d_fast}/{d_all} = {:.2}%",
+                100.0 * d_fast as f64 / d_all as f64
+            );
+        }
         let (bs, bc, bh, bsame) = vxl_phys_solver::warm_fallback_kind_take();
         let bt = (bs + bc + bh + bsame).max(1) as f64;
         println!(

@@ -110,6 +110,25 @@ static SLEEP_D_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 static SLEEP_D_SLEPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SLEEP_D_WAIT_MAX_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// **睡眠诊断（深档）**：计数"每个子步到底有多少个体超阈"。
+///
+/// 用途：判定**路 A（子块睡眠）的前提是否成立**。A 的睡眠判据是"**逐体**安静"，
+/// 而现行判据是"整岛安静"；若塔里**绝大多数体在子步尺度就超阈**，则 A 的逐体计时器
+/// 同样攒不满 `sleep_time` ⇒ **A 给不了任何东西**（见 `PLAN-solver-limits.md`）。
+/// `false`（默认）⇒ 保留早退、不计数、**零开销**；`true` ⇒ 扫完整个岛并计数（只计数，不改行为）。
+const SLEEP_DIAG_DEEP: bool = false;
+static SLEEP_D_FAST_BODY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static SLEEP_D_BODY_ALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 取深档睡眠诊断：(超阈体·子步累计, 受检体·子步累计)。
+pub fn sleep_diag_deep_take() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        SLEEP_D_FAST_BODY.swap(0, Relaxed),
+        SLEEP_D_BODY_ALL.swap(0, Relaxed),
+    )
+}
+
 /// 取睡眠诊断：(有人快而拒, 全慢但未满, 入睡, 等待中 `min_timer` 最大值(ms))。
 pub fn sleep_diag_take() -> (u64, u64, u64, u64) {
     use std::sync::atomic::Ordering::Relaxed;
@@ -958,14 +977,25 @@ impl ImpulseSolver {
                 }
             }
             let mut all_slow = true;
+            let mut fast_n = 0u64;
+            let mut body_n = 0u64;
             for &bi in &island.bodies {
                 let i = bi as usize;
+                body_n += 1;
                 let lin = bodies.linvel[i].length();
                 let ang = bodies.angvel(i).length();
                 if lin >= config.sleep_linear || ang >= config.sleep_angular {
                     all_slow = false;
-                    break;
+                    fast_n += 1;
+                    if !SLEEP_DIAG_DEEP {
+                        break;
+                    }
                 }
+            }
+            if SLEEP_DIAG_DEEP {
+                use std::sync::atomic::Ordering::Relaxed;
+                SLEEP_D_FAST_BODY.fetch_add(fast_n, Relaxed);
+                SLEEP_D_BODY_ALL.fetch_add(body_n, Relaxed);
             }
             if all_slow {
                 let mut min_timer = f32::MAX;
