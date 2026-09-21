@@ -126,6 +126,40 @@ fn cross_section_area(shape: &Shape) -> f32 {
     }
 }
 
+/// 形状的体积（浮力用）：**以单位密度反解质量**（`mass_props(shape, 1.0)` 的质量即体积），
+/// 与质量/惯量的形状实现**同源** ⇒ 不会出现"浮力按 A 体积、质量按 B 体积"的错配。
+/// 地形/提供者体（无体积语义）返回 0（不施加浮力）。
+fn shape_volume(shape: &Shape) -> f32 {
+    match shape {
+        Shape::HeightField(_) | Shape::Provider(_) => 0.0,
+        _ => vxl_phys_core::mass_props(shape, 1.0).mass,
+    }
+}
+
+/// 形状的包围半径（浮力的**表面采样点**用；与 `cross_section_area` 同族近似）。
+/// 半球/锥等取局部 AABB 的最大半长 ⇒ 采样点落在体表附近即可（不做精确解析）。
+fn body_half_extent(shape: &Shape) -> f32 {
+    match *shape {
+        Shape::Box { half } | Shape::ConvexHull { half, .. } | Shape::Compound { half, .. } => {
+            half.x.max(half.y).max(half.z)
+        }
+        Shape::Sphere { radius } => radius,
+        Shape::Cylinder {
+            half_height,
+            radius,
+        }
+        | Shape::Capsule {
+            half_height,
+            radius,
+        }
+        | Shape::Cone {
+            half_height,
+            radius,
+        } => (half_height * half_height + radius * radius).sqrt(),
+        Shape::HeightField(_) | Shape::Provider(_) => 0.0,
+    }
+}
+
 /// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
 #[derive(Default)]
 pub struct Providers {
@@ -944,10 +978,20 @@ impl World {
         }
     }
 
-    /// **介质通道（喷溅场作介质）**：对每个动体 × 每个「密度 > 0」的喷溅场均采样，
-    /// 累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`（单侧耦合，见 `MediumField`）。
-    /// 确定性：场按 id 序、体按索引序；中线量 `v_rel = v − 介质流速`。
-    /// 零成本短路：介质密度 0 的场不采样（不是介质的喷溅场完全不受影响）。
+    /// **介质通道**：把「介质状提供者」的状态作用到刚体上（单侧：介质 → 体）。
+    ///
+    /// **两段，物理分量不同（别混）**：
+    /// ① **喷溅场作介质**（既有，2026-09 起）：只累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`。
+    ///    密度 0 的场直接跳过；**本段是冻结行为**（PhysArena/喷溅场景的哈希以它为基准）⇒ 不动。
+    /// ② **流体作介质**（2a，2026-09-22，`ROUTE.md` §4「刚体↔液体」格）：**浮力 + 阻力**——
+    ///    浮力按阿基米德 `F = −g·ρ_med·V·frac_sub`（`frac_sub` = 采样点占用率均值，
+    ///    即"浸没体积分数"的代理），阻力同 ①。采样点 = **体心 + 4 个水平表面点**
+    ///    （单点采样在水线处是阶跃 ⇒ 盒子会抖；四点平均把水线过渡抹平）。
+    ///    ⇒ 比水轻的盒浮起、比水重的盒下沉（物理量纲齐备，不看质量以外的旋钮）。
+    ///
+    /// 确定性：场/流体按注册序、体按索引序、采样点固定序 ⇒ 全索引序可复现；
+    /// `v_rel` 取体心速度减介质流速（力矩本切片不施加，与 ① 一致）。
+    /// **零成本短路**：无流体 / 无介质密度 / 体不在介质包围盒内 ⇒ 不采样。
     fn medium_pass(&mut self) {
         const DRAG_CD: f32 = 1.0;
         for id in 0..self.providers.len() as u32 {
@@ -987,6 +1031,76 @@ impl World {
                     continue;
                 }
                 self.bodies.force[i] += v_rel * (-0.5 * m.density * DRAG_CD * a * sp);
+            }
+        }
+
+        // ── ② 流体作介质（2a，见上方文档）：浮力（阿基米德）+ 阻力 ──
+        use vxl_phys_core::interop::MediumField as _;
+        if self.fluids.is_empty() {
+            return;
+        }
+        let g = self.config.gravity;
+        for (sys, _) in self.fluids.iter() {
+            let pos = sys.positions();
+            if pos.is_empty() {
+                continue;
+            }
+            // 粒子包围盒（每 tick 一次 O(n)；体先过包围盒，避免全库逐体采样）。
+            let (mut lo, mut hi) = (pos[0], pos[0]);
+            for p in &pos[1..] {
+                lo = lo.min(*p);
+                hi = hi.max(*p);
+            }
+            let pad = sys.config().smoothing_radius; // 核半径余量：表面外仍有介质影响
+            for i in 0..self.bodies.len() {
+                if !self.bodies.is_dynamic(i) || !self.bodies.awake[i] {
+                    continue; // 睡眠体不受外力（唤醒后自然恢复；与"睡眠按静态处理"一致）
+                }
+                let c = self.bodies.position[i];
+                if c.x < lo.x - pad
+                    || c.x > hi.x + pad
+                    || c.y < lo.y - pad
+                    || c.y > hi.y + pad
+                    || c.z < lo.z - pad
+                    || c.z > hi.z + pad
+                {
+                    continue;
+                }
+                let vol = shape_volume(&self.bodies.shape[i]);
+                if vol <= 0.0 {
+                    continue;
+                }
+                let r = body_half_extent(&self.bodies.shape[i]);
+                // 浸没体积分数：体心 + 4 个水平表面点的占用率均值（单点在水线处是阶跃）。
+                let pts = [
+                    c,
+                    Vec3::new(c.x + r, c.y, c.z),
+                    Vec3::new(c.x - r, c.y, c.z),
+                    Vec3::new(c.x, c.y, c.z + r),
+                    Vec3::new(c.x, c.y, c.z - r),
+                ];
+                let (mut occ, mut dens) = (0.0f32, 0.0f32);
+                let mut vmed = Vec3::ZERO;
+                for p in pts {
+                    let s = sys.sample(p);
+                    occ += s.occupied;
+                    dens += s.density;
+                    vmed += s.velocity;
+                }
+                let inv = 1.0 / pts.len() as f32;
+                let frac_sub = (occ * inv).clamp(0.0, 1.0);
+                if frac_sub <= 0.0 {
+                    continue;
+                }
+                let rho = dens * inv;
+                let v_rel = self.bodies.linvel[i] - vmed * inv;
+                let sp = v_rel.length();
+                let mut f = -g * (rho * vol * frac_sub);
+                let a = cross_section_area(&self.bodies.shape[i]);
+                if a > 0.0 && sp > 1e-6 {
+                    f += v_rel * (-0.5 * rho * DRAG_CD * a * sp);
+                }
+                self.bodies.force[i] += f;
             }
         }
     }
