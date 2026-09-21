@@ -88,14 +88,24 @@ fn main() {
             active_ms += ms;
         }
         let th = w.broad.tree_height();
+        // ⚠️ 相位覆盖口径（2026-09-22 修）：`PhaseTimings` **每子步 `+=`、harness 每 tick 清零**
+        // ⇒ 下面这一行是**整 tick 的 7 相全覆盖**（`合计` 应≈左边 ms；差额＝子步循环外的簿记）。
+        // 而 `w.solver.last_phase_us` 是**每子步覆写** ⇒ 那三个数只是**末子步快照**，故单独标为
+        // `末子步[…]`——**别再把它们当整 tick 的解算时间**（本行曾因此少算一半，见 OPEN-PROBLEMS P3）。
         eprintln!(
-            "tick {t:3}: {ms:7.2} ms | broad {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | solve 岛数 {:5} 岛 {:6.2} 解算 {:6.2} 休眠 {:6.2} ms",
+            "tick {t:3}: {ms:7.2} ms | 场 {:5.2} 速积 {:5.2} 宽相 {:6.2} (AABB {:5.2} 树 {:6.2} 查询 {:6.2}) tree_h {th:3} 候选 {:7} | 窄相 {:6.2} | 解算 {:6.2} | 位积 {:6.2} | CCD {:5.2} | 合计 {:7.2} | 岛 {:5} 末子步[岛 {:6.2} 解算 {:6.2} 休眠 {:6.2}]",
+            tim.fields_us as f64 / 1000.0,
+            tim.integrate_vel_us as f64 / 1000.0,
             (bd.0 + bd.1 + bd.2 + bd.3) as f64 / 1000.0,
             bd.0 as f64 / 1000.0,
             bd.1 as f64 / 1000.0,
             bd.2 as f64 / 1000.0,
             w.broad.cand_total(),
             tim.narrowphase_us as f64 / 1000.0,
+            tim.solve_us as f64 / 1000.0,
+            tim.integrate_pos_us as f64 / 1000.0,
+            tim.ccd_us as f64 / 1000.0,
+            tim.total_us() as f64 / 1000.0,
             w.solver.island_count,
             w.solver.last_phase_us.0 as f64 / 1000.0,
             w.solver.last_phase_us.1 as f64 / 1000.0,
