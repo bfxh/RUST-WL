@@ -327,7 +327,15 @@ impl ProviderColliders for GaussianSplatField {
         } else {
             (self.iso - s).sqrt().min(1.0)
         };
-        let depth = skin - f;
+        // depth = 穿透量（正 = 点已在等值面里侧）；带内判据 `depth > −skin`（等价 `f < skin`）
+        // ⇒ 面外 skin 内仍生成**预期接触**。与体素（`−sdf`）、网格（2026-09-21 起 `−sd`）、
+        // 体素的盒查询（`−d`）**同一口径**。
+        //
+        // **偏置修正**（2026-09-21，P5 ⑳/㉑ 同族）：旧式 `depth = skin − f` 在**外侧**也给正
+        // depth ⇒ 盒（14 点采样走本函数）被顶到 `f ≈ skin` ⇒ 实测在平场上**悬空 ~1 cm**
+        // （`splat_rest_probe`：半高 0.25/0.35 的最小离面间隙 +0.0086/+0.0115）。
+        // 流体不读 `depth`（自算 sdf、按管道半径过滤）⇒ 该修正如体素那次一样无损。
+        let depth = -f;
         if depth < -skin {
             return true; // 支持查询；该点不在带内
         }
