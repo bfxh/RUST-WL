@@ -171,10 +171,12 @@ fn main() {
     // 【C】迭代预算判别：假设＝"网格接触的去穿透受**迭代数**限制（软接触）"
     //      ⇒ 换到参考配方（16 迭代 / 16 子步）后**沉降应大幅缩小**。
     //      若沉降几乎不变 ⇒ 不是迭代预算问题，而是**几何/压入量本身算错**。
-    let mut fine = PhysConfig::default();
-    fine.velocity_iterations = 16;
-    fine.normal_inner = 1;
-    fine.substeps = 16;
+    let fine = PhysConfig {
+        velocity_iterations: 16,
+        normal_inner: 1,
+        substeps: 16,
+        ..PhysConfig::default()
+    };
     println!("【C】参考配方对照（iters 16 / inner 1 / substeps 16，形心处）");
     println!("  形状        半尺寸  默认档沉降   **参考配方沉降**");
     for half in [0.24f32, 0.48, 0.80] {
