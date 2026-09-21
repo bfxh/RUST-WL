@@ -26,6 +26,21 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 同风格补挂，门禁链现在真的五项全绿。凡是"门禁全绿"的结论都必须**逐项贴退出码**，
 不能只看 test。
 
+## 规模档门（2026-09-22 新增；**10 万+10 万档的唯一自动门**）
+
+```bash
+bash scripts/gate_scale.sh              # 判据见下；已接线进 gate_all.sh 的 `step scale`
+SCALE_STRICT=1 bash scripts/gate_scale.sh   # 计时按 >10% 严判（须**安静机**）
+SCALE_FREEZE=1 bash scripts/gate_scale.sh   # 换代：打印可直接粘贴的冻结值块
+```
+
+**判据分两类**（这是它的设计要点）：① **确定性量逐项精确断言**——NaN / 深穿透 / 峰值流形 /
+warm 槽 / 峰值接触点 / 峰值候选 / 活跃 tick / 末态 awake（实测跨次**逐位一致**）；
+② **计时量只报不硬判**——默认 >2× 红、>1.5× 黄（本机按协议**测不出 10% 级**，
+要按 SPEC 的">10% 阻断"严判须 `SCALE_STRICT=1` + 安静机，或改用 `scripts/ab_perf.sh` 交错 A/B）。
+**为什么有它**：`M1-EXIT.md` §2.3 登记过——规模档此前**没有冻结基线**，那条"劣化 >10% 阻断"
+在规模档上是**空的**（会跑的自动门只有金样三场景与默认档 6×6×6）。
+
 ## 金样门（2026-09-21 新增；**保真/睡眠轴的唯一自动门**）
 
 ```bash

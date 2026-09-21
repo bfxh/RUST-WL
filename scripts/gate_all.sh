@@ -6,7 +6,7 @@
 # 本脚本把"跑什么、怎么判绿"固定成一处，逐项贴退出码、任一失败先打日志尾部再非零退出。
 #
 # 用法：
-#   bash scripts/gate_all.sh                 # 全量（含金样门，约 2-3 分钟）
+#   bash scripts/gate_all.sh                 # 全量（含金样门 + 规模档门，约 3-4 分钟）
 #   SKIP_GOLD=1 bash scripts/gate_all.sh     # 跳过金样门（只跑主仓 + 行为门）
 # 退出码：0 = 全绿；非 0 = 第一处失败项的退出码。
 #
@@ -126,6 +126,13 @@ grep -q "逐位一致" "${out}/gate_m1_islands.log" || {
     tail -n 10 "${out}/gate_m1_islands.log" >&2
     exit 7
 }
+
+# **规模档门**（10 万动态+10 万静态，SPEC §3 最低通过档 / §12.1-1 规模回归）：
+# 确定性量**逐项精确断言**（NaN/深穿透/峰值流形/warm 槽/峰值接触点/峰值候选/活跃 tick/末态 awake）
+# + 计时**软门**（默认只在 >2× 时红、>1.5× 黄；要按 >10% 严判须 `SCALE_STRICT=1` 且安静机）。
+# 为什么加它：`M1-EXIT.md` §2.3 登记过——"劣化 >10% 阻断"在规模档上**此前是空的**
+#（会跑的自动门只有金样三场景与默认档 6×6×6）。
+step scale 0 bash scripts/gate_scale.sh
 
 if [ "${SKIP_GOLD:-0}" = "1" ]; then
     echo "-- 金样门：SKIP_GOLD=1 ⇒ 跳过"
