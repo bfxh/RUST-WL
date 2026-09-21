@@ -192,42 +192,72 @@ fn main() {
         println!("{row}");
     }
 
-    // ④ **深埋顶出**（把"场太软/顶点不稳"与"接触算错"分开的关键一步）：
-    //    把球心放到等值面**下方** 0.10/0.20/0.30 m、零初速、**关重力**，看它能否被顶出来。
-    //    ⇒ 顶得出 ⇒ 接触函数正常，前面那条"沉 0.25 m"是场景（球在起伏场上滚进凹处）；
-    //    ⇒ 顶不出 ⇒ 深穿透下 `f` 已不是度量距离（`f = (iso − σ)/|∇σ|` 在核内部退化）
-    //      ⇒ depth 被低估、求解器没有可推的量 —— 那是**喷溅域的深度模型**问题。
-    println!("\n④ 深埋顶出（σ=0.5，球 r=0.35，关重力，60 tick）：");
+    // ④ **深埋顶出**（把"场太软/顶点不稳"与"接触没生成"分开的关键一步）：
+    //    把球心放到等值面**下方** 0.02/0.10/0.20/0.30 m、零初速、**关重力**，看它能否被顶出来。
+    //    ⚠️ **必须做"睡 vs 不睡"对照**：零初速 + 关重力 ⇒ 睡眠计时器跑满就睡，
+    //    而**睡眠体不做检测**（本仓既有事实，`trimesh_escape_probe` 踩过同一个坑）
+    //    ⇒ 不分开就会把"接触没生成"与"睡了所以不动"混为一谈。
+    println!("\n④ 深埋顶出（σ=0.5，球 r=0.35，关重力，60 tick；睡 vs 不睡 对照）：");
     let field = flat_field(0.5);
     let y_ref = iso_height_at(&field, 0.0, 0.0);
-    for depth in [0.02f32, 0.10, 0.20, 0.30] {
-        let cfg = PhysConfig {
-            gravity: Vec3::ZERO,
-            ..PhysConfig::default()
-        };
-        let mut w = World::new(cfg);
-        w.add_splat_field(flat_field(0.5));
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
-        });
-        let i = w.add_dynamic(
-            Shape::Sphere { radius: 0.35 },
-            Vec3::new(0.0, y_ref + 0.35 - depth, 0.0),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
-        let y0 = w.bodies.pose(i).0.y;
-        for _ in 0..60 {
-            w.step();
-        }
-        let (pos, _) = w.bodies.pose(i);
+    for no_sleep in [false, true] {
         println!(
-            "   初埋 {depth:4.2} m ⇒ 60 tick 后上移 {:+8.4} m、末态间隙 {:+8.4}、|v| {:.4}",
-            pos.y - y0,
-            pos.y - 0.35 - iso_height_at(&field, pos.x, pos.z),
-            w.bodies.linvel[i].length()
+            "   （{}）",
+            if no_sleep {
+                "sleep_time = 1e9（不睡）"
+            } else {
+                "默认睡眠"
+            }
         );
+        for depth in [0.02f32, 0.10, 0.20, 0.30] {
+            let mut cfg = PhysConfig {
+                gravity: Vec3::ZERO,
+                ..PhysConfig::default()
+            };
+            if no_sleep {
+                cfg.sleep_time = 1e9;
+            }
+            let mut w = World::new(cfg);
+            w.add_splat_field(flat_field(0.5));
+            let m = w.add_material(vxl_phys_core::Material {
+                friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
+                restitution: 0.02,
+            });
+            let i = w.add_dynamic(
+                Shape::Sphere { radius: 0.35 },
+                Vec3::new(0.0, y_ref + 0.35 - depth, 0.0),
+                Quat::IDENTITY,
+                1000.0,
+            ) as usize;
+            w.bodies.set_material(i, m);
+            let y0 = w.bodies.pose(i).0.y;
+            for _ in 0..60 {
+                w.step();
+            }
+            let (pos, _) = w.bodies.pose(i);
+            // 直接问提供者：那个埋深下它到底报了什么？（不靠猜）
+            if !no_sleep {
+                use vxl_phys_core::interop::ProviderColliders;
+                let mut q: Vec<vxl_phys_core::interop::InteropContact> = Vec::new();
+                let c = Vec3::new(0.0, y_ref + 0.35 - depth, 0.0);
+                let _ = w.bodies; // 仅借用；下面直接问场
+                flat_field(0.5).contacts_sphere(0, c, 0.35, 0.02, &mut q);
+                let f_ctr = flat_field(0.5).sdf(c);
+                match q.first() {
+                    Some(cc) => println!(
+                        "         [直接查询] sdf(center)={f_ctr:+.4}、depth={:+.4}、n=({:6.3},{:6.3},{:6.3})、feat={}",
+                        cc.depth, cc.normal.x, cc.normal.y, cc.normal.z, cc.feature
+                    ),
+                    None => println!("         [直接查询] sdf(center)={f_ctr:+.4}、**无接触**"),
+                }
+            }
+            println!(
+                "      初埋 {depth:4.2} m ⇒ 上移 {:+8.4} m、末态间隙 {:+8.4}、|v| {:.4}、清醒 {}",
+                pos.y - y0,
+                pos.y - 0.35 - iso_height_at(&field, pos.x, pos.z),
+                w.bodies.linvel[i].length(),
+                w.bodies.awake[i]
+            );
+        }
     }
 }
