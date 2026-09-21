@@ -69,6 +69,17 @@ fn main() {
     let mut deep_ticks = 0u32;
     let mut last100: Vec<f64> = Vec::with_capacity(100);
     let mut total_ms = 0.0f64;
+    // **抖动审计（SPEC §3：休眠体被重复唤醒 < 1 次/秒/体）**——与 `m0_gates` / `m1_scale`
+    // 同一口径的逐体「睡→醒」翻转计数。⚠️ 本场景**今天还不睡**（awake→0 未达标，见 `M1-EXIT.md`
+    // §2.2）⇒ 该量现读 0 属**结构必然**、不代表达标；它是给修好万级入睡之后备好的**同一把尺子**。
+    // 整段在 `ms` 计时区之外 ⇒ 不污染读数；行尾带 ASCII 机读标签（照 `FINAL_HASH=` 先例）。
+    let dyn_ids: Vec<usize> = (0..w.bodies.len())
+        .filter(|&i| w.bodies.is_dynamic(i))
+        .collect();
+    let mut flips_per_body: Vec<u32> = vec![0; w.bodies.len()];
+    let mut prev_awake: Vec<bool> = (0..w.bodies.len()).map(|i| w.bodies.awake[i]).collect();
+    let mut max_flips: u32 = 0;
+    let mut active_ticks: u32 = 0;
     for t in 1..=ticks {
         let t0 = Instant::now();
         w.step();
@@ -78,6 +89,16 @@ fn main() {
             last100.push(ms);
         }
         let h = w.health();
+        if h.awake_bodies > 0 {
+            active_ticks += 1;
+            for &i in &dyn_ids {
+                if !prev_awake[i] && w.bodies.awake[i] {
+                    flips_per_body[i] += 1;
+                    max_flips = max_flips.max(flips_per_body[i]);
+                }
+                prev_awake[i] = w.bodies.awake[i];
+            }
+        }
         if h.deep_penetrations > 0 {
             deep_ticks += 1;
         }
@@ -143,6 +164,23 @@ fn main() {
         deep_ticks
     );
     println!("尾窗(100) p50：{p50_tail:.3} ms");
+    // 抖动审计（与 `m0_gates`/`m1_scale` 同口径；分母用活跃秒 = 更严）。行尾 ASCII 机读标签。
+    {
+        let act_s = (active_ticks.max(1) as f64) / 60.0;
+        println!(
+            "抖动：单体贴最大睡醒翻转 {} 次（活跃 {:.1} s ⇒ {:.2} 次/秒/体；SPEC §3 阈值 <1 ⇒ {}）｜ wake_flips={} wake_rate_per_s={:.2}",
+            max_flips,
+            act_s,
+            max_flips as f64 / act_s,
+            if (max_flips as f64) < act_s {
+                "过"
+            } else {
+                "**不过**"
+            },
+            max_flips,
+            max_flips as f64 / act_s
+        );
+    }
     println!(
         "速度分布：未达睡眠阈(>0.04/0.05) {n_slow} 体 | 中速(>0.1/0.2) {n_mid} 体 | 快速(>0.5/1.0) {n_fast} 体 | |v|max {vmax:.3} |ω|max {wmax:.3}"
     );

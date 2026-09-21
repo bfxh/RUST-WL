@@ -43,6 +43,7 @@ F_PTS=1284528        # 峰值接触点
 F_CAND=1040623       # 峰值候选
 F_ACTIVE=103         # 活跃 tick 数（awake>0）
 F_AWAKE_END=0        # 末态 awake
+F_FLIPS=0            # 单体贴最大「睡→醒」翻转（抖动审计，SPEC §3 阈值 <1 次/秒/体）
 T_AVG=35.32          # 计时：全期均 ms/tick（软门）
 T_WORST=410.53       # 计时：最差 tick ms（软门）
 
@@ -78,6 +79,9 @@ warm=$(echo "$line_act" | grep -oE 'warm 槽 +[0-9]+' | grep -oE '[0-9]+')
 pts=$(echo "$line_act" | grep -oE '接触点 +[0-9]+' | grep -oE '[0-9]+')
 cand=$(echo "$line_act" | grep -oE '候选 +[0-9]+' | grep -oE '[0-9]+')
 awake_end=$(grep -oE "tick +600: .*awake +[0-9]+" "$log" | grep -oE 'awake +[0-9]+' | grep -oE '[0-9]+' | head -1)
+# 抖动审计：单体贴最大「睡→醒」翻转（按 harness 的 **ASCII 机读标签**解析：`wake_flips=<n>`
+# —— 别切中文，实测 sed 在中文前缀上匹配不上，会把整行漏给判据）。
+flips=$(grep -m1 -oE 'wake_flips=[0-9]+' "$log" | cut -d= -f2)
 
 if [ "${SCALE_FREEZE:-0}" = "1" ]; then
     echo "===== 换代用（粘贴回脚本头部的冻结基线）====="
@@ -108,6 +112,7 @@ chk 峰值接触点 "$pts" "$F_PTS"
 chk 峰值候选 "$cand" "$F_CAND"
 chk 活跃tick "$active" "$F_ACTIVE"
 chk 末态awake "$awake_end" "$F_AWAKE_END"
+chk 翻转峰 "$flips" "$F_FLIPS"
 
 echo "—— 计时量（软门；协议见脚本头）"
 ratio_avg=$(awk -v a="$avg" -v b="$T_AVG" 'BEGIN{ if (b+0==0) print "n/a"; else printf "%.3f", a/b }')

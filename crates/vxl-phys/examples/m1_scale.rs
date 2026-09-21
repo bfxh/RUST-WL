@@ -63,6 +63,15 @@ fn main() {
     //（）⇒ 8B 场景末帧读到 warm 0 条、流形 0.0 MB（实测踩过）。
     let (mut mfp_max, mut warm_max, mut pts_max, mut cands_max) = (0usize, 0usize, 0u64, 0usize);
     let (mut active_ticks, mut active_ms) = (0u32, 0.0f64);
+    // **抖动审计（SPEC §3：休眠体被重复唤醒 < 1 次/秒/体）**——逐体「睡→醒」翻转计数。
+    // 口径与 `m0_gates` 的那份一致（同一判据不许两处各写各的）；只在**有清醒体**的 tick 计数
+    // （全睡之后不可能再有翻转），且整段在 `ms` 计时区**之外** ⇒ 不污染逐 tick 读数。
+    let dyn_ids: Vec<usize> = (0..w.bodies.len())
+        .filter(|&i| w.bodies.is_dynamic(i))
+        .collect();
+    let mut flips_per_body: Vec<u32> = vec![0; w.bodies.len()];
+    let mut prev_awake: Vec<bool> = (0..w.bodies.len()).map(|i| w.bodies.awake[i]).collect();
+    let mut max_flips: u32 = 0;
     for t in 1..=ticks {
         // `PhaseTimings` 是**累计值**（见 docs/M1-PLAN.md 读数陷阱）⇒ 每 tick 清零，
         // 否则「窄相/求解」两列读到的是「自首帧起的累计」——按它调参会调错方向。
@@ -86,6 +95,14 @@ fn main() {
         if hh.awake_bodies > 0 {
             active_ticks += 1;
             active_ms += ms;
+            // 抖动审计（见上方注释）：只在活跃 tick 扫，翻转峰从这一批里取。
+            for &i in &dyn_ids {
+                if !prev_awake[i] && w.bodies.awake[i] {
+                    flips_per_body[i] += 1;
+                    max_flips = max_flips.max(flips_per_body[i]);
+                }
+                prev_awake[i] = w.bodies.awake[i];
+            }
         }
         let th = w.broad.tree_height();
         // ⚠️ 相位覆盖口径（2026-09-22 修）：`PhaseTimings` **每子步 `+=`、harness 每 tick 清零**
@@ -179,6 +196,25 @@ fn main() {
             warm_max,
             pts_max,
             cands_max
+        );
+        // 抖动审计（SPEC §3：休眠体被重复唤醒 < 1 次/秒/体）。**分母用活跃秒**（更严：
+        // 全睡之后不可能再翻转，用全期秒数会稀释）⇒ 报的是保守上界。判据进门见
+        // `scripts/gate_scale.sh`（确定性量：翻转峰是场景与码的函数）。
+        // ⚠️ 行尾**必须保留 ASCII 机读标签** `wake_flips=` / `wake_rate_per_s=`：门脚本按它解析
+        // （照 `determinism` 打 `FINAL_HASH=0x…` 的先例）——**别在门里切中文**：
+        // 实测 `sed 's/[^0-9]*([0-9]+)次…/'` 在中文前缀上匹配不上、把整行漏给判据（踩过）。
+        println!(
+            "抖动：单体贴最大睡醒翻转 {} 次（活跃 {:.1} s ⇒ {:.2} 次/秒/体；SPEC §3 阈值 <1 ⇒ {}）｜ wake_flips={} wake_rate_per_s={:.2}",
+            max_flips,
+            act / 60.0,
+            max_flips as f64 / (act / 60.0),
+            if (max_flips as f64) < act / 60.0 {
+                "过"
+            } else {
+                "**不过**"
+            },
+            max_flips,
+            max_flips as f64 / (act / 60.0),
         );
         let hot = n * (32.0 + 32.0);
         let cold = n
