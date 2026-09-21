@@ -528,6 +528,11 @@ cargo run --release -p vxl-phys --example m1_scale -- 8 102400 100000 40 <iters>
 ## 其余验收基准
 
 ```bash
+# 流体↔刚体（2a，ROUTE §4「刚体↔液体」格的**示例半边**）：四盒密度 300/700/1200/2000 在水盆里
+# 浮/沉 + 吃水随密度单调 + 健康（NaN/深穿透）+ 通过判定。测试半边见 `cargo test -p vxl-phys --test fluid_coupling`。
+# ⚠️ 场景按**铸装**口径搭（水块按沉降后几何就位，[8,8,8]@0.05 对 0.5 m 盆腔）——带落差的入盆水块会触发
+#   WCSPH 驻留瞬态"顶心喷泉"（PLAN-0.3 §4.2），演示与断言都会失效。
+cargo run --release -p vxl-phys --example fluid_buoyancy
 # T4 并行扩展（12 000 体碎片雨）：扩展倍数 + 串行/并行哈希逐位一致
 cargo run --release -p vxl-phys --example m1_islands
 # T6 8A 碰撞行（10×1200 静态格 + 10k tiles + 100 探针；验收 p95 ≤1.5ms）
