@@ -111,6 +111,26 @@ fn main() {
             w.solver.last_phase_us.1 as f64 / 1000.0,
             w.solver.last_phase_us.2 as f64 / 1000.0,
         );
+        // 求解细分（**同样是末子步快照**，见上注）：`gather`（= 建岛 + 按组 fill）与
+        // `scope`+`scatter` 构成一次 `solve()` 调用内部；`build/warm/iter` 是**各组之和**
+        // （CPU，可超墙钟）⇒ 判占比可靠、判绝对量须串行跑同字段比（`IslandDiag` 注）。
+        {
+            let d = &w.solver.island_diag;
+            eprintln!(
+                "    ↳ 求解细分(末子步): gather {:6.2}(建岛 {:5.2} fill {:5.2}) scope {:6.2} scatter {:6.2} | 组和 build {:6.2} warm {:5.2} iter {:6.2} | 组数 {:3} 流形 {:6} 点 {:7}",
+                d.gather_us as f64 / 1000.0,
+                d.island_build_us as f64 / 1000.0,
+                d.fill_us as f64 / 1000.0,
+                d.scope_us as f64 / 1000.0,
+                d.scatter_us as f64 / 1000.0,
+                d.build_us as f64 / 1000.0,
+                d.warm_us as f64 / 1000.0,
+                d.iter_us as f64 / 1000.0,
+                d.g_count,
+                d.manifolds,
+                d.points,
+            );
+        }
         if t % 100 == 0 {
             let h = w.health();
             println!(
