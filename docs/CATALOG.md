@@ -74,7 +74,7 @@
 
 | crate | 职责 | 关键件 | 状态 |
 |---|---|---|---|
-| `vxl-phys` | `World` 组装（默认管线）+ **破坏/体素 API**（`add_voxel`/`carve_sphere`/`spawn_box_debris`/`apply_impact_destruction`）+ **流体 API**（`add_fluid`/`fluids`/`fluid_pass`）+ CCD | `World::{step, add_*, providers, health, state_hash}` | ✅ | 
+| `vxl-phys` | `World` 组装（默认管线）+ **破坏/体素 API**（`add_voxel`/`carve_sphere`/`spawn_box_debris`/`apply_impact_destruction`）+ **流体 API**（`add_fluid`/`fluids`/`fluid_pass`）+ **介质通道 `medium_pass`**（喷溅场**只阻力**＝冻结行为；**流体＝浮力+阻力**，2a 施力侧 2026-09-22，见 `tests/fluid_coupling.rs`）+ CCD | `World::{step, add_*, providers, health, state_hash}` | ✅ | 
 
 ## 3. 热 crate 的内部模块分类
 
