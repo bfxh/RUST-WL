@@ -221,7 +221,13 @@ fn main() {
         && gr.arena_capacity > 0;
     let p50_ok = gp.p50 <= P50_LIMIT_MS;
     let clean = !gr.nan_seen && gr.deep_final == 0;
-    let gate_pass = p50_ok && clean && twin_match && gate_arena_stable;
+    // **抖动判据（SPEC §3 的速率口径）**：休眠体被重复唤醒 **< 1 次/秒/体**。
+    // 计数器早就在（`max_wake_flips`＝单体贴最大「睡→醒」翻转），但此前只在健康行**报原始计数**、
+    // 未换算成速率、也未进判据 ⇒ `M1-EXIT.md` §2.3 把它登记成"未验"（本次实现时核对到已有一半，
+    // 该条也随之改写）。场景是 60Hz 固定步 ⇒ 秒数 = tick 数 / 60。
+    let flip_rate = gr.max_wake_flips as f64 / (gr.per_tick_ms.len().max(1) as f64 / 60.0);
+    let jitter_ok = flip_rate < 1.0;
+    let gate_pass = p50_ok && clean && twin_match && gate_arena_stable && jitter_ok;
     let (g_tick, g_hash) = *gr.hash_samples.last().expect("哈希采样非空");
 
     println!("\n[门槛场景] {g_boxes} 盒（1 万静态 + 1 千动态，V1 形式）× {GATE_TICKS} tick");
@@ -230,13 +236,15 @@ fn main() {
         gp.p50, gp.avg, gp.p95, gp.min, gp.max
     );
     println!(
-        "  健康：NaN={} 末态深穿透={}（瞬态 {} tick）最大深度={:.4} 末态活跃={} 最大睡醒翻转={}",
+        "  健康：NaN={} 末态深穿透={}（瞬态 {} tick）最大深度={:.4} 末态活跃={} 最大睡醒翻转={}（≈{:.2} 次/秒/体，SPEC §3 阈值 <1 ⇒ {}）",
         if gr.nan_seen { "有" } else { "0" },
         gr.deep_final,
         gr.deep_ticks,
         gr.max_depth,
         gr.awake_final,
-        gr.max_wake_flips
+        gr.max_wake_flips,
+        flip_rate,
+        if jitter_ok { "过" } else { "**不过**" }
     );
     println!(
         "  哈希 tick {g_tick} = 0x{g_hash:032x} | 双跑对拍 {} | arena 容量 {}B 水位 {}/{}B 分配 {} 溢出 {}",
@@ -278,10 +286,10 @@ fn main() {
             "    \"form\": \"v1_10k_static_plus_1k_dynamic\",\n",
             "    \"boxes\": {}, \"ticks\": {}, \"warmup\": {},\n",
             "    \"perf_ms\": {{\"p50\": {:.4}, \"avg\": {:.4}, \"p95\": {:.4}, \"min\": {:.4}, \"max\": {:.4}}},\n",
-            "    \"health\": {{\"nan_seen\": {}, \"deep_final\": {}, \"deep_ticks\": {}, \"max_depth\": {:.5}, \"awake_final\": {}, \"max_wake_flips\": {}}},\n",
+            "    \"health\": {{\"nan_seen\": {}, \"deep_final\": {}, \"deep_ticks\": {}, \"max_depth\": {:.5}, \"awake_final\": {}, \"max_wake_flips\": {}, \"max_wake_rate_per_s\": {:.3}}},\n",
             "    \"hash\": {{\"final_tick\": {}, \"final\": \"0x{:032x}\", \"twin_match\": {}}},\n",
             "    \"arena\": {{\"capacity\": {}, \"high_water_first\": {}, \"high_water_last\": {}, \"allocs\": {}, \"overflows\": {}, \"stable\": {}}},\n",
-            "    \"verdict\": {{\"p50_within_limit\": {}, \"clean\": {}, \"pass\": {}}}\n",
+            "    \"verdict\": {{\"p50_within_limit\": {}, \"clean\": {}, \"jitter_ok\": {}, \"pass\": {}}}\n",
             "  }},\n",
             "  \"stress_scene\": {{\n",
             "    \"form\": \"all_dynamic_20x20x25_stack\", \"report_only\": true,\n",
@@ -309,6 +317,7 @@ fn main() {
         gr.max_depth,
         gr.awake_final,
         gr.max_wake_flips,
+        flip_rate,
         g_tick,
         g_hash,
         twin_match,
@@ -320,6 +329,7 @@ fn main() {
         gate_arena_stable,
         p50_ok,
         clean,
+        jitter_ok,
         gate_pass,
         s_boxes,
         STRESS_TICKS,
