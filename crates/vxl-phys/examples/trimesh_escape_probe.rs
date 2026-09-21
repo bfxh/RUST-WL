@@ -208,6 +208,35 @@ fn main() {
         );
     }
 
+    // 【D】球那一路的决定性读数（P5 唯一还站着的线索）：**接触自己的 depth 就是它的判词**。
+    //      不需要"正确的参考面"——`depth` 是接触给出的自述：
+    //        · 球沉下去而接触报 depth ≈ 0 ⇒ **提供者/窄相侧算错**（它以为贴着）
+    //        · 球沉下去而接触报 depth ≈ 实际压入量（正） ⇒ **消费/求解侧没顶出去**
+    //      必须**不睡**（睡眠体不做检测 ⇒ 末态无流形）。放**真正的三角内部点**（②，避开对角线）。
+    println!("【D】球那一路：真内部点 (0.94, 0.94) 的接触自述（不睡：sleep_time=1e9）");
+    for r in [0.20f32, 0.40, 0.70] {
+        let no_sleep = PhysConfig {
+            sleep_time: 1e9,
+            ..PhysConfig::default()
+        };
+        let (y, _v, awake) = drop_one_cfg(
+            gx + step * 0.25,
+            gz + step * 0.25,
+            Shape::Sphere { radius: r },
+            r,
+            ticks,
+            no_sleep,
+        );
+        let surface = h(gx + step * 0.25, gz + step * 0.25);
+        println!(
+            "  球 r={r:.2}：末态 y {y:.3}、地面 h {surface:.3}、中心相对地面 {:+.3}（期望 +{r:.2}）、清醒 {awake}",
+            y - surface
+        );
+        if std::env::var("PROBE_CONTACTS").is_ok() {
+            println!("     （接触明细见上：本探针在 PROBE_CONTACTS 下逐次打印）");
+        }
+    }
+
     // 【C】迭代预算判别：假设＝"网格接触的去穿透受**迭代数**限制（软接触）"
     //      ⇒ 换到参考配方（16 迭代 / 16 子步）后**沉降应大幅缩小**。
     //      若沉降几乎不变 ⇒ 不是迭代预算问题，而是**几何/压入量本身算错**。
