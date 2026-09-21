@@ -60,6 +60,9 @@ fn spawn_positions(s: &Scene) -> Vec<Vec3> {
     out
 }
 
+/// 建 vxl 侧世界。8 个参数＝一条配方（与 `RECIPES.md` 的位置参数一一对应）⇒ 显式豁免
+/// `too_many_arguments`（与主仓 `solve_constraint` 同先例）；金样门要求本 workspace clippy 全绿。
+#[allow(clippy::too_many_arguments)]
 fn build_vxl(
     s: &Scene,
     iters: u32,
@@ -541,5 +544,104 @@ fn main() {
     println!("== |ω| 前 8（体, |v|, |ω|, y）：");
     for &(i, v, w, y) in top.iter().take(8) {
         println!("   #{i} |v| {v:.3} |w| {w:.3} y {y:.3}");
+    }
+
+    // ── **冻结基线自检**（门禁用；只在与基线**完全同配方**时判定）────────────────────
+    //
+    // 为什么需要它：金样读数此前**只写在 `OPEN-PROBLEMS.md` 的 T5 行里**、没有任何门看着
+    // ⇒ 那行曾陈旧到与实际差一倍（入睡写 35/45，实测 45/45）都没人发现（2026-09-21 复测）。
+    // 基线可信度：全部是**确定性读数**——塔的 Δpos 已在 600/1200/2400/4800 tick 四点同值
+    // （0.0950 / 0.0572）核过；入睡与超阈是计数。
+    // 配方与基线见 `docs/RECIPES.md` §金样门；换基线须按 ADR-0004 记换代理由。
+    if let Some(fz) = frozen_baseline(scene_name.as_str(), ticks, vxl_iters, skin, inner, substeps)
+    {
+        let a = summary_vxl(&vw, &vids);
+        let (ol, oa, ob, _) = over_threshold(&vw, &vids);
+        let mut bad: Vec<String> = Vec::new();
+        if a.sleeping != fz.sleeping {
+            bad.push(format!("入睡 {} ≠ 基线 {}", a.sleeping, fz.sleeping));
+        }
+        if (ol, oa, ob) != (fz.ol, fz.oa, fz.ob) {
+            bad.push(format!(
+                "超阈 {ol}/{oa}/{ob} ≠ 基线 {}/{}/{}",
+                fz.ol, fz.oa, fz.ob
+            ));
+        }
+        if (max_d - fz.max_dpos).abs() > 1e-4 {
+            bad.push(format!("Δpos max {max_d:.4} ≠ 基线 {:.4}", fz.max_dpos));
+        }
+        if (mean_d - fz.mean_dpos).abs() > 1e-4 {
+            bad.push(format!("Δpos mean {mean_d:.4} ≠ 基线 {:.4}", fz.mean_dpos));
+        }
+        if bad.is_empty() {
+            println!(
+                "✅ 金样基线 PASS（{scene_name} / {ticks} tick）：入睡 {}/{}, 超阈 {ol}/{oa}/{ob}, Δpos max {max_d:.4} / mean {mean_d:.4}",
+                a.sleeping,
+                vids.len()
+            );
+        } else {
+            println!(
+                "❌ 金样基线 FAIL（{scene_name} / {ticks} tick）：{}",
+                bad.join("；")
+            );
+            std::process::exit(1);
+        }
+    } else {
+        println!("（本配方无冻结基线 ⇒ 跳过基线判定；基线配方见 `docs/RECIPES.md`）");
+    }
+}
+
+/// 冻结基线（配方 → 读数）：四项都要逐计数/逐值相符，`Δpos` 用 1e-4 容差。
+struct Frozen {
+    sleeping: usize,
+    ol: usize,
+    oa: usize,
+    ob: usize,
+    max_dpos: f32,
+    mean_dpos: f32,
+}
+
+/// 只认**文档里那条门禁配方**（`docs/RECIPES.md` §金样门）；其余配方返回 `None` ⇒ 跳过判定
+/// （保证本二进制仍可自由做实验：改任一旋钮即不再与基线比较）。
+#[allow(clippy::too_many_arguments)]
+fn frozen_baseline(
+    scene: &str,
+    ticks: usize,
+    iters: u32,
+    skin: f32,
+    inner: u32,
+    substeps: u32,
+) -> Option<Frozen> {
+    let same = |t: usize, i: u32, s: f32, inn: u32, sub: u32| {
+        ticks == t && iters == i && (skin - s).abs() < 1e-9 && inner == inn && substeps == sub
+    };
+    match scene {
+        // col45 / pile5：`600 16 0.01 4 3.0 30 4`
+        "col45" if same(600, 16, 0.01, 4, 4) => Some(Frozen {
+            sleeping: 45,
+            ol: 0,
+            oa: 0,
+            ob: 0,
+            max_dpos: 0.0034,
+            mean_dpos: 0.0016,
+        }),
+        "pile5" if same(600, 16, 0.01, 4, 4) => Some(Frozen {
+            sleeping: 2000,
+            ol: 0,
+            oa: 0,
+            ob: 0,
+            max_dpos: 0.0041,
+            mean_dpos: 0.0020,
+        }),
+        // tower25：`2400 16 0.01 1 3.0 30 16`（塔要长跑才收敛）
+        "tower25" if same(2400, 16, 0.01, 1, 16) => Some(Frozen {
+            sleeping: 2396,
+            ol: 0,
+            oa: 1,
+            ob: 0,
+            max_dpos: 0.0950,
+            mean_dpos: 0.0572,
+        }),
+        _ => None,
     }
 }

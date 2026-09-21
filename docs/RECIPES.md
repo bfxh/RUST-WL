@@ -21,6 +21,40 @@ bash scripts/vocab_scan.sh . > /tmp/vocab.log 2>&1; echo "vocab=$?"
 同风格补挂，门禁链现在真的五项全绿。凡是"门禁全绿"的结论都必须**逐项贴退出码**，
 不能只看 test。
 
+## 金样门（2026-09-21 新增；**保真/睡眠轴的唯一自动门**）
+
+```bash
+cd "/d/开发/RUST WL/gold-sample"
+export CARGO_TARGET_DIR=C:/vxl-wl-target-gold
+cargo fmt --all && cargo clippy --release -- -D warnings; echo "gold_clippy=$?"
+cargo run --release -q -- col45  600 16 0.01 4 3.0 30 4   > /tmp/g_col45.log  2>&1; echo "gold_col45=$?"
+cargo run --release -q -- pile5  600 16 0.01 4 3.0 30 4   > /tmp/g_pile5.log  2>&1; echo "gold_pile5=$?"
+cargo run --release -q -- tower25 2400 16 0.01 1 3.0 30 16 > /tmp/g_tower.log 2>&1; echo "gold_tower=$?"
+```
+
+**为什么加它**：金样读数此前**只写在 `OPEN-PROBLEMS.md` 的 T5 行里、没有任何门看着**
+⇒ 那行曾陈旧到与实际差一倍（入睡写 35/45，实测 45/45）都没人发现。
+现在 harness **自带冻结基线自检**：与基线同配方时逐项比对，不符即打印 `❌ … ≠ 基线 …`
+并 **`exit(1)`**（失败路径已验：把 col45 基线临时改成 46 ⇒ FAIL + exit 1）；
+换任一旋钮（配方不符）则打印"跳过基线判定"并**照常退出 0** ⇒ 实验用法不受影响。
+
+**冻结基线（2026-09-21 复测；全部为确定性读数——塔的 Δpos 已在 600/1200/2400/4800 tick
+四点同值核过）**：
+
+| 场景 | 配方 | 入睡 | 超阈（线/角/双） | Δpos max / mean |
+|---|---|---|---|---|
+| col45 | `600 16 0.01 4 3.0 30 4` | 45/45 | 0 / 0 / 0 | 0.0034 / 0.0016 m |
+| pile5 | `600 16 0.01 4 3.0 30 4` | 2000/2000 | 0 / 0 / 0 | 0.0041 / 0.0020 m |
+| tower25 | `2400 16 0.01 1 3.0 30 16` | 2396/2500 | 0 / 1 / 0 | 0.0950 / 0.0572 m |
+
+**换代规则（同 ADR-0004）**：有意改引擎而动了这些数 ⇒ 在 `OPEN-PROBLEMS.md` T5 记录
+旧值/新值/理由，并同步改 `gold-sample/src/main.rs` 的 `frozen_baseline`（一处常量；
+`Δpos` 用 1e-4 容差，入睡与超阈逐计数比对）。
+⚠️ 塔的 `Δpos` 口径＝**与 rapier 的位姿分歧**（只覆盖 n=16 参照体），且**与 tick 无关**
+（四点同值）⇒ 是稳定的冻结基线，不是"越大越糟"的信号。
+⚠️ 跑金样时**别同时跑其它构建**：Windows 会锁 `gold-sample.exe`，`cargo run` 报
+`failed to remove file … os error 5`（本会话踩过一次）。
+
 ## 行为门（三命令四哈希）
 
 | 场景 | 命令 | 基线（2026-09-15，参与式降点档） |
