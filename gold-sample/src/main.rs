@@ -289,7 +289,7 @@ fn main() {
     let (mut rw, rhs) = build_rapier(&s);
     let refs = ref_indices(vids.len());
     println!(
-        "场景 {scene_name}：{} 层 × {}×{} = {} 盒 | vxl iters {vxl_iters}（inner 4）| rapier 默认（TGS-Soft 4 迭代 + 软接触）| {ticks} tick",
+        "场景 {scene_name}：{} 层 × {}×{} = {} 盒 | vxl {vxl_iters}/{inner}/{substeps}（iters/inner/substeps；skin {skin}、maxcorr {maxcorr}、freq {freq}）| rapier 默认（TGS-Soft 4 迭代 + 软接触）| {ticks} tick",
         s.layers,
         s.side,
         s.side,
