@@ -16,7 +16,7 @@
 
 #![forbid(unsafe_code)]
 
-use vxl_phys_core::interop::{InteropContact, ProviderColliders};
+use vxl_phys_core::interop::{InteropContact, MediumField, MediumSample, ProviderColliders};
 use vxl_phys_core::Vec3;
 
 /// §4.8 流体技术族。
@@ -600,6 +600,76 @@ impl FluidSystem {
     }
 }
 
+/// **介质场：`MediumField` 的第一个真实现**（ADR 0008/0009 的交互通道；`ROUTE.md` §4
+/// 「刚体↔液体」格的第一刀 2a）。
+///
+/// 语义（只读采样；**不改流场、不改哈希**）：
+/// - `sample(x)`：在 `x` 处按 **poly6 核**对 27 邻域求和，给出
+///   `density = m·Σ_j W(r_ij)`（与流体内部的密度定义**同核同式**，只是不含自身项与鬼影项）、
+///   `velocity = Σ w_j v_j / Σ w_j`（Shepard 平均 ⇒ 均匀流场下逐位精确）、
+///   `occupied = clamp(ρ/ρ0, 0, 1)`（自由表面判据）。无近邻 ⇒ [`MediumSample::VACUUM`]。
+/// - `deposit(…)`：**显式空实现**（不静默降级）——反作用要等 2b 的 Akinci 边界粒子把
+///   「体↔流体」的动量交换喂回流场；在那之前，本域对刚体只是**单向的读数来源**。
+/// - `viscosity`/`temperature` 报 0：XSPh 的 `ε` 是**无量纲**系数、不是 Pa·s，
+///   本实现**不编造换算常数**（耦合侧用"密度 + 流速"算阻力即可，别依赖这个字段）。
+impl MediumField for FluidSystem {
+    fn sample(&self, x: Vec3) -> MediumSample {
+        if self.pos.is_empty() || self.grid.bins.is_empty() || self.grid.nz == 0 {
+            return MediumSample::VACUUM;
+        }
+        let (bx, by, bz) = self.grid.bin_of(x);
+        let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
+        let (mut wsum, mut rho) = (0.0f32, 0.0f32);
+        let mut vsum = Vec3::ZERO;
+        for dx in -1i64..=1 {
+            for dy in -1i64..=1 {
+                for dz in -1i64..=1 {
+                    let (ix, iy, iz) = (bx as i64 + dx, by as i64 + dy, bz as i64 + dz);
+                    if ix < 0
+                        || iy < 0
+                        || iz < 0
+                        || ix >= nx as i64
+                        || iy >= ny as i64
+                        || iz >= nz as i64
+                    {
+                        continue;
+                    }
+                    let idx =
+                        ((ix as usize) * ny as usize + iy as usize) * nz as usize + iz as usize;
+                    for &j in &self.grid.bins[idx] {
+                        let p = self.pos[j as usize];
+                        let d = p - x;
+                        let r2 = d.length_squared();
+                        if r2 > self.h2 {
+                            continue;
+                        }
+                        let t = self.h2 - r2;
+                        let w = self.k6 * t * t * t;
+                        wsum += w;
+                        rho += self.mass * w;
+                        vsum += self.vel[j as usize] * w;
+                    }
+                }
+            }
+        }
+        if wsum <= 0.0 {
+            return MediumSample::VACUUM;
+        }
+        let inv = 1.0 / wsum;
+        MediumSample {
+            density: rho,
+            velocity: vsum * inv,
+            viscosity: 0.0,
+            temperature: 0.0,
+            occupied: (rho / self.cfg.rest_density).clamp(0.0, 1.0),
+        }
+    }
+
+    fn deposit(&mut self, _x: Vec3, _momentum: Vec3, _mass: f32, _pressure_work: f32) {
+        // 2b（Akinci 两层边界粒子）才落地反作用；此处**显式**留空，不假装已耦合。
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,5 +1001,51 @@ mod tests {
         assert_eq!(c.family, FluidFamily::CpuSph);
         assert_eq!(c.rest_density, 1000.0);
         assert_eq!(c.substeps, 4);
+    }
+
+    /// #8 **介质场采样**（`MediumField`，2a 第一刀）：块内晶格点读到 ≈ρ0。
+    /// 容差比内部密度测试宽（同核同式但**不含自身项与鬼影项**，且 5³ 块只剩 2 格余量）。
+    #[test]
+    fn medium_sample_center_reads_rest_density() {
+        let mut f = still_block();
+        f.step(1.0 / 60.0, &NoProviders);
+        let c = Vec3::new(0.025, 0.325, 0.025); // origin + (2+½)·0.05 = 晶格点上
+        let s = f.sample(c);
+        let rho0 = f.config().rest_density;
+        assert!(
+            (s.density - rho0).abs() < 0.15 * rho0,
+            "块中心密度 {:?} 应≈ρ0 {:?}",
+            s.density,
+            rho0
+        );
+        assert!(s.occupied > 0.85, "占用率 {:?} 应接近 1", s.occupied);
+    }
+
+    /// #9 采样口径：**无介质处返回真空**（核带外 ⇒ 不是"零密度的一团水"）。
+    #[test]
+    fn medium_sample_far_is_vacuum() {
+        let mut f = still_block();
+        f.step(1.0 / 60.0, &NoProviders);
+        let far = Vec3::new(0.025, 0.325 + 10.0 * f.h, 0.025);
+        let s = f.sample(far);
+        assert_eq!(s.density, 0.0, "核带外不应有密度");
+        assert_eq!(s.occupied, 0.0, "核带外占用率应为 0");
+    }
+
+    /// #10 采样速度 = **Shepard 平均**（Σwᵥ/Σw）⇒ 均匀流场下应与输入一致。
+    #[test]
+    fn medium_sample_velocity_follows_uniform_flow() {
+        let mut f = still_block();
+        f.step(1.0 / 60.0, &NoProviders);
+        let v = Vec3::new(1.5, -0.25, 0.75);
+        let vs = vec![v; f.len()];
+        f.set_velocities(&vs);
+        let s = f.sample(Vec3::new(0.025, 0.325, 0.025));
+        assert!(
+            (s.velocity - v).length() < 1e-5,
+            "采样速度 {:?} 应≈{:?}",
+            s.velocity,
+            v
+        );
     }
 }

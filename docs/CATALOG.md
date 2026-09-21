@@ -55,7 +55,7 @@
 | `vxl-phys-terrain` | 体素/地形 | `TerrainSet`（高度场账本）+ **`voxel::VoxelVolume`**（占据位图 + 局域 SDF + `CollisionProvider`）+ 贪心提取/球域切割 + **`mesh::TriMesh`**（任意三角网薄壳提供者 + 均匀网格加速）+ **`contacts_point_voxel_solid`**（流体边界终版口径：占据门 + 开放面推进） | core, narrow, broad | ✅（M3 第一块） | 🌤 每 tick（体素/网格查询在外层调用时进 🔥） |
 | `vxl-phys-destruction` | 断裂/碎块形状 | 骨架（Voronoi 预断裂待做） | — | 🦴 | ❄️ |
 | `vxl-phys-soft` | 软体/布（XPBD） | 参数骨架（compliance 档位） | — | 🦴 | 🔥（实现后） |
-| `vxl-phys-fluid` | 液体（SPH/PBF/FLIP） | **WCSPH 求解器**：poly6 密度（含自身项）/ spiky 对称压力梯度 / Tait γ=7 / Monaghan 人工黏度 + XSPH / 镜像鬼影边界密度；确定性均匀网格 27 邻域；SoA + 半隐式欧拉 4 子步（`FluidSystem`） | core | ✅（0.3 切片 1，CPU 档） | 🔥 每 tick（4 子步 × 27 邻域） |
+| `vxl-phys-fluid` | 液体（SPH/PBF/FLIP） | **WCSPH 求解器**：poly6 密度（含自身项）/ spiky 对称压力梯度 / Tait γ=7 / Monaghan 人工黏度 + XSPH / 镜像鬼影边界密度；确定性均匀网格 27 邻域；SoA + 半隐式欧拉 4 子步（`FluidSystem`）；**`MediumField` 实现**（2a 采样侧，2026-09-22）：`sample`＝27 邻域 poly6 插值出 密度/流速/占用率（**只读、不改流场**）；`deposit` 显式留空待 2b（Akinci） | core | ✅（0.3 切片 1，CPU 档） | 🔥 每 tick（4 子步 × 27 邻域） |
 | `vxl-phys-wheeled` | 车辆（射线悬挂/轮胎） | 参数骨架 | — | 🦴 | 🌤 |
 | `vxl-phys-aero` | 风/气动（面元） | 参数骨架 | — | 🦴 | 🌤 |
 | `vxl-phys-marine` | 海洋/浮力 | 参数骨架 | — | 🦴 | 🌤 |
