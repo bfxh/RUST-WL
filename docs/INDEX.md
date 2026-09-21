@@ -25,7 +25,8 @@
 | **外围技术盘点：本仓缺口 ↔ 外部项目/论文，以及「外部这么做但本仓已否证」的护栏** | **`TECH-SURVEY.md`** |
 | 方法论（能量审计、判定实验、读数陷阱）与量化模型 | `KNOWLEDGE.md` |
 | 所有基准/复现的命令行 | `RECIPES.md` |
-| 某天到底发生了什么（叙事/排障过程） | `M1-PLAN.md` 各段 + `SESSION-*.md`（**最近：`SESSION-2026-09-20.md`**） |
+| 某天到底发生了什么（叙事/排障过程） | `M1-PLAN.md` 各段 + `SESSION-*.md`（**最近：`SESSION-2026-09-21-CONTRACT-AND-GATES.md`**） |
+| 一条命令跑完全部验证 | `bash scripts/gate_all.sh`（含金样门；见 `RECIPES.md` §门禁链） |
 
 ## 文档角色定义（写新文档前先看这里）
 
