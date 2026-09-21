@@ -116,9 +116,12 @@ fn main() {
         // （CPU，可超墙钟）⇒ 判占比可靠、判绝对量须串行跑同字段比（`IslandDiag` 注）。
         {
             let d = &w.solver.island_diag;
+            // 组墙钟（末子步、各组）：`d_solve - Σ组墙钟` ≈ 散回/回写等**组外**开销；
+            // `组和 build/warm/iter` 是组**内**三段（CPU 之和），两者合起来可判"每岛开销"在哪一半。
+            let gmax = d.group_us.iter().copied().max().unwrap_or(0) as f64 / 1000.0;
+            let gsum: f64 = d.group_us.iter().map(|&x| x as f64).sum::<f64>() / 1000.0;
             eprintln!(
-                "    ↳ 求解细分(末子步): gather {:6.2}(建岛 {:5.2} fill {:5.2}) scope {:6.2} scatter {:6.2} | 组和 build {:6.2} warm {:5.2} iter {:6.2} | 组数 {:3} 流形 {:6} 点 {:7}",
-                d.gather_us as f64 / 1000.0,
+                "    ↳ 求解细分(末子步): 建岛 {:5.2} fill {:5.2} scope {:6.2} scatter {:6.2} | 组和 build {:6.2} warm {:5.2} iter {:6.2} | 组数 {:3} 组墙钟 和 {:6.2} 峰 {:6.2} | 流形 {:6} 点 {:7}",
                 d.island_build_us as f64 / 1000.0,
                 d.fill_us as f64 / 1000.0,
                 d.scope_us as f64 / 1000.0,
@@ -127,6 +130,8 @@ fn main() {
                 d.warm_us as f64 / 1000.0,
                 d.iter_us as f64 / 1000.0,
                 d.g_count,
+                gsum,
+                gmax,
                 d.manifolds,
                 d.points,
             );

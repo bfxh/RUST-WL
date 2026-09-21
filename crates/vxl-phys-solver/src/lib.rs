@@ -404,9 +404,13 @@ pub struct IslandDiag {
     pub islands: u32,
     pub manifolds: u32,
     pub g_count: u32,
-    /// 建岛 + gather（串行）＝ `island_build_us + fill_us`。
+    /// ⚠️ **实测是「建岛」部分本身、不含 `fill_us`**（`gather_us == island_build_us`，两者同值）：
+    /// 值 = `d_island_all − d_fill`（见 `solve_phase`）。**原先的注释写作
+    /// "建岛 + gather = island_build_us + fill_us" 与实现不符**，2026-09-22 核正
+    /// （实测同帧：`gather_us 0.05` vs `fill_us 3.47` ⇒ 差一个数量级，不可能相加关系）。
     pub gather_us: u64,
-    /// 其**建岛**部分（并查集分岛 + 岛桶 + 流形归岛）——实测可忽略（36000 体约 13 µs）。
+    /// **建岛**部分（并查集分岛 + 岛桶 + 流形归岛）——实测可忽略（36000 体约 13 µs；
+    /// 10 万体单体岛场景 0.05 ms/子步）。
     pub island_build_us: u64,
     /// 其**按组 gather** 部分（每体 4 次 push + 世界逆惯量矩阵）——实测占求解相位约 24%。
     /// ⚠️ **不要试图并行化它**：与解算同属访存带宽受限，并发反而更慢（见 `EXPERIMENTS` C8）。
