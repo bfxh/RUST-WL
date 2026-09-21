@@ -208,7 +208,7 @@ A/B 跑完必须 `npm run build:vxl && npm run build` 把 `public/` 与 `dist/` 
 当前构建（否则浏览器测的是旧 wasm——本轮与上一轮都踩过）。**换代哈希的改动还要
 过金样**（见下），两道门都贴读数才算过。
 
-## 浏览器对拍自检（PhysArena，19 探针 × 9 引擎）
+## 浏览器对拍自检（PhysArena，**21** 探针 × 9 引擎；2026-09-22 起）
 
 ```bash
 cd /d/开发/physarena
@@ -223,6 +223,29 @@ ARENA_TAG=verify node scripts/arena-drive.mjs selftest   # 落盘 out/selftest-v
 （含 `stability-sleep`）。同场：Rapier 19/0/0、Crashcat 18/1、Bullet 16/3、Havok 15/4、
 cannon-es 15/4、Jolt 13/6、PhysX 13/6、Oimo 10/9。脚本另报 1 条资源加载失败（HTTP 未找到；
 判定"失败项 0"，不影响结论）。
+
+**✅ 2026-09-22 复测（探针 19 → 21；wasm 按上面步骤由**当前 HEAD** 重建）**：vxl-phys =
+**21 pass / 0 degraded / 0 fail**，**是 9 引擎里唯一全过的**。这次重建的靶子＝wasm 之后唯一的
+引擎行为改动 **`a7482b4`（窄相 SAT 平局取 sep1）**——重建日志里 `vxl-phys-narrow` 确有重编 ⇒ 测的是新码。
+新增/关键探针：`shape-wide-hull`、`shape-trimesh-sunk`（**陷网球体能否顶出**）、`shape-trimesh-hilly`
+（起伏三角网静置高度）。其中 **`shape-trimesh-sunk` 其余 8 个引擎全 FAIL**、只有 vxl 通过
+⇒ 这条是本仓「提供方深度契约 + 被埋体必须顶出」（P5/P6）的**浏览器侧独立验证**。
+
+| 引擎 | pass / degraded / fail | boot |
+|---|---|---|
+| **vxl-phys (RUST WL)** | **21 / 0 / 0** | 20 ms |
+| Rapier 3D | 20 / 0 / 1 | 85 ms |
+| Crashcat | 19 / 1 / 1 | 13 ms |
+| Bullet (ammo.js) | 17 / 3 / 1 | 48 ms |
+| Havok | 16 / 4 / 1 | 20 ms |
+| cannon-es | 15 / 4 / 2 | 21 ms |
+| Jolt Physics | 14 / 6 / 1 | 116 ms |
+| NVIDIA PhysX 5 | 14 / 6 / 1 | 178 ms |
+| Oimo.js | 10 / 9 / 2 | 6 ms |
+
+（另报 1 条资源加载失败（HTTP 未找到）——与 2026-09-20 同，判定「失败项 0」，不影响结论；产物 `out/selftest-verify.json`。）
+⚠️ 复测会**覆盖 `public/vendor/vxl/vxl_phys_wasm.wasm`**（构建产物；physarena 树里本就带改动）——
+跑前先确认没人在用 4173 或正在构建（本仓与 physarena 都有并发协作者）。
 
 **历史基线（同日早先，A9 收口之前）**：15 pass / 4 degraded / 0 fail（boot 4.5 ms）——4 项
 degraded **全是形状近似**（capsule / cone 引擎侧没有这两种形状；cylinder 未接线；复合体退化为
