@@ -250,6 +250,12 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
     let mut max_y = f32::NEG_INFINITY;
     let mut min_y = f32::INFINITY;
     let mut kin = 0.0f64;
+    // **越界体剔除后的动能**（P5 ⑲ 的落地）：无边界地形（如 `trimesh`）上滚体滚出边缘后
+    // 无限自由落体，`Σv²` 会被"掉出去几个体"整份主导（10 体 × 100² = 1e5）⇒ 该数就不是
+    // 引擎质量度量了。这里同时给**总量**（与历史读数可比）与**有效量**（y > −5 的体），
+    // 并报出越界体数——判地形场景的长跑收敛请读有效量。
+    let mut kin_in_bounds = 0.0f64;
+    let mut out_of_bounds = 0usize;
     let mut awake_n = 0usize;
     // 逐体明细（诊断 P5：判定"掉穿地形"还是"斜坡滚动"——见 `OPEN-PROBLEMS.md` P5）。
     let mut ys: Vec<(f32, f32, f32, f32)> = Vec::new(); // (y, x, z, |v|)
@@ -260,6 +266,11 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
             min_y = min_y.min(pos.y);
             let v = w.bodies.linvel[i];
             kin += (v.x * v.x + v.y * v.y + v.z * v.z) as f64;
+            if pos.y > -5.0 {
+                kin_in_bounds += (v.x * v.x + v.y * v.y + v.z * v.z) as f64;
+            } else {
+                out_of_bounds += 1;
+            }
             if w.bodies.awake[i] {
                 awake_n += 1;
             }
@@ -316,7 +327,7 @@ fn bench(name: &str, mut w: World, extra_steps: usize) {
         t.fields_us as f64 / MEASURE as f64,
     );
     println!(
-        "  规模/质量：流形 {} 个、接触点 {points} 个（{:.1} 点/流形）  最大穿透 {:+.4} m  堆顶 y={max_y:.3}  末态动能 Σv²={kin:.4}  末态清醒 {awake_n}/{dynb}",
+        "  规模/质量：流形 {} 个、接触点 {points} 个（{:.1} 点/流形）  最大穿透 {:+.4} m  堆顶 y={max_y:.3}  末态动能 Σv²={kin:.4}（**有效 {kin_in_bounds:.4}**，越界 {out_of_bounds} 体）  末态清醒 {awake_n}/{dynb}",
         w.manifolds().len(),
         points as f64 / w.manifolds().len().max(1) as f64,
         min_sep,
