@@ -504,6 +504,11 @@ cargo run --release -p vxl-phys --example m1_scale -- 8 102400 100000 40 <iters>
 `岛数 0 / 窄相 0.00`、~2.0 ms/tick）。同一份码：**120 tick 窗口 = 161.14 ms/tick（6.2 FPS）、
 600 tick 窗口 = 35.32 ms/tick（28.3 FPS）**、活跃期（103 tick）均 **187–196 ms/tick**。
 ⇒ 报 8B 的数**必须同时说窗口与相位**（详见 `OPEN-PROBLEMS.md` P3）。
+**⚠️ 逐岛三段探针已默认关（`ISLAND_SEG_PROBE = false`，2026-09-22）**：`IslandDiag.build/warm/iter`
+的细分是**每岛 6 次读钟**（`Instant::now()` ≈20–25 ns）——"岛多"的场景（下落/碎片/喷溅）在旧默认下
+会**把被测 tick 拖慢 2.4×**（8B 下落相实测 +27 ms/tick、tick 1: 46.6→18.7 ms）。要做该细分时
+把常量置 true 重编；`arena_bench` / `m1_islands` 在三列为 0 时会打印提示（防误读）。
+数值不变性已验：门槛/压力/确定性/T4 串并行哈希**全逐位一致**（纯计时改动）。
 
 ## 其余验收基准
 
