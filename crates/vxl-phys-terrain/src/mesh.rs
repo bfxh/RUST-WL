@@ -5,8 +5,10 @@
 //! ⇒ 单桶查询即可覆盖「覆盖查询点」的三角形；再查 3×3×3 邻域覆盖「近而不覆盖」的）。
 //!
 //! 接触模型（薄壳，与体素 SDF 不同的语义，文档内明示）：
-//! - `depth = skin − dist(p, 最近三角形)`（正 = 已在面里侧）；法线 = 该三角形**面法线**
-//!   （朝向由三角形顶点序决定 ⇒ 关卡导出时朝外，与 glTF/OBJ 惯例一致）。
+//! - `depth = −sd`，`sd = (p − q)·n` 为**带符号**面距离（q = 最近三角形上的最近点）
+//!   ⇒ **depth = 穿透量**（正 = 已在面里侧）；带内判据 `depth > −skin` ⇒ 地表上方 skin 内
+//!   也给出**预期接触**（speculative margin）。与高度场路径（`depth = h − v.y`）**同一口径**。
+//!   法线 = 该三角形**面法线**（朝向由三角形顶点序决定 ⇒ 关卡导出时朝外，与 glTF/OBJ 惯例一致）。
 //! - 无内外判定（薄壳语义）：远离面即无接触；穿到面背后会被面法线推出（单向屏障）。
 //!
 //! 精度前提：查询只保证「距离 ≤ `bin/2` 的最近面」正确 ⇒ 皮肤带应 < `bin/2`
@@ -322,19 +324,26 @@ impl ProviderColliders for TriMesh {
         Some(self.world_bounds())
     }
 
-    /// 点查询：`depth = skin − sd`（**带符号**面距离：外侧 sd>0、面里侧 sd<0）。
-    /// 法线 = 面法线。
+    /// 点查询：`depth = −sd`（**带符号**面距离 `sd = (p − q)·n`：外侧 sd>0、面里侧 sd<0），
+    /// 即 **depth = 穿透量**（正 = 点已在面里侧）；法线 = 面法线。
+    /// 带内判据 `depth > −skin`（等价 `sd < skin`）⇒ 地表上方 skin 内仍产生**预期接触**
+    /// （speculative margin，与高度场路径 `depth = h − v.y` + `depth > −skin` 同一口径）。
     ///
     /// **符号修正**（2026-09-15）：旧式用无符号距离 `d`，体穿到面里侧时 `depth = skin − d`
     /// 仍为**负**（被求解器当间隙）⇒ 单向屏障失效、体一路下沉（实测 arena 三角网场景
-    /// 穿透 0.17 m）。改用 `sd = (p − q)·n`：外侧与旧式仅差舍入（最近点内部时两者等价），
-    /// 内侧变正 ⇒ 正常顶出。
+    /// 穿透 0.17 m）。改用带符号 `sd`：内侧变正 ⇒ 正常顶出。
+    ///
+    /// **偏置修正**（2026-09-21，P5）：上式一度写成 `depth = skin − sd`——它在**外侧**也给出
+    /// 正 depth（点到面之间还差 skin 时就算"穿透"），求解器据此把体顶到 `sd ≈ skin`
+    /// ⇒ **静置时体比地表高约一个 skin**（实测：平地三角网上盒体高 3.5 cm、起伏网 1.4–2.0 cm；
+    /// 而同档的高度场路径贴住 ⇒ 两条地形路口径不一致）。改成 `depth = −sd` 后
+    /// **外侧 depth ≤ 0**（不再有虚假穿透），内侧仍为正 ⇒ 可恢复性不变（见 `shape-trimesh-sunk`）。
     fn contacts_point(&self, _id: u32, p: Vec3, skin: f32, out: &mut Vec<InteropContact>) -> bool {
         let Some((_, q, n, ti)) = self.closest(p, skin) else {
             return true;
         };
         let sd = (p - q).dot(n);
-        let depth = skin - sd;
+        let depth = -sd;
         if depth < -skin {
             return true; // 支持查询；不在带内
         }
@@ -421,18 +430,24 @@ mod tests {
         let mut m = ground();
         m.build_grid();
         let mut out = Vec::new();
-        // 面内一点：距离 0 ⇒ depth = skin
+        // 面内一点：距离 0 ⇒ depth = 0（接触面正好贴上；2026-09-21 前这里读 skin，
+        // 那套口径让求解器把体顶到 sd ≈ skin ⇒ 静置时悬空一个 skin）
         assert!(m.contacts_point(0, Vec3::new(0.3, 0.0, -0.2), 0.05, &mut out));
         assert_eq!(out.len(), 1);
-        assert!((out[0].depth - 0.05).abs() < 1e-5, "d={}", out[0].depth);
+        assert!(out[0].depth.abs() < 1e-5, "d={}", out[0].depth);
         assert!(out[0].normal.y > 0.99, "n={:?}", out[0].normal);
         // 面上方 0.12：带外（skin 0.05 ⇒ 界限 2·skin = 0.1）⇒ 无接触
         out.clear();
         m.contacts_point(0, Vec3::new(0.0, 0.12, 0.0), 0.05, &mut out);
         assert!(out.is_empty());
-        // 面上方 0.02：带内 ⇒ depth = 0.05 − 0.02 = 0.03
+        // 面上方 0.02：带内（预期接触）⇒ **depth = −0.02**（外侧为负，正号留给真穿透）
         out.clear();
         m.contacts_point(0, Vec3::new(0.0, 0.02, 0.0), 0.05, &mut out);
+        assert_eq!(out.len(), 1);
+        assert!((out[0].depth + 0.02).abs() < 1e-5, "d={}", out[0].depth);
+        // 面里侧 0.03：真穿透 ⇒ depth = +0.03
+        out.clear();
+        m.contacts_point(0, Vec3::new(0.0, -0.03, 0.0), 0.05, &mut out);
         assert_eq!(out.len(), 1);
         assert!((out[0].depth - 0.03).abs() < 1e-5, "d={}", out[0].depth);
     }
