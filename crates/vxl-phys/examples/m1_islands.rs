@@ -125,8 +125,14 @@ fn main() {
         let mmin = d.group_manifs.iter().copied().min().unwrap_or(0);
         let mmax = d.group_manifs.iter().copied().max().unwrap_or(0);
         println!(
-            "岛并行拆分（最后 tick）：岛 {} 流形 {} 组数 {}｜gather {} µs（串行）｜scope {} µs（并行）｜scatter {} µs（串行）",
-            d.islands, d.manifolds, d.g_count, d.gather_us, d.scope_us, d.scatter_us
+            "岛并行拆分（最后 tick）：岛 {} 流形 {} 组数 {}｜gather {} µs（串行）｜scope {} µs（并行）｜scatter {} µs（串行）｜点数 {}",
+            d.islands,
+            d.manifolds,
+            d.g_count,
+            d.gather_us,
+            d.scope_us,
+            d.scatter_us,
+            w.solver.last_points.0
         );
         println!(
             "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
