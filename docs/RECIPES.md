@@ -5,6 +5,11 @@
 
 ## 门禁链（每次源码改动落地前，ADR 0005）
 
+**一条命令版（推荐）**：`bash scripts/gate_all.sh` —— 主仓五项 + 行为门 + 金样门全跑，
+逐项贴退出码、任一失败先打日志尾部再非零退出（`SKIP_GOLD=1` 可跳过金样门）。
+⚠️ 跑它时**别编辑源码**、**别并发其它 cargo 构建**（两条都踩过，见文末）。
+下面展开的是它内部逐步跑的东西：
+
 ```bash
 cd "/d/开发/RUST WL"
 export CARGO_TARGET_DIR=C:/vxl-wl-target
