@@ -157,14 +157,15 @@ fn main() {
                 + 4.0  // sleep_timer
                 + 4.0); // material id
         let mfs = mfp_max as f64 * std::mem::size_of::<Manifold>() as f64;
-        let warm = warm_max as f64 * 256.0; // WarmManifold ≈ 4 点 × 60B + 16B
+        let warm = warm_max as f64 * w.solver.island_diag.warm_bytes_per_slot as f64; // 实测 size_of，别估算
         let total_mb = (hot + cold + mfs + warm) / 1e6;
         println!(
-            "工作集（模型）：热组 {:.1} MB ｜ 冷组 {:.1} MB ｜ 流形 {:.1} MB ｜ warm 槽 {} 条 ≈ {:.1} MB ｜ **合计 {total_mb:.1} MB**（本机 L2/L3 ≈ 2/36 MB，见 sys_topology）",
+            "工作集（模型）：热组 {:.1} MB ｜ 冷组 {:.1} MB ｜ 流形 {:.1} MB ｜ warm 槽 {} 条（{} B/条）≈ {:.1} MB ｜ **合计 {total_mb:.1} MB**（本机 L2/L3 ≈ 2/36 MB，见 sys_topology）",
             hot / 1e6,
             cold / 1e6,
             mfs / 1e6,
             warm_max,
+            w.solver.island_diag.warm_bytes_per_slot,
             warm / 1e6
         );
         // 每 tick 触碰（模型）与达成吞吐：用累计相位时间（下方按 tick 累加）。

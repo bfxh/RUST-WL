@@ -421,6 +421,8 @@ pub struct IslandDiag {
     pub points: u32,
     /// warm 槽表当前条目数（工作集读数用：× `size_of::<WarmManifold>()` 即该表占用）。
     pub warm_count: u32,
+    /// 单个 warm 槽的字节数（`size_of::<WarmManifold>()`；工作集读数用，避免外部估算偏差）。
+    pub warm_bytes_per_slot: u32,
 }
 
 /// 顺序冲量求解器。
@@ -1080,6 +1082,7 @@ impl ImpulseSolver {
         self.island_diag.iter_us = iter_us_diag;
         self.island_diag.points = self.last_points.0 as u32;
         self.island_diag.warm_count = self.warm_slots.len() as u32;
+        self.island_diag.warm_bytes_per_slot = std::mem::size_of::<WarmManifold>() as u32;
         let t_sleep = vxl_phys_core::probe::start();
         // 5) 岛级休眠与唤醒（§4.11 / §3 稳定性）。
         //    - 建岛阶段已只收「与清醒体连通」的岛（含被牵连的睡眠体），
