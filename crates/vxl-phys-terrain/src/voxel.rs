@@ -685,8 +685,15 @@ pub fn contacts_sphere_voxel(
     true
 }
 
-/// **点查询**（探针半径 = skin）：`depth = skin − sdf(p)`；法线 = SDF 梯度。
-/// 供外壳顶点采样（多点面接触）。`p` 在表面外 `> 2·skin` 时返回 false（不生成接触）。
+/// **点查询**：`depth = −sdf(p)`，即 **depth = 穿透量**（正 = 点已在固体里侧）；
+/// 带内判据 `depth > −skin`（等价 `sdf < skin`）⇒ 表面外 `skin` 内仍生成**预期接触**。
+/// 与 `contacts_box_voxel`（`depth = −d`）和网格路径（2026-09-21 起 `depth = −sd`）**同一口径**。
+///
+/// **偏置修正**（2026-09-21，P5 ⑳ 同族）：旧式 `depth = skin − sdf` 在**外侧**也给正 depth
+/// ⇒ 走点查询的**外壳顶点采样**把体顶到 `sdf ≈ skin` ⇒ **包体在体素地面上悬空 ≈ 0.022 m**
+/// （实测 `voxel_rest_probe`：同一块板上盒 −0.0004、球 −0.0000、**包 +0.0220**）。
+/// 流体不受影响：它**不读 `depth`**，只用返回点的 `point`/`normal` 自算 sdf，
+/// 且它过滤的上界就是 `self.h`（新口径的带正好等于管道半径 h，旧口径是 2h 后又被它滤掉）。
 pub fn contacts_point_voxel(
     v: &VoxelVolume,
     p: Vec3,
@@ -694,7 +701,7 @@ pub fn contacts_point_voxel(
     out: &mut Vec<vxl_phys_core::interop::InteropContact>,
 ) -> bool {
     let d = v.sdf(p);
-    let depth = skin - d;
+    let depth = -d;
     if depth < -skin {
         return true; // 支持查询，但该点不在接触带内（无接触）
     }
