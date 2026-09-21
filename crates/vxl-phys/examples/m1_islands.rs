@@ -153,6 +153,11 @@ fn main() {
             w.solver.last_points.0
         );
         println!(
+            "   gather 拆解：建岛 {} µs ｜ 按组 fill {} µs（fill 与解算同属带宽受限：
+**并行化反而更慢**，见 EXPERIMENTS C8）",
+            d.island_build_us, d.fill_us
+        );
+        println!(
             "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
             if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
         );

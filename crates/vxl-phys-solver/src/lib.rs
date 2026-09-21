@@ -394,8 +394,13 @@ pub struct IslandDiag {
     pub islands: u32,
     pub manifolds: u32,
     pub g_count: u32,
-    /// 建岛 + gather（串行）。
+    /// 建岛 + gather（串行）＝ `island_build_us + fill_us`。
     pub gather_us: u64,
+    /// 其**建岛**部分（并查集分岛 + 岛桶 + 流形归岛）——实测可忽略（36000 体约 13 µs）。
+    pub island_build_us: u64,
+    /// 其**按组 gather** 部分（每体 4 次 push + 世界逆惯量矩阵）——实测占求解相位约 24%。
+    /// ⚠️ **不要试图并行化它**：与解算同属访存带宽受限，并发反而更慢（见 `EXPERIMENTS` C8）。
+    pub fill_us: u64,
     /// `thread::scope` 墙钟 = 最慢组 + spawn/join（并行段）。
     pub scope_us: u64,
     /// 散射回写 + warm 回写/剪枝（串行）。
@@ -723,6 +728,10 @@ impl ImpulseSolver {
         //      保证「被撞唤醒」的接触对里有沉睡侧的体（求解冲量要施加到它并唤醒）。
         //    岛池跨帧复用（Vec 容量保留），全清醒场景（10 万岛）不再逐帧分配。
         let mut root_slot: HashMap<u32, usize> = HashMap::new();
+        // 诊断拆点（T4 第三刀）：把「建岛」与「按组 gather（每体 4 次 push + 世界逆惯量矩阵）」
+        // 分开计时——后者实测占求解相位约 24%（36000 体 × 约 41 ns），是唯一还串行的重活。
+        // ⚠️ 并行化它**反而更慢**（见下 `fill` 处注）：该段与解算同属**访存带宽受限**。
+        let t_fill = vxl_phys_core::probe::start();
         let mut pool = std::mem::take(&mut self.island_pool);
         let mut islands_used = 0usize;
         for i in 0..n {
@@ -856,7 +865,11 @@ impl ImpulseSolver {
             }
         }
 
-        let d_island = vxl_phys_core::probe::us(t_island);
+        let d_fill = vxl_phys_core::probe::us(t_fill);
+        let d_island_all = vxl_phys_core::probe::us(t_island);
+        let d_island = d_island_all.saturating_sub(d_fill);
+        self.island_diag.fill_us = d_fill;
+        self.island_diag.island_build_us = d_island;
         let t_solve = vxl_phys_core::probe::start();
         let islands_len = islands.len() as u32;
         let mut scope_us_diag = 0u64;
