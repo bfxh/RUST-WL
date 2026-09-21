@@ -104,13 +104,25 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          # 预发布号（-m1 / -日期）自动标 prerelease，与 docs/RELEASE.md §2 的约定一致。
+          # ① **只附非空文件**：门禁全绿时 `fmt.log` 是**空文件**，附它会得到
+          #    `HTTP 400: Bad Content-Length`（2026-09-21 首次发版实测，整个 Release
+          #    因该错误被回滚 ⇒ 看起来"没建成"）。
+          # ② **幂等**：Release 已存在时只补传产物（重跑安全，不再需要先删 tag）。
+          files=$(find . -maxdepth 2 -type f \( -name '*.log' -o -name 'gold-*.txt' \) -size +0c | sort)
+          echo "附件（非空）："; echo "$files"
           case "$TAG" in
             *-*) PRE="--prerelease" ;;
             *)   PRE="" ;;
           esac
-          gh release create "$TAG" \
-            --title "$TAG" \
-            --generate-notes \
-            $PRE \
-            *.log gold-sample/gold-*.txt
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release 已存在 ⇒ 只补传产物"
+            # shellcheck disable=SC2086
+            gh release upload "$TAG" $files --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              $PRE \
+              $files
+          fi
