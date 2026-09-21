@@ -37,3 +37,7 @@ LOD = "LOD"
 # UE / UE5 = Unreal Engine（引擎名缩写，盘点文档里引用按其实现的项目）。
 UE = "UE"
 UE5 = "UE5"
+# Shepard = Donald Shepard 的**逆距离加权插值**（粒子法标准术语：Shepard 平均/权重；
+# 流体介质场采样用它做速度平均，见 `vxl-phys-fluid` 的 `MediumField` 实现）。
+# typos 默认想改成 Shepherd（牧羊人）——语义不同，按术语豁免。
+Shepard = "Shepard"
