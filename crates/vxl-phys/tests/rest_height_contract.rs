@@ -155,3 +155,81 @@ fn mesh_sphere_inside_is_ejected() {
         pos.y - r
     );
 }
+
+/// 平喷溅场：y = 0 面上按 0.25 m 铺各向同性核（σ = 0.5、幅值 1.0、iso 0.5）。
+/// 只铺 ±0.75 m 的 7×7 —— 够放 0.35 半长的盒，也比探针里那版全铺快得多。
+fn flat_splat() -> vxl_phys_splat::GaussianSplatField {
+    let mut f = vxl_phys_splat::GaussianSplatField::new(0.5);
+    for ix in -3..=3 {
+        for iz in -3..=3 {
+            f.push(vxl_phys_splat::Splat::isotropic(
+                Vec3::new(ix as f32 * 0.25, 0.0, iz as f32 * 0.25),
+                0.5,
+                1.0,
+            ));
+        }
+    }
+    f
+}
+
+/// 该场的**等值面高度**（沿 (x, ·, z) 二分 `sdf` 的零点）——**独立于接触路径**的参考。
+fn splat_iso_height(f: &vxl_phys_splat::GaussianSplatField, x: f32, z: f32) -> f32 {
+    let (mut lo, mut hi) = (-1.0f32, 3.0f32);
+    let flo = f.sdf(Vec3::new(x, lo, z));
+    for _ in 0..48 {
+        let mid = 0.5 * (lo + hi);
+        let fm = f.sdf(Vec3::new(x, mid, z));
+        if (fm > 0.0) == (flo > 0.0) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// ① 盒落在**平喷溅场**上：底面最低角点必须贴住该处等值面（±2 cm；软场本身有轻微起伏）。
+/// 这是 2026-09-21 那次修复（`contacts_point`：`depth = skin − f` → `−f`）的守卫——
+/// 旧口径下盒会**悬空 ≈ 一个 band**（探针实测 +0.0086 / +0.0115 m）。
+#[test]
+fn splat_box_rests_near_surface() {
+    let half = 0.35f32;
+    let field = flat_splat();
+    let y_ref = splat_iso_height(&field, 0.0, 0.0);
+    let mut w = World::new(PhysConfig::default());
+    w.add_splat_field(field.clone());
+    let m = material(&mut w);
+    let i = w.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(half),
+        },
+        Vec3::new(0.0, y_ref + half + 0.5, 0.0),
+        Quat::IDENTITY,
+        1000.0,
+    ) as usize;
+    w.bodies.set_material(i, m);
+    for _ in 0..TICKS {
+        w.step();
+    }
+    let (pos, rot) = w.bodies.pose(i);
+    // **整块底面采样**（7×7，含四边四角），取最小间隙 —— 不能用"最低角点"：
+    // 小场是**穹顶**（中心密度最高），盒靠**底面中心**承重、四角**本来就该悬空**
+    // ⇒ 角点判据在曲面上不成立（P5 那轮踩过同型的坑，见 OPEN-PROBLEMS P5 ⑰ 第五/六版）。
+    let mut min_gap = f32::INFINITY;
+    for sx in 0..7 {
+        for sz in 0..7 {
+            let u = -half + 2.0 * half * sx as f32 / 6.0;
+            let v = -half + 2.0 * half * sz as f32 / 6.0;
+            let c = rot.rotate_vec3(Vec3::new(u, -half, v)) + pos;
+            min_gap = min_gap.min(c.y - splat_iso_height(&field, c.x, c.z));
+        }
+    }
+    // **方向性门**：浮动才是失败模式（旧口径 `depth = skin − f` 让盒悬空 ≈ 一个 band，
+    // 探针实测旧 +0.0086/+0.0115、新 −0.0045/−0.0029）⇒ 上限压到 +0.005 才能把两者分开，
+    // 下限放宽到 −0.03（软场允许轻微陷入）。
+    assert!(
+        (-0.03..=0.005).contains(&min_gap),
+        "盒底面最小间隙 {min_gap:+.4} m（应 ∈ [−0.03, +0.005]）——若悬空 ≈ 一个 band \
+         说明 `contacts_point` 的 depth 又被写回 `skin − f`（见 OPEN-PROBLEMS P6 ㉒）"
+    );
+}
