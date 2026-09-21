@@ -111,8 +111,26 @@ fn main() {
     // 饱和时，才轮到"负载不均/调度"这些次级解释。判读：串行占比 ≈ (1 − 1/扩展比) 的上限。
     {
         let mut w = build(clusters, hi);
-        for _ in 0..(10 + ticks) {
+        // **窗口累计**（本仓纪律：决定量必须窗口均值，不能用单点）：碎片雨有三个阶段
+        // —— 下落（几乎无流形）→ 落定峰值 → **睡眠塌缩**（子岛睡眠生效后流形数骤降，
+        // 实测 60 tick 末帧 11836 → 400 tick 末帧 707）⇒ 末帧单点与"全程累计均值"**都不代表场景成本**。
+        // 这里取**后半程**窗口（tick ≥ 半程）求均值，并报出窗口端点与流形区间供判读。
+        let (mut wf, mut wm, mut wp, mut wn) = (0u64, 0u64, 0u64, 0u64);
+        let (mut mf_min, mut mf_max) = (u32::MAX, 0u32);
+        let (mut it_sum, mut wm_sum) = (0u64, 0u64);
+        for t in 0..(10 + ticks) {
             w.step();
+            if t >= (10 + ticks) / 2 {
+                let dd = &w.solver.island_diag;
+                wf += dd.build_us;
+                wm += dd.manifolds as u64;
+                wp += dd.points as u64;
+                it_sum += dd.iter_us;
+                wm_sum += dd.warm_us;
+                mf_min = mf_min.min(dd.manifolds);
+                mf_max = mf_max.max(dd.manifolds);
+                wn += 1;
+            }
         }
         let d = w.solver.island_diag.clone();
         let gmax = d.group_us.iter().copied().max().unwrap_or(0);
@@ -138,7 +156,33 @@ fn main() {
             "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
             if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
         );
-        // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠) —— 找降访存的第一刀落在哪。
+        // **规范指标（唯一口径）**：窗口均值（后半程 {wn} 个子步）——约束构建 CPU 合计
+        // （各组之和）÷ 同窗口的流形/点数 ⇒ ns/流形、ns/点。**跨场景/跨改动比较只用这一组**，
+        // 并同时看**窗口内的流形区间**（好判"测的是哪个阶段"）。
+        println!(
+            "   规范指标（窗口均值，后半程 {wn} 子步；流形 {mf_min}–{mf_max}）：约束构建 {:.0} µs/解算 ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {:.0} µs｜迭代 {:.0} µs",
+            wf as f64 / wn.max(1) as f64,
+            1e3 * wf as f64 / wm.max(1) as f64,
+            1e3 * wf as f64 / wp.max(1) as f64,
+            wm_sum as f64 / wn.max(1) as f64,
+            it_sum as f64 / wn.max(1) as f64
+        );
+        let mf = d.manifolds.max(1) as f64;
+        let pt = d.points.max(1) as f64;
+        println!(
+            "   规范指标（同帧）：约束构建 {} µs ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {} µs｜迭代 {} µs｜流形 {} 点 {}｜占比 构建{:.0}%/热启动{:.0}%/迭代{:.0}%",
+            d.build_us,
+            1e3 * d.build_us as f64 / mf,
+            1e3 * d.build_us as f64 / pt,
+            d.warm_us,
+            d.iter_us,
+            d.manifolds,
+            d.points,
+            100.0 * d.build_us as f64 / d.build_us.max(1) as f64,
+            100.0 * d.warm_us as f64 / d.build_us.max(1) as f64,
+            100.0 * d.iter_us as f64 / d.build_us.max(1) as f64
+        );
+        // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠)。
         let d4 = w.solver.last_detail_us;
         let tot_d: f64 = d4.iter().map(|&x| x as f64).sum::<f64>().max(1.0);
         println!(

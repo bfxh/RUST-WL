@@ -403,6 +403,17 @@ pub struct IslandDiag {
     /// 每组的解算墙钟（µs）与流形数（工作量代理）。
     pub group_us: Vec<u64>,
     pub group_manifs: Vec<u32>,
+    /// **本次解算**（= 每子步）的三段 CPU 时间合计（**各组之和**）：
+    /// 约束构建 / 热启动预施加 / 迭代扫掠。与 `last_detail_us`（**进程内累计**，
+    /// 供 `arena_bench` 除以步数取均值用）**不是一回事**——这三个字段与
+    /// `manifolds`/`points` **同源同帧**，只有它们能做"每流形 / 每点成本"的归一化比较。
+    /// ⚠️ 并发时它们是"各组墙钟之和"（受带宽竞争放大）⇒ **判占比**可靠；
+    /// 判绝对量要拿串行跑的同一字段比。
+    pub build_us: u64,
+    pub warm_us: u64,
+    pub iter_us: u64,
+    /// 本次解算的接触点总数（与 `manifolds` 同帧；归一化用）。
+    pub points: u32,
 }
 
 /// 顺序冲量求解器。
@@ -849,6 +860,10 @@ impl ImpulseSolver {
         let t_solve = vxl_phys_core::probe::start();
         let islands_len = islands.len() as u32;
         let mut scope_us_diag = 0u64;
+        // 每**解算**（子步）的三段合计（各组之和）——与 manifolds/points 同帧，做归一化用。
+        let mut build_us_diag = 0u64;
+        let mut warm_us_diag = 0u64;
+        let mut iter_us_diag = 0u64;
         // 4) 并行解算（§6 契约：组间写槽位不相交，组内 = 串行语义）。
         if g_count > 1 {
             let bodies_ref: &BodySet = bodies;
@@ -921,6 +936,9 @@ impl ImpulseSolver {
             for (k, v) in tot.iter().enumerate().take(3) {
                 self.last_detail_us[k + 1] += v;
             }
+            build_us_diag = tot[0];
+            warm_us_diag = tot[1];
+            iter_us_diag = tot[2];
             self.last_points = (tot[3], tot[4]);
         } else if !awake.is_empty() {
             let mut det = [0u64; 5];
@@ -950,6 +968,9 @@ impl ImpulseSolver {
             for (k, v) in det.iter().enumerate().take(3) {
                 self.last_detail_us[k + 1] += v;
             }
+            build_us_diag = det[0];
+            warm_us_diag = det[1];
+            iter_us_diag = det[2];
             self.last_points = (det[3], det[4]);
             group_us_diag[0] = vxl_phys_core::probe::us(t_ser);
         }
@@ -1039,6 +1060,10 @@ impl ImpulseSolver {
         self.island_diag.scatter_us = d_solve.saturating_sub(scope_us_diag);
         self.island_diag.group_us = std::mem::take(&mut group_us_diag);
         self.island_diag.group_manifs = std::mem::take(&mut group_manifs_diag);
+        self.island_diag.build_us = build_us_diag;
+        self.island_diag.warm_us = warm_us_diag;
+        self.island_diag.iter_us = iter_us_diag;
+        self.island_diag.points = self.last_points.0 as u32;
         let t_sleep = vxl_phys_core::probe::start();
         // 5) 岛级休眠与唤醒（§4.11 / §3 稳定性）。
         //    - 建岛阶段已只收「与清醒体连通」的岛（含被牵连的睡眠体），
