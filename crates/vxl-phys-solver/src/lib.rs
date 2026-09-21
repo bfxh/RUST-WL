@@ -381,6 +381,30 @@ struct ContactConstraint {
     npts: u8,
 }
 
+/// **岛级并行的内部拆分**（诊断；T4「碎片雨扩展比」为何饱和就看这几个数）。
+///
+/// 求解相位 = 建岛/分组 gather → `thread::scope`（**唯一并行段**）→ 散射回写 → warm 回写。
+/// `gather_us + scatter_us` 是**串行**的，它们占求解相位的比例就是扩展比的**上限**
+/// （Amdahl：并行段再完美也拉不动这两块）。
+/// `group_us` 是**每组**的解算墙钟：组间最大值决定 scope 的墙钟 ⇒ 它的离散度就是**负载不均**。
+/// `group_manifs` 是每组的流形数（工作量代理；与 `group_us` 一起看才能判"均不均"）。
+#[derive(Clone, Default, Debug)]
+pub struct IslandDiag {
+    /// 本次参与的岛数与流形数、并行组数（`g_count == 1` ⇒ 走单组串行）。
+    pub islands: u32,
+    pub manifolds: u32,
+    pub g_count: u32,
+    /// 建岛 + gather（串行）。
+    pub gather_us: u64,
+    /// `thread::scope` 墙钟 = 最慢组 + spawn/join（并行段）。
+    pub scope_us: u64,
+    /// 散射回写 + warm 回写/剪枝（串行）。
+    pub scatter_us: u64,
+    /// 每组的解算墙钟（µs）与流形数（工作量代理）。
+    pub group_us: Vec<u64>,
+    pub group_manifs: Vec<u32>,
+}
+
 /// 顺序冲量求解器。
 #[derive(Default)]
 pub struct ImpulseSolver {
@@ -427,6 +451,9 @@ pub struct ImpulseSolver {
     /// 每扫掠仍要付一次迭代。本段五次微优化证伪（全是"减指令数"）之后，
     /// 这是唯一还开着的**减工作量**入口。
     pub last_points: (u64, u64),
+    /// 诊断：岛级并行的**内部拆分**（T4 扩展比的上限就写在串行占比里）。
+    /// 每次 `solve_phase` 覆盖；内部 `Vec` 跨帧复用容量。
+    pub island_diag: IslandDiag,
     /// 并查集缓冲（跨帧复用）。
     parent: Vec<u32>,
     /// 岛池（跨帧复用：Vec 容量保留，全清醒场景不逐帧分配）。
@@ -592,6 +619,7 @@ impl ImpulseSolver {
             last_phase_us: (0, 0, 0, 0),
             last_detail_us: [0; 4],
             last_points: (0, 0),
+            island_diag: IslandDiag::default(),
             parent: Vec::new(),
             island_pool: Vec::new(),
         }
@@ -769,6 +797,8 @@ impl ImpulseSolver {
         local_of.clear();
         local_of.resize(n, u32::MAX);
         let mut groups: Vec<(usize, usize)> = Vec::with_capacity(g_count);
+        let mut group_manifs_diag: Vec<u32> = Vec::with_capacity(g_count);
+        let mut group_us_diag: Vec<u64> = vec![0; g_count];
         // gather：组 g 的岛体速度拷入组内 scratch（顺序 = 岛序 = scatter 序）。
         // 分组切分用比例式（g·n/g_count）：`岛数 < 组数` 时尾部组为空区间
         // ——旧式 `g*ceil(n/g)` 会产出 start > n 的越界区间（9 岛 8 组实测 panic）。
@@ -782,6 +812,12 @@ impl ImpulseSolver {
             let s0 = g * awake.len() / g_count;
             let e0 = (g + 1) * awake.len() / g_count;
             groups.push((s0, e0));
+            // 诊断（T4）：每组流形数 = 工作量代理（与 group_us 一起判负载不均）。
+            let mut mf_here = 0u32;
+            for &ii in &awake[s0..e0] {
+                mf_here += islands[ii].manifs.len() as u32;
+            }
+            group_manifs_diag.push(mf_here);
             for &ii in &awake[s0..e0] {
                 for &bi in &islands[ii].bodies {
                     let i = bi as usize;
@@ -811,6 +847,8 @@ impl ImpulseSolver {
 
         let d_island = vxl_phys_core::probe::us(t_island);
         let t_solve = vxl_phys_core::probe::start();
+        let islands_len = islands.len() as u32;
+        let mut scope_us_diag = 0u64;
         // 4) 并行解算（§6 契约：组间写槽位不相交，组内 = 串行语义）。
         if g_count > 1 {
             let bodies_ref: &BodySet = bodies;
@@ -824,19 +862,23 @@ impl ImpulseSolver {
             let sp_ref: &SolverParams = &sp;
             // 诊断细分：每组一份累加器（闭包按 move 捕获，不能共享一个可变借用）。
             let mut details: Vec<[u64; 5]> = vec![[0; 5]; g_count];
+            let t_scope = vxl_phys_core::probe::start();
             std::thread::scope(|s| {
                 // iter_mut 逐容器取出元素可变借用（按 g 索引整体借用会跨迭代重叠）。
-                for (g, (((lv, av), (cbuf, wout)), det)) in group_lv
+                for (g, ((((lv, av), (cbuf, wout)), det), t_slot)) in group_lv
                     .iter_mut()
                     .zip(group_av.iter_mut())
                     .zip(build_bufs.iter_mut().zip(warm_outs.iter_mut()))
                     .zip(details.iter_mut())
+                    .zip(group_us_diag.iter_mut())
                     .enumerate()
                 {
                     let (s0, e0) = groups[g];
                     let iw_g: &[Mat3] = &iw_ref[g];
                     let im_g: &[f32] = &im_ref[g];
                     let job = move || {
+                        // 诊断（T4）：本组墙钟（组间最大值 = scope 墙钟 ⇒ 离散度 = 负载不均）。
+                        let t0 = vxl_phys_core::probe::start();
                         solve_island_group(
                             &awake_ref[s0..e0],
                             islands_ref,
@@ -859,6 +901,7 @@ impl ImpulseSolver {
                             sp_ref,
                             det,
                         );
+                        *t_slot = vxl_phys_core::probe::us(t0);
                     };
                     if g + 1 == g_count {
                         let mut job = job;
@@ -868,6 +911,7 @@ impl ImpulseSolver {
                     }
                 }
             });
+            scope_us_diag = vxl_phys_core::probe::us(t_scope);
             let mut tot = [0u64; 5];
             for d in &details {
                 for (k, v) in d.iter().enumerate() {
@@ -880,6 +924,7 @@ impl ImpulseSolver {
             self.last_points = (tot[3], tot[4]);
         } else if !awake.is_empty() {
             let mut det = [0u64; 5];
+            let t_ser = vxl_phys_core::probe::start();
             solve_island_group(
                 &awake,
                 islands,
@@ -906,6 +951,7 @@ impl ImpulseSolver {
                 self.last_detail_us[k + 1] += v;
             }
             self.last_points = (det[3], det[4]);
+            group_us_diag[0] = vxl_phys_core::probe::us(t_ser);
         }
 
         // scatter：组序 = gather 序 → 局部索引一一对应（确定性）。
@@ -982,6 +1028,17 @@ impl ImpulseSolver {
         self.group_im = group_im;
 
         let d_solve = vxl_phys_core::probe::us(t_solve);
+        // 诊断收尾（T4）：并行段墙钟 / 每组耗时 / 每组流形数 → `island_diag`。
+        // 串行占比 = 求解相位 − scope；它就是扩展比的上限（判据写在 `IslandDiag` 文档里）。
+        self.island_diag.islands = islands_len;
+        self.island_diag.manifolds = manifolds.len() as u32;
+        self.island_diag.g_count = g_count as u32;
+        self.island_diag.gather_us = d_island;
+        self.island_diag.scope_us = scope_us_diag;
+        // `d_solve` 只覆盖 scope 之后的部分（t_solve 在 gather 之后才起）⇒ 别重复减 gather。
+        self.island_diag.scatter_us = d_solve.saturating_sub(scope_us_diag);
+        self.island_diag.group_us = std::mem::take(&mut group_us_diag);
+        self.island_diag.group_manifs = std::mem::take(&mut group_manifs_diag);
         let t_sleep = vxl_phys_core::probe::start();
         // 5) 岛级休眠与唤醒（§4.11 / §3 稳定性）。
         //    - 建岛阶段已只收「与清醒体连通」的岛（含被牵连的睡眠体），

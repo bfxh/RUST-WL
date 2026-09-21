@@ -107,6 +107,32 @@ fn main() {
     println!("threads=1 : 总 {t1:8.1}ms | 解算 {s1:8.1}ms | 末态清醒 {a1:5} | hash {h1:#x}");
     println!("threads={hi} : 总 {th:8.1}ms | 解算 {sh:8.1}ms | 末态清醒 {ah:5} | hash {hh:#x}");
     println!("扩展比：解算 **{sp_solve:.2}×** | 总 tick {sp_total:.2}×");
+    // **岛级并行的内部拆分**（T4 饱和真因）：只有当串行占比（gather+scatter）解释不了
+    // 饱和时，才轮到"负载不均/调度"这些次级解释。判读：串行占比 ≈ (1 − 1/扩展比) 的上限。
+    {
+        let mut w = build(clusters, hi);
+        for _ in 0..(10 + ticks) {
+            w.step();
+        }
+        let d = w.solver.island_diag.clone();
+        let gmax = d.group_us.iter().copied().max().unwrap_or(0);
+        let gmin = d.group_us.iter().copied().min().unwrap_or(0);
+        let gmean = if d.group_us.is_empty() {
+            0.0
+        } else {
+            d.group_us.iter().sum::<u64>() as f64 / d.group_us.len() as f64
+        };
+        let mmin = d.group_manifs.iter().copied().min().unwrap_or(0);
+        let mmax = d.group_manifs.iter().copied().max().unwrap_or(0);
+        println!(
+            "岛并行拆分（最后 tick）：岛 {} 流形 {} 组数 {}｜gather {} µs（串行）｜scope {} µs（并行）｜scatter {} µs（串行）",
+            d.islands, d.manifolds, d.g_count, d.gather_us, d.scope_us, d.scatter_us
+        );
+        println!(
+            "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
+            if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
+        );
+    }
     let (bp, np, sv, ig, misc, tt) = run_phases(clusters, ticks, hi);
     println!(
         "相位占比（threads={hi}，{ticks} tick）：宽相 {:.1}% | 窄相 {:.1}% | 求解 {:.1}% | 积分 {:.1}% | 其它 {:.1}% | 合计 {:.1} ms（求解 {:.1} ms = {:.4} ms/tick）",
