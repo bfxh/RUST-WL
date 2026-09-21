@@ -449,7 +449,11 @@ fn main() {
         );
     }
     // 末态参照体位姿对照（发散是预期：双求解器数值路径不同；看量级）。
+    // **分布口径**（2026-09-21）：`max` 是最大范数、由**单个体**决定（离群脆弱——`|v|max`
+    // 已吃过同类教训：子步加到 32 时它反飙而超阈体数继续降）⇒ 同报 `p95/mean`，
+    // 用于判别"整体系统性偏移"还是"一个离群体"。
     let mut max_d = 0.0f32;
+    let mut ds: Vec<f32> = Vec::new();
     println!("== 末态参照体位姿（vxl vs rapier）：");
     for &k in &refs {
         let i = vids[k];
@@ -457,6 +461,7 @@ fn main() {
         let rp = rw.bodies.get(rhs[k]).expect("body").translation();
         let d = (vp - Vec3::new(rp.x, rp.y, rp.z)).length();
         max_d = max_d.max(d);
+        ds.push(d);
         println!(
             "  体{k:5} vxl({:6.3},{:6.3},{:6.3}) rapier({:6.3},{:6.3},{:6.3}) |Δ| {d:.4}",
             vp.x, vp.y, vp.z, rp.x, rp.y, rp.z
@@ -490,7 +495,21 @@ fn main() {
             vids.len()
         );
     }
-    println!("== 末态 max |Δpos|（参照体）= {max_d:.4} m");
+    ds.sort_by(f32::total_cmp);
+    let mean_d = if ds.is_empty() {
+        0.0
+    } else {
+        ds.iter().sum::<f32>() / ds.len() as f32
+    };
+    let p95_d = if ds.is_empty() {
+        0.0
+    } else {
+        ds[((ds.len() as f32 * 0.95) as usize).min(ds.len() - 1)]
+    };
+    println!(
+        "== 末态 |Δpos|（参照体，n={}）：max {max_d:.4} | p95 {p95_d:.4} | mean {mean_d:.4} m",
+        ds.len()
+    );
     // 嗡振画像：超阈分解（线性/角速分别）+ 最活跃体明细（含层高）。
     // 计数复用 `over_threshold`（与 50 tick 随行打印**同源** ⇒ 两处不会漂开）。
     let (only_lin, only_ang, both, ntot) = over_threshold(&vw, &vids);
