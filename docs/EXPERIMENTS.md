@@ -1767,3 +1767,46 @@ R.1 的"EPA 不适定"结论**继续成立**（42 m 假深度 + 45° 假法线�
 ② 接触级"settled ⇒ hold"（法向残速在准静态下钳零，与切向的 `DRIFT_STICK_RATIO` 同族）；
 ③ `SESSION-2026-09-18-SLEEP.md` §4 末尾留的未试单行变体（无偏置趟改 Rapier `cfm_factor = 1.0`）。
 
+### 第三轮实测（同日，**滞回**）：找到缺的那个机制 —— 但**未落地**（留给下一个会话）
+
+上节的三条候选里，候选① **唤醒判据的时间滞回**用 20 行临时改动量过了（`vxl-phys-solver`
+的 `SUBISLAND_SLEEP` 分支：唤醒条件需**连续 `K` 个子步**都"hot"才置 `awake`，中间断一次即清零）。
+
+| 配置（场景同上，600 tick） | 末态 awake | 缺口体 | **wake 率（<1 过）** | 快速体 | \|v\|max | 尾窗 p50 |
+|---|---|---|---|---|---|---|
+| K=0（现行）+ shock2 + stab2 | 9979 | 8314 | **1.40 ❌** | 0 | 0.200 | 609 ms |
+| **K=8（=2 tick）单独** | 9541 | 8594 | **0.20 ✅（5× 余量）** | **1** | **0.267** | 303 ms |
+| **K=8 + shock2 + stab2** | —（见趋势） | **5987** | **0.20 ✅** | 0 | 0.212 | 498 ms |
+
+**关键不是静态读数，是趋势**：`K=8 + shock2 + stab2` 的 awake 在窗口内**单调加速下降**
+（tick 100→500：9798 → 9501 → 9121 → 8609 → 8060；每 100 tick 降 **−300 → −550**），
+而**同配置 K=0 是卡住不降的**（9979 / 直方图 4650 集中在 0.04–0.08）⇒
+**滞回正是缺的那个机制**：它止住了近阈 churn，堆才真的开始静下来。
+
+**⇒ 小时级外推：window ≈1400–1600 tick 应达 awake→0**（判据本身允许"指定 tick 前入睡"）。
+而且它**同时**松开了另外两条判据的余量（wake 率 5×、弹射归零）⇒ 与 shock/stab 不再互斥。
+
+**为什么本轮不落地**（写给下一个会话）：它会**广泛改变睡眠行为**（塔/默认档/金样/规模档的冻结值
+都要按 ADR-0004 换代），而一次完整落地 = 调 K + 负面检查（唤醒迟滞对"该醒"场景的影响）
++ 四哈希/金样/规模档换代 + 长窗口确认，属"独立立项"而不是顺手拧。**代码改动在这里**：
+
+```rust
+// crates/vxl-phys-solver/src/lib.rs，SUBISLAND_SLEEP 的唤醒分支：
+// 常量 const WAKE_STREAK_K: u32 = 8;                 // 0 = 关闭 = 现行行为（须走直通分支）
+// 函数内 let mut wake_streak: Vec<u32> = vec![0; bodies.len()];
+let hot = rel > SUBISLAND_WAKE_MULT * config.sleep_linear
+    || bodies.angvel(w).length() > SUBISLAND_WAKE_MULT * config.sleep_angular;
+if hot {
+    wake_streak[s] = wake_streak[s].saturating_add(1);
+    if wake_streak[s] >= WAKE_STREAK_K { bodies.awake[s] = true; bodies.sleep_timer[s] = 0.0; wake_streak[s] = 0; }
+} else {
+    wake_streak[s] = 0;
+}
+```
+
+**落地清单（建议顺序）**：① `K` 选型（2 tick vs 4 tick）用 `m1_pile -- 16 4 8 600 2 2` 对拍；
+② **长窗口确认** `... 16 4 8 2000 2 2`（≈470 ms/tick × 2000 ≈ 16 min）看 awake 是否归零；
+③ 负面检查：`m0_gates`/`default_tier_stability`/金样三场景/`m1_islands` 的入睡与唤醒列；
+④ 冻结值换代（`gate_scale` 末态 awake、默认档 4 值、金样三基线）+ ADR-0004 记旧/新/理由；
+⑤ 若默认开：确认 wake 率判据在**所有**场景都改善（滞回只可能降翻率，但要实测）。
+
