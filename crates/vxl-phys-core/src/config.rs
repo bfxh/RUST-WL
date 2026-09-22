@@ -146,6 +146,24 @@ pub struct PhysConfig {
     pub sleep_linear: f32,
     pub sleep_angular: f32,
     pub sleep_time: f32,
+    /// **唤醒判据的接触数门**（0 = 关闭 = 现行"任一清醒邻居相对运动超阈即唤醒"）。
+    ///
+    /// `K > 0` 时：一个**睡着**的体被**清醒**邻居"hot"碰到时（相对速度 >
+    /// `2×sleep_linear` 或角速 > `2×sleep_angular`）不再立即醒，需**同一次
+    /// `solve_phase` 调用内累计 ≥K 条 hot 接触观测**才醒；中间断一次即清零。
+    /// 语义直觉：被 1–2 个抖动的清醒邻居碰**不该**叫醒一个已静的体，被 ≥K 个**同时**
+    /// 在动的邻居围住才该醒（万级堆的近阈 churn 正是前者）。
+    ///
+    /// ⚠️ **寿命决定语义**：计数器在 `vxl-phys-solver` 里是**持久缓冲、每次
+    /// `solve_phase` 调用清零** ⇒ 语义 = "同一次调用内累计"（即"接触数门"）。
+    /// 若改成跨调用不清零，就变成"**时间滞回**"（另一种机制，需重新标定；
+    /// 见 `docs/EXPERIMENTS.md` 的"语义更正"）。
+    /// **强撞直通**：相对速度 ≥ 8×`sleep_linear` 时**无条件立即唤醒**（不经门）——
+    /// 否则孤立睡体被撞只有 1 条 hot 接触 ⇒ 永不醒、变成"隐形墙"（见 solver 侧
+    /// `WAKE_GATE_FAST_MULT` 的注释）。
+    /// 实测（`m1_pile`，2026-09-22）：`K=8` + `shock 2` + `stab 2` 下 wake 率
+    /// **0.90 → 0.20**、awake 单调加速下降、弹射归零；`K=0` 与旧行为**逐位一致**。
+    pub wake_gate_k: u32,
     /// §4.14 确定性模式：true = 禁一切重排/LOD 降档（sim 路径按索引有序归约，
     /// 本仓全程如此）；false = 允许性能模式重排（并行/LOD 落地后生效）。
     /// 注：并行各相按「离散槽位 + 有序归并」契约执行，与串行 bit 级一致，
@@ -189,6 +207,7 @@ impl Default for PhysConfig {
             sleep_linear: 0.04,
             sleep_angular: 0.05,
             sleep_time: 0.5,
+            wake_gate_k: 0,
             strict_determinism: true,
             threads: 1,
             gravity: Vec3::new(0.0, -9.81, 0.0),

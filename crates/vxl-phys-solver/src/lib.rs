@@ -94,6 +94,14 @@ const SUBISLAND_SLEEP: bool = true;
 /// 唤醒**滞回**倍数：闪烁体的接触面速度（`ω×r ≈ 0.0125–0.05 m/s`）正卡在睡眠阈值上，
 /// 若唤醒阈值与睡眠阈值相同，边界体每子步都会被叫醒 ⇒ 子块睡眠失效。取 2×。
 const SUBISLAND_WAKE_MULT: f32 = 2.0;
+/// **强撞直通**（配合 `PhysConfig::wake_gate_k`）：相对速度 ≥ 本系数 ×`sleep_linear`
+/// 时**无条件立即唤醒**，不经接触数门。
+///
+/// 为什么必须有（2026-09-22 分析 + 探针）：门是**硬条件**（同一次 `solve_phase` 内 ≥K 条
+/// hot 观测），而**孤立睡体被撞**只有 1 条 hot 接触 ⇒ K>0 时它**永不醒**、变成"隐形墙"
+/// （撞它的体像撞静态体一样弹开，而睡体自己不响应）。这条把"真撞击"与"轻碰抖动"分开：
+/// 轻碰（<本阈值）累积到 K 才醒，强撞立即醒。
+const WAKE_GATE_FAST_MULT: f32 = 8.0;
 
 /// **逐岛解算三段计时**（`IslandDiag.build/warm/iter` 的每岛探针）：每岛要读 **6 次时钟**
 /// （`Instant::now()` ≈ 20–25 ns/次，`us()` 内部再读一次）。
@@ -467,6 +475,9 @@ pub struct ImpulseSolver {
     pub match_dist: f32,
     /// 诊断：本帧计时器被清零的体数。
     pub sleep_resets: u32,
+    /// **唤醒接触数门**的逐体计数（`PhysConfig::wake_gate_k`）：**每次 `solve_phase`
+    /// 调用开头清零**（寿命 = 语义：同一次调用内累计，见该字段文档）；`k == 0` 时不参与。
+    wake_streak: Vec<u32>,
     /// 并行分组复用缓冲（§6）：组 → 约束构建 / warm 更新 / 速度 scratch。
     build_bufs: Vec<Vec<ContactConstraint>>,
     warm_outs: Vec<Vec<WarmOutEntry>>,
@@ -643,6 +654,7 @@ impl ImpulseSolver {
             island_count: 0,
             match_dist: (skin * 4.0).max(0.02),
             sleep_resets: 0,
+            wake_streak: Vec::new(),
             build_bufs: Vec::new(),
             warm_outs: Vec::new(),
             group_lv: Vec::new(),
@@ -1108,6 +1120,15 @@ impl ImpulseSolver {
         //    无偏置趟不做休眠判定（同一子步内带偏置趟已判过；重复判定会让
         //    sleep_timer 每次子步双倍累积 ⇒ 入睡提前，属非本意行为改变）。
         let sleep_islands: &[Island] = if cleanup { &[] } else { islands };
+        // 唤醒接触数门：**每次本函数调用清零**（寿命 = 语义，见 `wake_streak` 字段注）。
+        // `k == 0` 时整段不参与 ⇒ 与现行行为**逐位一致**（不含任何算术语义改动）。
+        let wake_gate_k = config.wake_gate_k;
+        if wake_gate_k > 0 && !sleep_islands.is_empty() {
+            if self.wake_streak.len() < bodies.len() {
+                self.wake_streak.resize(bodies.len(), 0);
+            }
+            self.wake_streak[..bodies.len()].fill(0);
+        }
         for island in sleep_islands {
             if SUBISLAND_SLEEP {
                 // —— 实验：子块睡眠（见 `SUBISLAND_SLEEP` 注）——
@@ -1122,11 +1143,26 @@ impl ImpulseSolver {
                     }
                     let (s, w) = if sa { (b, a) } else { (a, b) };
                     let rel = (bodies.linvel[w] - bodies.linvel[s]).length();
-                    if rel > SUBISLAND_WAKE_MULT * config.sleep_linear
-                        || bodies.angvel(w).length() > SUBISLAND_WAKE_MULT * config.sleep_angular
-                    {
-                        bodies.awake[s] = true;
-                        bodies.sleep_timer[s] = 0.0;
+                    let hot = rel > SUBISLAND_WAKE_MULT * config.sleep_linear
+                        || bodies.angvel(w).length() > SUBISLAND_WAKE_MULT * config.sleep_angular;
+                    let fast = rel > WAKE_GATE_FAST_MULT * config.sleep_linear;
+                    if wake_gate_k == 0 || fast {
+                        // 现行（或强撞直通）：任一 hot 邻居立即唤醒
+                        if hot {
+                            bodies.awake[s] = true;
+                            bodies.sleep_timer[s] = 0.0;
+                        }
+                    } else if hot {
+                        // 接触数门：同一次调用内累计 ≥K 条 hot 观测才唤醒；断一次清零。
+                        let n = &mut self.wake_streak[s];
+                        *n = n.saturating_add(1);
+                        if *n >= wake_gate_k {
+                            bodies.awake[s] = true;
+                            bodies.sleep_timer[s] = 0.0;
+                            *n = 0;
+                        }
+                    } else {
+                        self.wake_streak[s] = 0;
                     }
                 }
                 // ② 逐体计时 + 逐体入睡（不要求整岛齐）

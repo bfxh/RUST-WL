@@ -561,6 +561,13 @@ cargo run --release -p vxl-phys --example m1_collision_row
 #   无快体的那一档是 substeps 8（|v|max 0.163）。两档各自逐位可复现，别混写。
 # ⚠️ `shock`/`stab` 压低缺口体但会**抬高 wake 率越过 SPEC §3 的 <1** ⇒ 别为了入睡打开它们。
 #   矩阵与三条结论见 EXPERIMENTS.md「万级入睡复查」。
+# ⭐ **万级实测最好的配方（第四轮落地）**：`... 16 4 8 600 2 2 8`
+#   = iters 16 / substeps 4 / threads 8 / 600 tick / shock 2 / stab 2 / **wakeK 8**（唤醒接触数门）。
+#   读数：wake 率 **1.40 → 0.20**、缺口 **8314 → 5987**、快速体 0；2000 tick 长窗口 awake 2570（74% 睡掉）。
+#   `wakeK` 默认 0 = 现行行为逐位一致；门的**强撞直通**（≥0.32 m/s 立即唤醒）由
+#   `tests/sleep_wake_contract.rs` 守（睡着 ≠ 隐形墙）。详见 EXPERIMENTS.md「第四轮」。
+cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 2 2 8
+# 对照（原配方，无门无机制）：`... 16 4 8 600 0 0`
 cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 0 0
 ```
 
