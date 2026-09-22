@@ -1936,3 +1936,20 @@ debug_assert!(box_axes.is_some() || (na == 6 && nb == 6));
 **修法**：放宽/删除该断言（`None` 分支是正当路径），或把 T3 快路径的面轴计数契约写清楚。
 由 T3 快路径提交 `9883dbc` 引入；**不是 2b 引起的**（2b 不碰窄相；且无流体场景四哈希逐位不变）。
 
+---
+
+## P9 — `feat/solver-limits` 的 CI 预存红（**新**，2026-09-22 核）
+
+**两条静态门在 `ee12545` 之前就红**（`f14a9e6` / run `35669561181`、`35669181045` 同样红）——
+**与 2b 无关**：2b 的提交在 GCC/MSVC/Clang × x86_64、跨编译器确定性（含 aarch64/QEMU）、miri、
+loom、TSan、ASan、跨平台哈希比对上**全绿**（`gh run view 35672803307`）。
+
+| 门 | 现象 | 修法 |
+|---|---|---|
+| `静态 (依赖)` | `cargo deny` → `error[wildcard]`：`crates/vxl-phys-splat/Cargo.toml:8` 的 `vxl-phys-core = { path = "../vxl-phys-core" }` 缺版本 ⇒ 判为 wildcard（crates.io 不允许 path 依赖） | 改成 `{ workspace = true }`（其余 crate 同款；本机 `deps_lock.py` 抓不到，只有 CI 的 cargo-deny 抓） |
+| `静态 (文本/工作流/纪律)` | `zizmor --persona=regular .` 退出 13：`ref-version-mismatch`（钉的 SHA 与版本注释不符）。例：`ci.yml:383` 的 `taiki-e/install-action@3f74d7c… # v2` 而 tag `v2.87.12` 指向 `94c31af…`；`release.yml:99` 的 `actions/download-artifact@fa0a91b… # v4` vs tag `v4.1.8` | 把注释改成该 SHA 实际对应的 tag 版本（**只动注释、不动钉**），或把这两个 action 与 `dtolnay/rust-toolchain` 一起列入具名例外 |
+
+⚠️ **“合并前 CI 全绿”（`M1-EXIT.md` §2.3 的条件）当前不成立** ⇒ 先清这两条。
+⚠️ **本机 `gate_all.sh` 全绿 ≠ CI 全绿**：它跑的是仓内自研门（`deps_lock.py` + 本地 typos 二进制），
+**与 CI 的 cargo-deny/zizmor 不是同一把尺**——这条差异本身值得记住（2026-09-22 踩到）。
+
