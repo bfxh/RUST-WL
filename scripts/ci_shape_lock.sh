@@ -64,6 +64,19 @@ if [ -n "$floaters" ]; then
   FAIL=1
 fi
 
+# ⑤b install-action 装的工具必须**钉版本**（`tool: 名@版本`）。默认 @latest ⇒ 工具自己发新版
+#     就能把分支判红而代码没动过（2026-09-21 实测：日志里写着 `installing cargo-machete@latest`）。
+#     版本号取当次 CI 日志里的实际安装版本；升级是**一次有意动作**，不是被动接受。
+#     匹配前先剥掉行尾注释——首版没剥，连 `tool: x@1.30.1  # 说明` 都被判成"没钉"（假红）。
+VERPAT="@[0-9]+(\.[0-9]+)*"
+unpinned="$(grep -nE '^\s+tool: ' "$CI" | sed 's/#.*$//' \
+  | grep -vE "tool: [a-z0-9_-]+$VERPAT(,[a-z0-9_-]+$VERPAT)*[[:space:]]*$" || true)"
+if [ -n "$unpinned" ]; then
+  echo "❌ install-action 的工具有没钉版本的（改 tool: 名为 名@x.y.z）："
+  printf '%s\n' "$unpinned"
+  FAIL=1
+fi
+
 # ⑥ **本地门链不许退化**：一条命令链里的承重件——三步静态门（discipline / deps_lock /
 #    ci_shape）+ 计时门的**机器级独占锁**（2026-09-21 实测：另一个仓的 cargo build 会让
 #    计时门假红 ⇒ 那把锁是承重的，谁删谁红）+ 提交通道的两份钩子。
