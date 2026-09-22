@@ -49,7 +49,12 @@ impl BoundaryLattice {
     }
 }
 
-/// 按流体晶格间距 `s` 生成两层边界粒子（体积 = `s³`）。
+/// 按流体晶格间距 `s`、核半径 `h` 生成两层边界粒子。
+/// **体积按 Akinci 自洽标定** `V_b = 1 / Σ_b W(r_bb)`（对边界粒子**自己**的邻域求和，
+/// 含自身项、同一 poly6 核；见 `self_sum_volume`）——即"边界介质自己在静止密度下压力中性"
+/// （p_b = Tait(ρ0) = 0），边界对流体只贡献核质量。
+/// ⚠️ 本仓 2026-09-22 之前取**无限介质理想化**的 `s³`：两层是**截断**的薄壳，其
+/// `Σ_b W` 比无限介质小 ⇒ `1/Σ_bW > s³`（实测平面两层 ≈1.4×）⇒ 旧口径**低估**了近壁补偿。
 /// 形状不受支持 ⇒ 空（facade 回退粗档，不静默造粒）。
 ///
 /// **层深按最薄半厚钳制**（`d_k = min((k+0.5)·s, (0.45+0.45k)·half_min)`）：
@@ -58,7 +63,7 @@ impl BoundaryLattice {
 /// 0.12 m 盒：假侧向力 51 N、浮力 5.9×ρVg，2026-09-22）。钳制是**几何约束**
 /// （粒子必须留在体内、不许互穿），不是新物理式；厚体（half_min ≥ 1.5s）钳制不生效，
 /// 层位仍是 0.5s/1.5s。
-pub fn lattice(shape: &Shape, s: f32) -> BoundaryLattice {
+pub fn lattice(shape: &Shape, s: f32, h: f32) -> BoundaryLattice {
     let s = s.max(1e-6);
     let mut surf = SurfaceLattice::default();
     surface(shape, s, &mut surf);
@@ -73,11 +78,49 @@ pub fn lattice(shape: &Shape, s: f32) -> BoundaryLattice {
             pts.push(*p - *n * d);
         }
     }
-    BoundaryLattice {
-        pts,
-        n0,
-        volume: s * s * s,
+    let volume = volume_from_self_sum(&pts, h.max(s));
+    BoundaryLattice { pts, n0, volume }
+}
+
+/// **Akinci 自洽体积标定**：`V_b = 1 / Σ_b W`——对每个边界粒子，用它**自己那套**
+/// 边界粒子（同体同批）在半径 `h` 内的 poly6 求和（含自身项 `W(0)`，与密度轮口径一致），
+/// 取平均后求倒数。含义：`ρ_b = ρ0·V_b·Σ_b W = ρ0` ⇒ 边界介质"自己"处在静止密度
+/// （压力中性），它对流体的贡献就是干净的一份核质量。
+/// 确定性：按索引序求和（同体同批、位置固定 ⇒ 每次构建同值）。
+fn volume_from_self_sum(pts: &[Vec3], h: f32) -> f32 {
+    let sum = boundary_self_sum(pts, h);
+    if sum > 1e-12 {
+        1.0 / sum
+    } else {
+        1.0
     }
+}
+
+/// 边界粒子**自己那套**的核和 `Σ_b W`（含自身项、半径 `h`；索引序求和 ⇒ 确定性）。
+/// `volume_from_self_sum` 取它的倒数当 `V_b`。测试用它验"标定自洽"。
+fn boundary_self_sum(pts: &[Vec3], h: f32) -> f32 {
+    if pts.is_empty() {
+        return 0.0;
+    }
+    let h2 = h * h;
+    let k6 = 315.0 / (64.0 * std::f32::consts::PI * h.powi(9));
+    let w0 = k6 * h2 * h2 * h2;
+    let mut acc = 0.0f32;
+    for (i, pi) in pts.iter().enumerate() {
+        let mut sum = w0; // 自身项
+        for (j, pj) in pts.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let r2 = (*pi - *pj).length_squared();
+            if r2 <= h2 {
+                let t = h2 - r2;
+                sum += k6 * t * t * t;
+            }
+        }
+        acc += sum;
+    }
+    acc / pts.len() as f32
 }
 
 /// 该形状是否支持边界粒子生成。**facade 的粗档回退判据**：不支持 ⇒ 该体不产生
@@ -305,11 +348,23 @@ mod tests {
     fn box_lattice_two_layers_inside() {
         let half = 0.06f32;
         let s = 0.05f32;
-        let l = lattice(&boxed(half), s);
+        let l = lattice(&boxed(half), s, 2.0 * s);
         // 面内格数 = round(0.12/0.05) = 2 ⇒ 6 面 × 2×2 = 24 表面点。
         assert_eq!(l.n0, 24, "表面点数应 = 6×2×2");
         assert_eq!(l.len(), 48, "两层应翻倍");
-        assert!((l.volume - s * s * s).abs() < 1e-9, "体积 = s³");
+        // 标定的**性质**（而不是某个魔数）：`V_b·Σ_bW = 1` ⇔ `ρ0·V_b·Σ_bW = ρ0`
+        // ——边界介质自己在静止密度下压力中性。
+        // ⚠️ 注意 `V_b` 与 `s³` 的关系**随体形变化**（实测，2026-09-22）：本用例这个
+        // 0.12 盒的面采样只有 2×2 点、两层又被薄体钳制贴得很近 ⇒ 层间核重叠大 ⇒ Σ_bW 大
+        // ⇒ `V_b ≈ 0.41·s³`；而大体（面采样密、两层相距 1.0s）≈ `0.95·s³`。
+        // 旧口径固定 `s³` 恰好对**稀疏小体**过量注入 2.4× 质量 ⇒ 近壁 ρ_i 虚增 ⇒ p_i 失真
+        // （实测：h=0.1/半长 0.12 从 −6.13×ρVg 反号回到 1.00×）。
+        let sum = boundary_self_sum(&l.pts, 2.0 * s);
+        assert!(
+            (l.volume * sum - 1.0).abs() < 1e-4,
+            "标定应自洽：V_b·Σ_bW = {} （应 = 1）",
+            l.volume * sum
+        );
         for p in &l.pts {
             assert!(
                 p.x.abs() <= half && p.y.abs() <= half && p.z.abs() <= half,
@@ -327,7 +382,7 @@ mod tests {
     fn sphere_lattice_inside_shell() {
         let r = 0.2f32;
         let s = 0.05f32;
-        let l = lattice(&Shape::Sphere { radius: r }, s);
+        let l = lattice(&Shape::Sphere { radius: r }, s, 2.0 * s);
         assert!(!l.is_empty());
         assert_eq!(l.len() % 2, 0);
         for p in &l.pts {
@@ -356,7 +411,7 @@ mod tests {
             },
         ];
         for sh in shapes {
-            let l = lattice(&sh, s);
+            let l = lattice(&sh, s, 2.0 * s);
             assert!(!l.is_empty(), "应生成粒子：{sh:?}");
             assert_eq!(l.len() % 2, 0, "两层 ⇒ 偶数");
             let rr = sh.bounding_sphere_radius() + 1e-4;
@@ -382,7 +437,7 @@ mod tests {
                 half: Vec3::splat(0.1),
             },
         ] {
-            assert_eq!(lattice(&sh, s).len(), 0, "不支持：{sh:?}");
+            assert_eq!(lattice(&sh, s, 2.0 * s).len(), 0, "不支持：{sh:?}");
         }
     }
 
@@ -398,8 +453,8 @@ mod tests {
                 radius: 0.09,
             },
         ] {
-            let a = lattice(&sh, s);
-            let b = lattice(&sh, s);
+            let a = lattice(&sh, s, 2.0 * s);
+            let b = lattice(&sh, s, 2.0 * s);
             assert_eq!(a, b, "两次生成应逐位一致：{sh:?}");
         }
     }

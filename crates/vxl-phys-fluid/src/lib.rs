@@ -394,7 +394,7 @@ impl FluidSystem {
             let idx = match cache.iter().position(|(s, _)| *s == shape) {
                 Some(i) => i,
                 None => {
-                    let lat = boundary::lattice(&shape, self.spacing);
+                    let lat = boundary::lattice(&shape, self.spacing, self.h);
                     if lat.is_empty() {
                         continue; // 不支持 ⇒ 不造粒、不缓存（回退粗档的信号）
                     }
@@ -1340,8 +1340,10 @@ mod tests {
             rho_free < 0.85 * rho0,
             "自由面贴底密度应偏低：{rho_free:.0}"
         );
+        // 门槛按**实测**给（2026-09-22，Akinci 自洽体积标定后：+123 kg/m³，0.72→0.84ρ0）。
+        // 旧口径（固定 `V_b = s³`）是 +80：自洽标定把补偿**做强**了，且不再对稀疏小体过量注入。
         assert!(
-            rho_on > rho_free + 0.15 * rho0,
+            rho_on > rho_free + 0.10 * rho0,
             "边界粒子应显著补回核质量：{rho_on:.0} vs 自由面 {rho_free:.0}"
         );
         assert!(
