@@ -1394,14 +1394,18 @@ mod tests {
     /// 槽用既有 `Tank` 提供者（**真实场景里围水是提供者通道的活**，边界粒子只管与体的
     /// 动量交换——这条把两者分工钉死）。
     ///
-    /// ⚠️ **实测口径与已知偏差**（2026-09-22，盒半长 0.06 = **1.2h**、240 tick）：
-    /// 浮力 **1.5–1.65×ρVg**（release/debug 两档），侧向假力 **0.6×（debug）～2.1×（release）ρVg**。
-    /// 三者同源：贴壁核质量（离散补偿）经 Tait q⁷ 放大 ⇒ 近壁压强量级远高于静水，
-    /// **净浮力是两个大数之差**，离散相位（流体晶格 vs 盒面栅格）+ 平滑不足都漏进净力。
-    /// 这与**既有提供者方案的已接受偏差同族**（`PLAN-0.3.md` §4.3：底压 ≈1.65× 静水，
-    /// 镜像鬼影 q⁷ 密度尾）——不是 2b 独有，也不是量纲错。
-    /// ⇒ **本门锁的是"量级带 + 方向"**（能抓回归，不假装精确）；侧向只设**失控闸**
-    /// （≤4×ρVg），不许当"近消"宣称。体尺寸 ≲ 2h 时该偏差最重——`docs/M1-EXIT.md` §4 记账。
+    /// ⚠️ **口径 = 窗口均值**（2026-09-22 用 `tests/boundary_accuracy_probe.rs` 两轴实测后定）：
+    /// - **单帧端点值不可用**：反作用是"两个大数之差"，同一场景端点可读 −6.11×ρVg 而窗口均值
+    ///   是另一个号；另一格端点 1.00 却在窗口内以 ±4.3×ρVg 摆。端点会让门随机红/绿。
+    /// - 本档（盒半长 0.06 = 1.2h、`Tank`、7³ 水）窗口均值实测 **1.3–1.7×ρVg**；
+    ///   **侧向均值 ≈ 0.01–0.1×ρVg**（先记录在案的 0.6–2.1× 是**端点瞬态**，不是稳态偏差——
+    ///   这条是对我自己先前读数的更正）。
+    /// - 机理：贴壁核质量（离散补偿）经 Tait q⁷ 放大 ⇒ 近壁压强量级远高于静水；
+    ///   与**既有提供者方案的已接受偏差同族**（`PLAN-0.3.md` §4.3 底压 ≈1.65× 静水）。
+    /// - **误差不是"体尺寸/h"的干净函数**：探针实测半长 0.04/0.06/0.09/0.12/0.15（h=0.1）
+    ///   给出 3.30/1.38/1.63/**−6.13**/1.21 ⇒ 存在**离散相位共振**（体面栅格与流体晶格不可公约）。
+    ///   ⇒ 2b 是**定性档**（水被推动、轻物浮起、方向对），**不是定量浮力模型**；
+    ///   升级路径见 `OPEN-PROBLEMS.md` P7。断言带按此**诚实地**给。
     #[test]
     fn submerged_box_gets_buoyant_reaction() {
         let cfg = FluidConfig {
@@ -1418,39 +1422,57 @@ mod tests {
             },
             still_pose(Vec3::new(0.0, 0.12, 0.0)),
         );
-        for _ in 0..240 {
+        // **窗口均值**（2026-09-22 改；探针 `tests/boundary_accuracy_probe.rs` 实测得出）：
+        // 反作用是"两个大数之差"，**单帧端点值可整号翻转**（实测同一场景 h=0.1 端点 −6.11×ρVg、
+        // 而窗口均值 −6.13 是**系统性**的；另一格端点 1.00 而窗口内波动 ±4.3）⇒ 端点读数会让门
+        // 随机红/绿。这里按仓库既有纪律（`vxl-phys-measurement-protocol` §5 窗口均值）取
+        // **静置 180 + 窗口 60 tick 的均值**。
+        for _ in 0..180 {
             let _ = f.set_boundary_particles(std::slice::from_ref(&body));
             f.step(1.0 / 60.0, &Tank);
         }
-        let react = f
-            .boundary_reactions()
-            .iter()
-            .find(|r| r.0 == 7)
-            .map(|r| (r.1, r.2))
-            .expect("潜体应有反作用");
-        let (force, tau) = react;
+        let win = 60usize;
+        let (mut sy, mut sx, mut sz) = (0.0f32, 0.0f32, 0.0f32);
+        let (mut tsum, mut tmax) = (Vec3::ZERO, 0.0f32);
+        for _ in 0..win {
+            let _ = f.set_boundary_particles(std::slice::from_ref(&body));
+            f.step(1.0 / 60.0, &Tank);
+            if let Some(r) = f.boundary_reactions().iter().find(|r| r.0 == 7) {
+                sy += r.1.y;
+                sx += r.1.x;
+                sz += r.1.z;
+                tsum += r.2;
+                tmax = tmax.max(r.2.length());
+            }
+        }
+        let inv = 1.0 / win as f32;
+        let force = Vec3::new(sx * inv, sy * inv, sz * inv);
+        let tau = tsum * inv;
         let expect = f.config().rest_density * (2.0 * half).powi(3) * 9.81;
         println!(
-            "2b 浮力实测 {:+.2} N / ρVg = {expect:.2} N（比值 {:.2}）；侧向 ({:+.2}, {:+.2})；|τ| {:.3}",
+            "2b 浮力（窗口 {win} tick 均值）{:+.2} N / ρVg = {expect:.2} N（比值 {:.2}）；\
+             侧向 ({:+.2}, {:+.2})；|τ| 均值 {:.3} / 峰 {:.3}",
             force.y,
             force.y / expect,
             force.x,
             force.z,
-            tau.length()
+            tau.length(),
+            tmax
         );
         assert!(
             force.y > 0.5 * expect && force.y < 2.0 * expect,
-            "浮力应 ≈ ρVg = {expect:.2} N（本档实测 1.65×），实测 {:+.2}（f = {force:?}）",
+            "浮力均值应 ≈ ρVg = {expect:.2} N（本档实测 1.3–1.7×），实测 {:+.2}（f = {force:?}）",
             force.y
         );
-        // 侧向假力：本分辨率下与浮力同量级（见上注）⇒ 只设**失控闸**，不当"近消"宣称。
+        // 侧向：**窗口均值下本来就近消**（探针实测 ≈ 0.01–0.1×ρVg；先前的 0.6–2.1× 是端点瞬态）
+        // ⇒ 这条恢复成"近消"判据，只留宽带回旋余量。
         assert!(
-            force.x.abs() < 4.0 * expect && force.z.abs() < 4.0 * expect,
-            "侧向假力失控（本档实测带 ≤2.1×ρVg）：{force:?}"
+            force.x.abs() < 0.5 * expect && force.z.abs() < 0.5 * expect,
+            "对称场景侧向**均值**应近消（本档实测 ≤0.1×ρVg）：{force:?}"
         );
         assert!(
             tau.length() < 0.5 * expect * half,
-            "对称场景力矩应近消：{tau:?}"
+            "对称场景力矩均值应近消：{tau:?}"
         );
     }
 
