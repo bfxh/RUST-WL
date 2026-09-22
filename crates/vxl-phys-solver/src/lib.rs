@@ -713,6 +713,11 @@ impl ImpulseSolver {
         cleanup: bool,
     ) {
         let e_threshold = config.restitution_threshold;
+        // 准静态"安座"趟（`settled_hold_iterations`；0 = 关闭 = 不走该路径，逐位同旧）。
+        // **两趟都跑**：睡眠判定看的是**带偏置趟**之后的速度（本函数末尾逐岛判），
+        // 而无偏置趟的速度才是下一子步的初值 ⇒ 两边都要清。
+        let settled_hold = config.settled_hold_iterations;
+        let hold_max_vn = 4.0 * config.sleep_linear;
         let iters = if cleanup {
             config.stabilization_iterations.max(1)
         } else {
@@ -957,6 +962,8 @@ impl ImpulseSolver {
                             shock,
                             normal_inner,
                             sp_ref,
+                            settled_hold,
+                            hold_max_vn,
                             det,
                         );
                         *t_slot = vxl_phys_core::probe::us(t0);
@@ -1006,6 +1013,8 @@ impl ImpulseSolver {
                 shock,
                 normal_inner,
                 &sp,
+                settled_hold,
+                hold_max_vn,
                 &mut det,
             );
             for (k, v) in det.iter().enumerate().take(3) {
@@ -1756,6 +1765,8 @@ fn solve_island_group(
     shock_iterations: u32,
     normal_inner: u32,
     sp: &SolverParams,
+    settled_hold: u32,
+    hold_max_vn: f32,
     detail: &mut [u64; 5],
 ) {
     for &ii in awake {
@@ -1858,6 +1869,54 @@ fn solve_island_group(
                 let _ = solve_constraint(c, lv, av, local_of, iw, im, true, normal_inner, false);
             }
         }
+        // —— 准静态"安座"趟（`settled_hold`）——
+        // 把准静态接触（|vn| < hold_max_vn）的**法向**相对速度精确归零：逐点求有效质量
+        // （与主迭代同一套组内缓存），施加 λ = −vn·m_eff（钳 pn+λ ≥ 0：只推不拉）。
+        // 只动法向 ⇒ 不改变摩擦/滑动语义；大 vn（真撞击、真分离）一概不碰。
+        // ⚠️ 两条纪律（第一版栽过）：
+        // ① **不动 `p.pn`**：warm 缓存必须只装"求解器自己的冲量"，掺进外来量会污染
+        //    下一子步的暖启动 ⇒ 实测爆掉（6152 快体、|v|max 81、深穿透 347 tick）；
+        // ② **欠松弛**：流形 ≤4 点是**冗余**约束，逐点各自"精确归零"会叠加（×点数×2 趟
+        //    ×子步数）⇒ 过冲。取 ω = 0.25（残差 0.16 → 一遍 0.12 → 四遍 ≈0.05）。
+        const HOLD_OMEGA: f32 = 0.25;
+        for _ in 0..settled_hold {
+            for c in cbuf.iter() {
+                let (ai, bi) = (c.a as usize, c.b as usize);
+                let normal = c.normal;
+                for p in c.points.iter().take(c.npts as usize) {
+                    let ka = local_of[ai];
+                    let kb = local_of[bi];
+                    let im_a = if ka == u32::MAX { 0.0 } else { im[ka as usize] };
+                    let im_b = if kb == u32::MAX { 0.0 } else { im[kb as usize] };
+                    let mut k = im_a + im_b;
+                    if im_a > 0.0 {
+                        let w = iw[ka as usize].mul_vec3(p.ra.cross(normal));
+                        k += w.cross(p.ra).dot(normal);
+                    }
+                    if im_b > 0.0 {
+                        let w = iw[kb as usize].mul_vec3(p.rb.cross(normal));
+                        k += w.cross(p.rb).dot(normal);
+                    }
+                    if k <= 1e-12 {
+                        continue;
+                    }
+                    let m_eff = 1.0 / k;
+                    let va = group_vel(lv, av, local_of, ai, p.ra);
+                    let vb = group_vel(lv, av, local_of, bi, p.rb);
+                    let vn = (vb - va).dot(normal);
+                    if vn.abs() >= hold_max_vn {
+                        continue; // 真撞击/真分离：不碰
+                    }
+                    let dl = -vn * m_eff * HOLD_OMEGA;
+                    if dl != 0.0 {
+                        let imp = normal * dl;
+                        group_apply(lv, av, local_of, iw, im, ai, p.ra, imp, true);
+                        group_apply(lv, av, local_of, iw, im, bi, p.rb, imp, false);
+                    }
+                }
+            }
+        }
+
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
         if let Some(t) = t_it {
             detail[2] += vxl_phys_core::probe::us(t);

@@ -164,6 +164,17 @@ pub struct PhysConfig {
     /// 实测（`m1_pile`，2026-09-22）：`K=8` + `shock 2` + `stab 2` 下 wake 率
     /// **0.90 → 0.20**、awake 单调加速下降、弹射归零；`K=0` 与旧行为**逐位一致**。
     pub wake_gate_k: u32,
+    /// **准静态"安座"趟**（0 = 关闭，默认）：主迭代与 shock 之后再对**准静态接触**
+    /// （法向相对速度 `|vn| < 4×sleep_linear`）做 `settled_hold_iterations` 遍
+    /// **精确法向归零**（`λ = −vn·m_eff`，钳 `pn + λ ≥ 0` 不许拉）。
+    ///
+    /// 动机（2026-09-22 万级复测）：残余速度**面状卡在睡眠阈的 1–4 倍**，而每子步重力
+    /// 增量就是 `g·sub_dt ≈ 0.041 m/s`（substeps 4）——睡眠阈 0.04 与它同量级 ⇒
+    /// 静止体只要求解器没把重力**完全**抵消就永远达不到阈。这一趟把那份残差**精确**去掉
+    /// （只动法向、不动切向 ⇒ 不阻碍滑动/摩擦），让静止体真正安静下来。
+    /// ⚠️ 默认 0 = 与旧行为**逐位一致**（不走这条路径，无任何算术语义改动）。
+    /// 实测读数与取舍见 `docs/EXPERIMENTS.md`。
+    pub settled_hold_iterations: u32,
     /// §4.14 确定性模式：true = 禁一切重排/LOD 降档（sim 路径按索引有序归约，
     /// 本仓全程如此）；false = 允许性能模式重排（并行/LOD 落地后生效）。
     /// 注：并行各相按「离散槽位 + 有序归并」契约执行，与串行 bit 级一致，
@@ -208,6 +219,7 @@ impl Default for PhysConfig {
             sleep_angular: 0.05,
             sleep_time: 0.5,
             wake_gate_k: 0,
+            settled_hold_iterations: 0,
             strict_determinism: true,
             threads: 1,
             gravity: Vec3::new(0.0, -9.81, 0.0),

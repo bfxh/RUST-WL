@@ -14,12 +14,13 @@
 use vxl_phys::{HeightField, PhysConfig, Quat, Shape, Vec3, World};
 
 /// 静置盒（体 0）跑到入睡；返回 `(world, 睡体的体号, 撞击体的体号, 睡体初始 x)`。
-fn scene(wake_gate_k: u32, iters: u32) -> (World, usize, usize, f32) {
+fn scene(wake_gate_k: u32, iters: u32, settled_hold: u32) -> (World, usize, usize, f32) {
     let cfg = PhysConfig {
         velocity_iterations: iters,
         substeps: 4,
         threads: 1,
         wake_gate_k,
+        settled_hold_iterations: settled_hold,
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -46,7 +47,11 @@ fn scene(wake_gate_k: u32, iters: u32) -> (World, usize, usize, f32) {
 }
 
 fn run_case(wake_gate_k: u32, iters: u32) {
-    let (mut w, sleeper, hitter, x0) = scene(wake_gate_k, iters);
+    run_case_with(wake_gate_k, iters, 0);
+}
+
+fn run_case_with(wake_gate_k: u32, iters: u32, settled_hold: u32) {
+    let (mut w, sleeper, hitter, x0) = scene(wake_gate_k, iters, settled_hold);
     // ① 静置：等睡体自己睡着（最多 600 tick）。
     let mut slept_at = None;
     for t in 1..=600 {
@@ -112,6 +117,42 @@ fn sleeping_body_wakes_and_moves_on_fast_impact() {
     for k in [0u32, 8] {
         run_case(k, 16);
     }
+}
+
+/// 对照：扫掠**更低**（`wake_gate_k=8` 的安全阀是"强撞直通"，所以低扫掠下更该醒）。
+#[test]
+fn sleeping_body_wakes_with_settled_hold_enabled() {
+    // 安座趟（settled_hold）会把准静态接触的法向残速归零 ⇒ 必须确认它**没有**
+    // 妨碍"被撞要醒"这条路径（2026-09-22：万级入睡靠它达标，故两开关常同开）。
+    for hold in [2u32, 4] {
+        run_case_with(8, 16, hold);
+    }
+}
+
+/// 开两个开关后**逐位确定**（安座趟与门的计数都在固定次序下运行）。
+#[test]
+fn gate_and_settle_are_deterministic() {
+    let digest = |settled_hold: u32| {
+        let (mut w, sleeper, hitter, _x0) = scene(8, 16, settled_hold);
+        for _ in 0..200 {
+            w.step();
+        }
+        w.bodies.linvel[hitter] = Vec3::new(3.0, 0.0, 0.0);
+        w.bodies.awake[hitter] = true;
+        for _ in 0..200 {
+            w.step();
+        }
+        let mut d: Vec<u32> = Vec::new();
+        for i in 0..w.bodies.len() {
+            let p = w.bodies.position[i];
+            let v = w.bodies.linvel[i];
+            d.extend([p.x.to_bits(), p.y.to_bits(), v.x.to_bits(), v.y.to_bits()]);
+        }
+        d.push(sleeper as u32);
+        d
+    };
+    assert_eq!(digest(4), digest(4), "settled_hold=4 两跑应逐位一致");
+    assert_eq!(digest(2), digest(2), "settled_hold=2 两跑应逐位一致");
 }
 
 /// 对照：扫掠**更低**（`wake_gate_k=8` 的安全阀是"强撞直通"，所以低扫掠下更该醒）。

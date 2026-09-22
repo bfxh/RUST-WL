@@ -566,8 +566,12 @@ cargo run --release -p vxl-phys --example m1_collision_row
 #   读数：wake 率 **1.40 → 0.20**、缺口 **8314 → 5987**、快速体 0；2000 tick 长窗口 awake 2570（74% 睡掉）。
 #   `wakeK` 默认 0 = 现行行为逐位一致；门的**强撞直通**（≥0.32 m/s 立即唤醒）由
 #   `tests/sleep_wake_contract.rs` 守（睡着 ≠ 隐形墙）。详见 EXPERIMENTS.md「第四轮」。
-cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 2 2 8
-# 对照（原配方，无门无机制）：`... 16 4 8 600 0 0`
+# ⭐⭐ **判据 3 达标配方（第五轮）**：加 `hold`（准静态安座趟，第 8 参）⇒ **入睡 tick 387、
+#   末态 awake 0、深穿透 0、尾窗 p50 0.17 ms**（基线 292 ms）。参数序 = <iters> <substeps>
+#   <threads> <ticks> <shock> <stab> <wakeK> <hold>；**两个机制都默认关**（身份不变），
+#   只有验收配方开。`sub8 + hold 4` 更快（tick 120）。
+cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 2 2 8 4
+# 对照（原配方，无机制）：`... 16 4 8 600 0 0`
 cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 0 0
 ```
 

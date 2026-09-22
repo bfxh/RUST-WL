@@ -7,7 +7,7 @@
 //!   ③ 入睡后 p50 显著低于活动期（接近零）——稳态不再耗预算。
 //!
 //! 运行：
-//!   cargo run --release -p vxl-phys --example m1_pile -- [iters] [substeps] [threads] [ticks] [shock] [stab] [wakeK]
+//!   cargo run --release -p vxl-phys --example m1_pile -- [iters] [substeps] [threads] [ticks] [shock] [stab] [wakeK] [hold]
 //! 默认：iters=16, substeps=1, threads=8, ticks=600, shock=0, stab=0（与 m0_gates 压力场景同构）。
 //! `stab` = `PhysConfig::stabilization_iterations`（Rapier 式**无偏置末趟**，默认关；见
 //! `SESSION-2026-09-18-SLEEP.md` §4：对 2000 体大堆 入睡 1735→1960，但 125 体场景 KE 退化
@@ -28,6 +28,7 @@ fn build(
     shock: u32,
     stab: u32,
     wake_gate_k: u32,
+    hold: u32,
 ) -> World {
     let cfg = PhysConfig {
         velocity_iterations: iters,
@@ -36,6 +37,7 @@ fn build(
         shock_iterations: shock,
         stabilization_iterations: stab,
         wake_gate_k,
+        settled_hold_iterations: hold,
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -68,11 +70,12 @@ fn main() {
     let shock: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let stab: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let wake_gate_k: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let hold: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    let mut w = build(iters, substeps, threads, shock, stab, wake_gate_k);
+    let mut w = build(iters, substeps, threads, shock, stab, wake_gate_k, hold);
     let boxes = w.bodies.len();
     println!(
-        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock} stab {stab} wakeK {wake_gate_k} | {ticks} tick"
+        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock} stab {stab} wakeK {wake_gate_k} hold {hold} | {ticks} tick"
     );
     for _ in 0..10 {
         w.step();
