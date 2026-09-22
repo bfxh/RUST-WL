@@ -63,7 +63,7 @@ jobs:
       # 工具逐个安装（首次 CI 实测：合并写法 `tool: a,b,c` 在安装步失败——exit 76；
       # 拆成独立步骤后失败可归因到具体工具，且各自的 manifest/版本独立解析）。
       - name: 安装 typos
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: typos
       - name: 安装 actionlint（Go 工具，install-action 无此条目 ⇒ 取 release 资产 + 校验哈希）
@@ -78,7 +78,7 @@ jobs:
           sudo install -m 0755 actionlint /usr/local/bin/actionlint
           actionlint --version
       - name: 安装 zizmor
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: zizmor
       - name: 拼写（typos；豁免项见 _typos.toml）
@@ -110,7 +110,7 @@ jobs:
       - name: 依赖红线（外部依赖 / 构建依赖增量门）
         run: python3 scripts/deps_lock.py
       - name: 安装依赖审计工具
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: cargo-deny,cargo-machete
       - name: 依赖审计（公告 / 许可白名单 / 禁用 / 来源；配置见 deny.toml）
@@ -380,7 +380,7 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: 安装 cargo-llvm-cov
-        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
+        uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
         with:
           tool: cargo-llvm-cov
       - name: 覆盖率（全量测试 + 摘要）

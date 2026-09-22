@@ -5,4 +5,6 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-vxl-phys-core = { path = "../vxl-phys-core" }
+# 与其余 crate 同款：版本与 path 由根 `[workspace.dependencies]` 一笔给（那里的注释已说明
+# `version` 是给静态审计工具的）。此处若写成裸 `{ path = ... }`，cargo-deny 会判 wildcard。
+vxl-phys-core = { workspace = true }
