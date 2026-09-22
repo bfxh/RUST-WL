@@ -8,10 +8,14 @@
 //!
 //! 运行：
 //!   cargo run --release -p vxl-phys --example m1_pile -- [iters] [substeps] [threads] [ticks] [shock] [stab] [wakeK] [hold]
-//! 默认：iters=16, substeps=1, threads=8, ticks=600, shock=0, stab=0（与 m0_gates 压力场景同构）。
-//! `stab` = `PhysConfig::stabilization_iterations`（Rapier 式**无偏置末趟**，默认关；见
-//! `SESSION-2026-09-18-SLEEP.md` §4：对 2000 体大堆 入睡 1735→1960，但 125 体场景 KE 退化
-//! ⇒ 默认关、按需开）。**金样保真档配方 = substeps 8 + stab 2**。
+//! 默认：iters=16, substeps=1, threads=8, ticks=600；**后四个参数不传 = 用 `PhysConfig` 的
+//! 当前默认值**（2026-09-22 起：shock/stab/wakeK/hold 默认各见 `config.rs`；传 `0` = 显式关掉该机制）。
+//! ⚠️ 这条"不传即继承默认"是**仪器正确性**要求（见 `EXPERIMENTS.md` 第六轮）：此前本 example
+//! 无条件写这四个字段，会把配置默认悄悄覆盖成 0 ⇒ "验证默认档"实际验的是"机制全关"。
+//! `stab` = `PhysConfig::stabilization_iterations`（Rapier 式**无偏置末趟**；见
+//! `SESSION-2026-09-18-SLEEP.md` §4：对 2000 体大堆 入睡 1735→1960，但 125 体场景 KE 退化）。
+//! `wakeK` = 唤醒**接触数门**；`hold` = 准静态**安座趟**（两者见 `EXPERIMENTS.md` 第四/五轮）。
+//! **判据 3 达标配方**（`M1-EXIT.md` §2.2）：`16 4 8 600 2 2 8 4`（tick 387 全睡、p50 0.174 ms）。
 
 use std::time::Instant;
 
