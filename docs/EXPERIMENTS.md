@@ -1767,10 +1767,21 @@ R.1 的"EPA 不适定"结论**继续成立**（42 m 假深度 + 45° 假法线�
 ② 接触级"settled ⇒ hold"（法向残速在准静态下钳零，与切向的 `DRIFT_STICK_RATIO` 同族）；
 ③ `SESSION-2026-09-18-SLEEP.md` §4 末尾留的未试单行变体（无偏置趟改 Rapier `cfm_factor = 1.0`）。
 
-### 第三轮实测（同日，**滞回**）：找到缺的那个机制 —— 但**未落地**（留给下一个会话）
+### 第三轮实测（同日）：找到缺的那个机制 —— 但**未落地**（留给下一个会话）
 
-上节的三条候选里，候选① **唤醒判据的时间滞回**用 20 行临时改动量过了（`vxl-phys-solver`
-的 `SUBISLAND_SLEEP` 分支：唤醒条件需**连续 `K` 个子步**都"hot"才置 `awake`，中间断一次即清零）。
+> ⚠️ **语义更正（写档时自查发现，重要）**：下面实测的**不是"时间滞回"**（跨子步连续 N 次），
+> 而是"**接触数门**"。原因：我那段临时实现的计数器声明在 `solve_phase` **函数内部**，而
+> `solve_phase` 是**每次（子步 × 趟）调用一次** ⇒ 计数器每次调用都从零开始 ⇒ 实际语义 =
+> **"同一次 `solve_phase` 内、同一睡体累计 ≥K 条 hot 接触观测才唤醒"**（一个睡体被 1–2 个
+> 抖动的清醒邻居碰时**不醒**，被 ≥K 个**同时**在动的邻居围住才醒）。
+> ⇒ **读数属于"接触数门"变体**；**"时间滞回"变体（跨子步累加）尚未测**，两者语义不同、
+> 落地前应各测一遍。
+> ⚠️ **实现警告**：若把该计数器从 `solve_phase` 内部挪到**持久状态**（省一次 Vec 分配），
+> 语义会**变成跨子步累积**、下面这组读数**不再适用** ⇒ 要保读数就保持"每调用清零"；
+> 要试时间滞回就**另设**计数器/常量，别改这个的寿命。
+
+`vxl-phys-solver` 的 `SUBISLAND_SLEEP` 唤醒分支，20 行临时改动：唤醒需**同一次 `solve_phase` 内
+累计 ≥`K` 条 hot 接触**（`hot` = 相对速度 > `SUBISLAND_WAKE_MULT × sleep_linear` 或角速超阈）。
 
 | 配置（场景同上，600 tick） | 末态 awake | 缺口体 | **wake 率（<1 过）** | 快速体 | \|v\|max | 尾窗 p50 |
 |---|---|---|---|---|---|---|
@@ -1783,7 +1794,8 @@ R.1 的"EPA 不适定"结论**继续成立**（42 m 假深度 + 45° 假法线�
 而**同配置 K=0 是卡住不降的**（9979 / 直方图 4650 集中在 0.04–0.08）⇒
 **滞回正是缺的那个机制**：它止住了近阈 churn，堆才真的开始静下来。
 
-**⇒ 小时级外推：window ≈1400–1600 tick 应达 awake→0**（判据本身允许"指定 tick 前入睡"）。
+**⇒ 外推：window ≈1400–1600 tick 应达 awake→0**（判据本身允许"指定 tick 前入睡"；
+⚠️ 是**外推**不是实测——600 tick 窗口内没到 0，落地时必须用长窗口确认）。
 而且它**同时**松开了另外两条判据的余量（wake 率 5×、弹射归零）⇒ 与 shock/stab 不再互斥。
 
 **为什么本轮不落地**（写给下一个会话）：它会**广泛改变睡眠行为**（塔/默认档/金样/规模档的冻结值
@@ -1791,9 +1803,10 @@ R.1 的"EPA 不适定"结论**继续成立**（42 m 假深度 + 45° 假法线�
 + 四哈希/金样/规模档换代 + 长窗口确认，属"独立立项"而不是顺手拧。**代码改动在这里**：
 
 ```rust
-// crates/vxl-phys-solver/src/lib.rs，SUBISLAND_SLEEP 的唤醒分支：
-// 常量 const WAKE_STREAK_K: u32 = 8;                 // 0 = 关闭 = 现行行为（须走直通分支）
-// 函数内 let mut wake_streak: Vec<u32> = vec![0; bodies.len()];
+// crates/vxl-phys-solver/src/lib.rs，`solve_phase` 内的 SUBISLAND_SLEEP 唤醒分支
+//（⚠️ 计数器**必须留在 `solve_phase` 内**才能复现上面那组读数；挪到持久状态 = 换语义）：
+// const WAKE_STREAK_K: u32 = 8;   // 0 = 关闭 = 现行行为（须走直通分支；照 P7 滤波的教训）
+// let mut wake_streak: Vec<u32> = vec![0; bodies.len()];   // 每次 solve_phase 调用清零
 let hot = rel > SUBISLAND_WAKE_MULT * config.sleep_linear
     || bodies.angvel(w).length() > SUBISLAND_WAKE_MULT * config.sleep_angular;
 if hot {
@@ -1804,9 +1817,15 @@ if hot {
 }
 ```
 
-**落地清单（建议顺序）**：① `K` 选型（2 tick vs 4 tick）用 `m1_pile -- 16 4 8 600 2 2` 对拍；
+**落地清单（建议顺序）**：⓪ **先定语义**：接触数门（已测，K=8 ⇒ wake 率 0.20）vs 时间滞回（未测）
+——建议先各测一次再选（时间滞回更"物理"，接触数门更便宜且已有读数）；
+① `K` 选型用 `m1_pile -- 16 4 8 600 2 2` 对拍（K ∈ {4, 8, 16}）；
 ② **长窗口确认** `... 16 4 8 2000 2 2`（≈470 ms/tick × 2000 ≈ 16 min）看 awake 是否归零；
 ③ 负面检查：`m0_gates`/`default_tier_stability`/金样三场景/`m1_islands` 的入睡与唤醒列；
-④ 冻结值换代（`gate_scale` 末态 awake、默认档 4 值、金样三基线）+ ADR-0004 记旧/新/理由；
+④ 冻结值换代 + ADR-0004 记旧/新/理由（**位置已核准**）：
+   `scripts/gate_scale.sh:37-45` 冻结块（`F_AWAKE_END=0` 等 8 项；`SCALE_FREEZE=1 bash scripts/gate_scale.sh`
+   直接打印可粘贴的新块）、`crates/vxl-phys/tests/default_tier_stability.rs:~90`（默认档 4 值）、
+   `gold-sample/src/main.rs:610` 的 `frozen_baseline()` + `RECIPES.md` §金样门基线表、
+   四哈希（`m0_gates` 门槛/压力、`determinism` FINAL_HASH、金样三门）；
 ⑤ 若默认开：确认 wake 率判据在**所有**场景都改善（滞回只可能降翻率，但要实测）。
 
