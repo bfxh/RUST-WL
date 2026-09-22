@@ -533,6 +533,12 @@ cargo run --release -p vxl-phys --example m1_scale -- 8 102400 100000 40 <iters>
 # ⚠️ 场景按**铸装**口径搭（水块按沉降后几何就位，[8,8,8]@0.05 对 0.5 m 盆腔）——带落差的入盆水块会触发
 #   WCSPH 驻留瞬态"顶心喷泉"（PLAN-0.3 §4.2），演示与断言都会失效。
 cargo run --release -p vxl-phys --example fluid_buoyancy
+# 流体↔刚体（2b，双向：SPEC §4.8 Akinci 两层边界粒子）——同一示例加 `2b` 参数：
+# 2a/2b 对照（吃水）+ 边界粒子数/粒子数 + 两档 ms/tick + 诚实判定表（重体标 ⚠️）。
+# 边界粒子 = **冻结流体粒子**（同数组/同核/同式），反作用（力 + 绕体原点的力矩）回流；
+# 默认关（`add_fluid`）⇒ 既有场景四哈希逐位不变。测试半边：`cargo test -p vxl-phys --test fluid_boundary`。
+# ⚠️ 开局**别把体直接放在已有水格上**（重合 ⇒ ρ 爆 ⇒ CFL 尖峰）；用"从水面上方落入"或铸装挖空。
+cargo run --release -p vxl-phys --example fluid_buoyancy -- 180 2b
 # T4 并行扩展（12 000 体碎片雨）：扩展倍数 + 串行/并行哈希逐位一致
 cargo run --release -p vxl-phys --example m1_islands
 # T6 8A 碰撞行（10×1200 静态格 + 10k tiles + 100 探针；验收 p95 ≤1.5ms）

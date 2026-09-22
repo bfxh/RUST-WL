@@ -160,6 +160,20 @@ fn body_half_extent(shape: &Shape) -> f32 {
     }
 }
 
+/// 流体**粒子**（不含 2b 边界粒子）的 AABB；无粒子 ⇒ `None`。
+/// 介质耦合（2a）与 2b 边界粒子生成的**共用预滤**：每 tick 一次 O(n)，
+/// 体先过包围盒，避免全库逐体采样。
+fn particle_bounds(sys: &vxl_phys_fluid::FluidSystem) -> Option<(Vec3, Vec3)> {
+    let pos = sys.positions();
+    let first = *pos.first()?;
+    let (mut lo, mut hi) = (first, first);
+    for p in &pos[1..] {
+        lo = lo.min(*p);
+        hi = hi.max(*p);
+    }
+    Some((lo, hi))
+}
+
 /// 外部碰撞提供者集合（门面持有；实现 `interop::ProviderColliders` 供窄相查询）。
 #[derive(Default)]
 pub struct Providers {
@@ -467,6 +481,14 @@ pub struct World {
     provider_bounds: Vec<Aabb>,
     /// 已注册流体系统（液体域；边界 provider id 随行存档）。
     fluids: Vec<(vxl_phys_fluid::FluidSystem, Vec<u32>)>,
+    /// **2b（Akinci 边界粒子）开关**，与 `fluids` 同序：true = 每 tick 按近域体重建
+    /// 边界粒子、反作用（力 + 力矩）回流；被覆盖的体由 2b 接管，2a 让位。
+    /// `add_fluid` 一律 false ⇒ **既有场景逐位不变**（2b 是显式选择档）。
+    fluid_2b: Vec<bool>,
+    /// 边界粒子生成的暂存 `(体 id, 形状, 位姿)`（复用免每 tick 分配）。
+    fluid_boundary_scratch: Vec<(u32, Shape, vxl_phys_fluid::BodyPose)>,
+    /// **2b 覆盖集**（与 `bodies` 同序，每 tick 重建）：上次进了边界粒子集的体。
+    fluid_boundary_covered: Vec<bool>,
     timings: PhaseTimings,
 }
 
@@ -510,6 +532,9 @@ impl World {
             providers: Providers::default(),
             provider_bounds: Vec::new(),
             fluids: Vec::new(),
+            fluid_2b: Vec::new(),
+            fluid_boundary_scratch: Vec::new(),
+            fluid_boundary_covered: Vec::new(),
             timings: PhaseTimings::default(),
         }
     }
@@ -617,7 +642,37 @@ impl World {
     pub fn add_fluid(&mut self, mut sys: vxl_phys_fluid::FluidSystem, boundaries: &[u32]) -> usize {
         sys.set_boundaries(boundaries);
         self.fluids.push((sys, boundaries.to_vec()));
+        self.fluid_2b.push(false);
         self.fluids.len() - 1
+    }
+
+    /// 注册流体系统并**开启 2b（Akinci 两层边界粒子）**：每 tick 按**近域体**
+    /// （静态 + 动态，形状受支持）重建边界粒子（`FluidSystem::set_boundary_particles`），
+    /// 并把**反作用（力 + 绕体原点的力矩）**回流到体上（`medium_pass` 段③）。
+    /// 被覆盖的体由 2b 接管 ⇒ **2a 的介质场浮力/阻力对这些体让位**（不叠加）；
+    /// 形状不受支持或不在近域的体仍走 2a 粗档（既不叠加、也不留空）。
+    ///
+    /// 与 [`Self::add_fluid`] 的唯一区别就是这一条 ⇒ 默认档位、既有场景逐位不变。
+    pub fn add_fluid_with_boundary_coupling(
+        &mut self,
+        sys: vxl_phys_fluid::FluidSystem,
+        boundaries: &[u32],
+    ) -> usize {
+        let id = self.add_fluid(sys, boundaries);
+        if let Some(f) = self.fluid_2b.get_mut(id) {
+            *f = true;
+        }
+        id
+    }
+
+    /// 该流体是否开了 2b（对账/测试用）。
+    pub fn fluid_boundary_coupling(&self, fluid: usize) -> bool {
+        self.fluid_2b.get(fluid).copied().unwrap_or(false)
+    }
+
+    /// 2b **覆盖集**快照（与 `bodies` 同序；上次边界粒子生成的结果）。
+    pub fn fluid_boundary_covered(&self) -> &[bool] {
+        &self.fluid_boundary_covered
     }
 
     /// 已注册流体系统及其边界 provider id（渲染读 `.0.positions()` / `.0.velocities()`）。
@@ -969,13 +1024,70 @@ impl World {
     /// `FluidConfig::substeps` 的固定子步数推进一个 tick（`config.dt`）。
     /// 边界碰撞走统一提供者通道（`Providers` 实现 `ProviderColliders`，
     /// 体素/网格/喷溅同 id 空间）；无流体时零成本短路。
+    ///
+    /// **2b**（`add_fluid_with_boundary_coupling` 注册的流体）：先按近域体重建
+    /// 边界粒子集再步进 ⇒ 流体本 tick 就"看见"体的新位姿（体子步已完成）；
+    /// 反作用由下一次 `medium_pass` 施加（与 2a 同口径：一 tick 滞后，值取最新状态）。
     fn fluid_pass(&mut self) {
         if self.fluids.is_empty() {
             return;
         }
-        for (sys, _) in self.fluids.iter_mut() {
-            sys.step(self.config.dt, &self.providers);
+        for fi in 0..self.fluids.len() {
+            if self.fluid_2b.get(fi).copied().unwrap_or(false) {
+                self.refresh_fluid_boundary(fi);
+            }
+            let dt = self.config.dt;
+            self.fluids[fi].0.step(dt, &self.providers);
         }
+    }
+
+    /// **2b 边界粒子重建**（每 tick 一次）：把近域体的表面两层粒子装进该流体系统，
+    /// 并重建**覆盖集**（2a 让位判据）。
+    ///
+    /// - 近域判据 = 体包围球（+ 核半径）与流体粒子 AABB 相交 ⇒ **保守**（宁多造不漏）。
+    /// - 形状不受支持（复合体/高度场/provider/凸壳）⇒ 跳过（该体继续走 2a 粗档）。
+    /// - 静态体也生成（让静态几何对流体**可感**）；反作用只对清醒动态体施加（段③）。
+    /// - 确定性：体按索引升序、`set_boundary_particles` 按参数序排布 ⇒ 求和序固定。
+    fn refresh_fluid_boundary(&mut self, fi: usize) {
+        self.fluid_boundary_scratch.clear();
+        self.fluid_boundary_covered.clear();
+        self.fluid_boundary_covered.resize(self.bodies.len(), false);
+        if let Some((lo, hi)) = particle_bounds(&self.fluids[fi].0) {
+            let pad = self.fluids[fi].0.config().smoothing_radius;
+            for i in 0..self.bodies.len() {
+                let shape = self.bodies.shape[i];
+                if !vxl_phys_fluid::boundary::supports(&shape) {
+                    continue;
+                }
+                let c = self.bodies.position[i];
+                let r = shape.bounding_sphere_radius() + pad;
+                if c.x < lo.x - r
+                    || c.x > hi.x + r
+                    || c.y < lo.y - r
+                    || c.y > hi.y + r
+                    || c.z < lo.z - r
+                    || c.z > hi.z + r
+                {
+                    continue;
+                }
+                self.fluid_boundary_scratch.push((
+                    i as u32,
+                    shape,
+                    vxl_phys_fluid::BodyPose {
+                        pos: c,
+                        rot: self.bodies.rot(i),
+                        linvel: self.bodies.linvel[i],
+                        angvel: self.bodies.angvel(i),
+                    },
+                ));
+                self.fluid_boundary_covered[i] = true;
+            }
+        }
+        // `set_boundary_particles` 要 `&scratch` 而 `self.fluids` 要 `&mut`：借出后归还
+        // （`Vec::take` 是 O(1)），避免两个 `self` 字段的可变/共享借用冲突。
+        let scratch = std::mem::take(&mut self.fluid_boundary_scratch);
+        let _ = self.fluids[fi].0.set_boundary_particles(&scratch);
+        self.fluid_boundary_scratch = scratch;
     }
 
     /// **介质通道**：把「介质状提供者」的状态作用到刚体上（单侧：介质 → 体）。
@@ -1035,26 +1147,30 @@ impl World {
         }
 
         // ── ② 流体作介质（2a，见上方文档）：浮力（阿基米德）+ 阻力 ──
+        // （2b 覆盖的体在此**让位**：其浮力/阻力由 Akinci 反作用接管，见段③）
         use vxl_phys_core::interop::MediumField as _;
         if self.fluids.is_empty() {
             return;
         }
         let g = self.config.gravity;
-        for (sys, _) in self.fluids.iter() {
+        for (fi, (sys, _)) in self.fluids.iter().enumerate() {
             let pos = sys.positions();
             if pos.is_empty() {
                 continue;
             }
+            let two_b = self.fluid_2b.get(fi).copied().unwrap_or(false);
             // 粒子包围盒（每 tick 一次 O(n)；体先过包围盒，避免全库逐体采样）。
-            let (mut lo, mut hi) = (pos[0], pos[0]);
-            for p in &pos[1..] {
-                lo = lo.min(*p);
-                hi = hi.max(*p);
-            }
+            let (lo, hi) = match particle_bounds(sys) {
+                Some(b) => b,
+                None => continue,
+            };
             let pad = sys.config().smoothing_radius; // 核半径余量：表面外仍有介质影响
             for i in 0..self.bodies.len() {
                 if !self.bodies.is_dynamic(i) || !self.bodies.awake[i] {
                     continue; // 睡眠体不受外力（唤醒后自然恢复；与"睡眠按静态处理"一致）
+                }
+                if two_b && self.fluid_boundary_covered.get(i).copied().unwrap_or(false) {
+                    continue; // 2b 已覆盖 ⇒ 二选一，不叠加
                 }
                 let c = self.bodies.position[i];
                 if c.x < lo.x - pad
@@ -1105,6 +1221,25 @@ impl World {
         }
     }
 
+    /// **2b 反作用回流**：把各 2b 流体的边界粒子反作用（力 + 绕体原点的力矩）加到体上。
+    /// 量纲 = **力**（不是冲量）：与 2a 一样在每个体子步施加一次 ⇒ 一个 tick 的冲量
+    /// = `F·dt`（施加次数 × 子步 dt = tick dt）。睡眠体不吃外力（与 2a 同口径）。
+    fn fluid_reaction_pass(&mut self) {
+        for fi in 0..self.fluids.len() {
+            if !self.fluid_2b.get(fi).copied().unwrap_or(false) {
+                continue;
+            }
+            for &(body, f, tau) in self.fluids[fi].0.boundary_reactions() {
+                let i = body as usize;
+                if i >= self.bodies.len() || !self.bodies.is_dynamic(i) || !self.bodies.awake[i] {
+                    continue;
+                }
+                self.bodies.force[i] += f;
+                self.bodies.torque[i] += tau;
+            }
+        }
+    }
+
     fn substep(&mut self, dt: f32, first: bool, reuse_manifolds: bool) {
         // 1) 力场（重力在 World::new 注入注册表）+ 介质耦合（喷溅场作介质）。
         // 计时走跨目标探针：wasm32-unknown-unknown 无时钟（`Instant::now()`
@@ -1112,6 +1247,9 @@ impl World {
         let t0 = vxl_phys_core::probe::start();
         self.fields.apply(&mut self.bodies);
         self.medium_pass();
+        // 2b（Akinci 边界粒子）反作用：与 2a 同段位（体子步开始处、积分之前），
+        // 只对 2b 注册的流体生效 ⇒ 未开的场景零成本、逐位不变。
+        self.fluid_reaction_pass();
         self.timings.fields_us += vxl_phys_core::probe::us(t0);
         // 2) 速度积分。
         let t0 = vxl_phys_core::probe::start();

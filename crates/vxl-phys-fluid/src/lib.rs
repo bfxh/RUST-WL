@@ -13,11 +13,33 @@
 //! 邻居 = 均匀网格（格边 = h，27 邻域，遍历序确定）；边界 = 统一提供者通道
 //! `ProviderColliders::contacts_point`（体素/三角网/喷溅即插即用，非弹性投影）。
 //! 确定性：全 f32、同输入两次运行逐位一致（测试守门）。
+//!
+//! **刚体→流体（2b，Akinci 两层边界粒子）**：边界粒子与流体粒子**同数组、同核、
+//! 同式**（逐粒质量 `pmass`：流体 = `mass`、边界 = `ρ0·V_b`），只是**运动学冻结**
+//! （不积分、由 facade 每 tick 按体重建，速度 = 体面速度 `v + ω×r`）。反作用 =
+//! 边界粒子上压力梯度力之和 → 每体（力 + 绕体原点的力矩）。
+//! 几何（表面采样/两层内移/体积）在 [`boundary`] 模块。**无边界粒子时逐位不变**
+//! （`sum_b` 恒 0 ⇒ `mass·sum + 0.0` 与原式同值同序）。
 
 #![forbid(unsafe_code)]
 
+pub mod boundary;
+
+pub use boundary::{lattice, BoundaryLattice, SurfaceLattice};
+
 use vxl_phys_core::interop::{InteropContact, MediumField, MediumSample, ProviderColliders};
-use vxl_phys_core::Vec3;
+use vxl_phys_core::{Quat, Shape, Vec3};
+
+/// 边界粒子生成输入：体原点位姿 + 速度（体面速度 = `linvel + angvel×r`）。
+///
+/// `pos` = **体原点**（本仓体原点即质心；锥例外，见 `Shape::Cone` 注）；`rot` = 体姿态。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyPose {
+    pub pos: Vec3,
+    pub rot: Quat,
+    pub linvel: Vec3,
+    pub angvel: Vec3,
+}
 
 /// §4.8 流体技术族。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,6 +213,22 @@ pub struct FluidSystem {
     grid: UniformGrid,
     /// 接触缓冲（复用，免每粒分配）。
     contacts: Vec<InteropContact>,
+    /// 晶格间距（`new` 给定；边界粒子的采样间距与体积标定同源于它）。
+    spacing: f32,
+    /// **流体粒子数**：`pos`/`vel`/... 的**前缀**长度；`≥ n_fluid` 的是边界粒子
+    /// （同数组 ⇒ 既有核/式一字不改地作用于边界粒子，见模块头）。
+    n_fluid: usize,
+    /// 逐粒质量：流体 = `mass`，边界 = `ρ0·V_b`。流体段取同一个 f32 ⇒ 无边界时
+    /// 与旧的常量乘法逐位等价。
+    pmass: Vec<f32>,
+    /// 每体边界段 `(体 id, 体原点, start, end)`（`start..end` = 全局粒子索引区间）。
+    spans: Vec<(u32, Vec3, u32, u32)>,
+    /// 反作用输出：每体 `(体 id, 力, 绕体原点的力矩)`；每个子步末整体重写。
+    breact: Vec<(u32, Vec3, Vec3)>,
+    /// 每边界粒子的受力累加（每子步清零；`force_pass` 里借出以便写入）。
+    bforce: Vec<Vec3>,
+    /// 形状 → 局部两层采样缓存（形状集小 ⇒ 线性查找；免逐 tick 重建）。
+    lattice_cache: Vec<(Shape, BoundaryLattice)>,
 }
 
 impl FluidSystem {
@@ -252,21 +290,55 @@ impl FluidSystem {
             xsph: vec![Vec3::ZERO; n],
             grid: UniformGrid::default(),
             contacts: Vec::new(),
+            spacing,
+            n_fluid: n,
+            pmass: vec![mass; n],
+            spans: Vec::new(),
+            breact: Vec::new(),
+            // 不变式：`bforce.len() == pos.len()`（`new` 给流体段；`set_boundary_particles`
+            // 随 `pos` 一起 resize；`truncate_to_fluid` 一起截断）。
+            bforce: vec![Vec3::ZERO; n],
+            lattice_cache: Vec::new(),
             pos,
             cfg,
         }
     }
 
+    /// 流体粒子数（**不含**边界粒子）。
+    ///
+    /// 语义同旧 `len()`：渲染/导出/测试读到的永远是流体粒子，
+    /// 边界粒子是 2b 的内部表示（`boundary_count()` 单独报）。
     pub fn len(&self) -> usize {
-        self.pos.len()
+        self.n_fluid
     }
 
     pub fn is_empty(&self) -> bool {
-        self.pos.is_empty()
+        self.n_fluid == 0
     }
 
     pub fn config(&self) -> &FluidConfig {
         &self.cfg
+    }
+
+    /// 流体晶格间距（边界粒子的采样间距与体积标定同源）。
+    pub fn particle_spacing(&self) -> f32 {
+        self.spacing
+    }
+
+    /// 当前边界粒子数（2b；0 = 纯流体）。
+    pub fn boundary_count(&self) -> usize {
+        self.pos.len() - self.n_fluid
+    }
+
+    /// 当前边界粒子覆盖的体 id（按段序 = 生成序，确定性）。
+    pub fn boundary_bodies(&self) -> impl Iterator<Item = u32> + '_ {
+        self.spans.iter().map(|s| s.0)
+    }
+
+    /// **反作用**（`step` 后有效；每子步重写）：每体 `(体 id, 力, 绕体原点的力矩)`。
+    /// 体原点处的力与力矩都已是**力的量纲**（未乘 dt）；facade 按自己的子步施加。
+    pub fn boundary_reactions(&self) -> &[(u32, Vec3, Vec3)] {
+        &self.breact
     }
 
     /// 单粒质量（晶格标定结果；导出/审计用）。
@@ -274,25 +346,26 @@ impl FluidSystem {
         self.mass
     }
 
+    /// 流体粒子位置（前缀；不含边界粒子）。
     pub fn positions(&self) -> &[Vec3] {
-        &self.pos
+        &self.pos[..self.n_fluid]
     }
 
     pub fn velocities(&self) -> &[Vec3] {
-        &self.vel
+        &self.vel[..self.n_fluid]
     }
 
     pub fn densities(&self) -> &[f32] {
-        &self.dens
+        &self.dens[..self.n_fluid]
     }
 
     pub fn pressures(&self) -> &[f32] {
-        &self.press
+        &self.press[..self.n_fluid]
     }
 
     /// 覆盖初速度（ dams break / 动量测试用；顺序 = 粒子索引序）。
     pub fn set_velocities(&mut self, vs: &[Vec3]) {
-        let n = vs.len().min(self.vel.len());
+        let n = vs.len().min(self.n_fluid);
         self.vel[..n].copy_from_slice(&vs[..n]);
     }
 
@@ -305,6 +378,70 @@ impl FluidSystem {
         self.boundaries = ids.to_vec();
     }
 
+    /// **Akinci 边界粒子（2b）**：用给定体的两层表面粒子**整体替换**当前边界集
+    /// （facade 每 tick 重建一次；空列表 = 回落纯流体）。返回边界粒子总数。
+    ///
+    /// - 局部采样按 `(形状, spacing)` **缓存复用**（形状集小、线性查找；稳态零分配）；
+    ///   形状不受支持（复合体/高度场/provider/凸壳）⇒ 出 0 粒、**不进缓存**，
+    ///   调用方据此回退粗档（`M1-EXIT.md` §4）。
+    /// - 世界变换与体面速度在本函数内完成（`v + ω×r`，`r` 自体原点量起）。
+    /// - 数组按**体序 × 层序 × 面内序**排布 ⇒ 求和序确定。
+    pub fn set_boundary_particles(&mut self, bodies: &[(u32, Shape, BodyPose)]) -> usize {
+        self.truncate_to_fluid();
+        let mut cache = std::mem::take(&mut self.lattice_cache);
+        for &(body, shape, pose) in bodies {
+            // 取或建局部两层采样（缓存已移出 `self` ⇒ 与下面的 self.pos 写入无借用冲突）。
+            let idx = match cache.iter().position(|(s, _)| *s == shape) {
+                Some(i) => i,
+                None => {
+                    let lat = boundary::lattice(&shape, self.spacing);
+                    if lat.is_empty() {
+                        continue; // 不支持 ⇒ 不造粒、不缓存（回退粗档的信号）
+                    }
+                    cache.push((shape, lat));
+                    cache.len() - 1
+                }
+            };
+            let (_, lat) = &cache[idx];
+            let start = self.pos.len() as u32;
+            for &lp in &lat.pts {
+                let wp = pose.pos + pose.rot.rotate_vec3(lp);
+                self.pos.push(wp);
+                // 体面速度：刚体速度场 v + ω×r（r 自体原点量起）。
+                self.vel
+                    .push(pose.linvel + pose.angvel.cross(wp - pose.pos));
+                self.pmass.push(self.cfg.rest_density * lat.volume);
+                self.dens.push(0.0);
+                self.press.push(0.0);
+                self.acc.push(Vec3::ZERO);
+                self.xsph.push(Vec3::ZERO);
+            }
+            let end = self.pos.len() as u32;
+            if end > start {
+                self.spans.push((body, pose.pos, start, end));
+            }
+        }
+        self.lattice_cache = cache;
+        self.bforce.resize(self.pos.len(), Vec3::ZERO);
+        self.breact.clear();
+        self.boundary_count()
+    }
+
+    /// 清空边界粒子（截断回流体前缀；容量保留 ⇒ 稳态零分配）。
+    fn truncate_to_fluid(&mut self) {
+        let nf = self.n_fluid;
+        self.pos.truncate(nf);
+        self.vel.truncate(nf);
+        self.dens.truncate(nf);
+        self.press.truncate(nf);
+        self.acc.truncate(nf);
+        self.xsph.truncate(nf);
+        self.pmass.truncate(nf);
+        self.bforce.truncate(nf);
+        self.spans.clear();
+        self.breact.clear();
+    }
+
     /// 推进一个完整 tick（内部按 `cfg.substeps` 等分子步；边界经统一提供者通道）。
     pub fn step(&mut self, dt_tick: f32, providers: &dyn ProviderColliders) {
         let sub = self.cfg.substeps.max(1);
@@ -315,19 +452,22 @@ impl FluidSystem {
     }
 
     fn substep(&mut self, dt: f32, providers: &dyn ProviderColliders) {
-        let n = self.pos.len();
-        if n == 0 {
-            return;
+        let nf = self.n_fluid;
+        if nf == 0 {
+            return; // 边界粒子不单独驱动（它们只随体走）
         }
+        // 网格含**全部**粒子（邻域必须看得见边界粒子）；边界粒子的位置/速度每 tick
+        // 由 `set_boundary_particles` 整体重建，本子步内不动（运动学冻结）。
         self.grid.rebuild(&self.pos, self.h);
         self.density_pass(providers);
         self.pressure_pass();
         self.force_pass();
         // 半隐式欧拉：v ← v + dt·a + ε·xsph；CFL 限速防穿隧。
+        // **只积分流体粒子**（索引前缀）——边界粒子不作积分。
         let vmax = self.cfg.max_speed_frac * self.h / dt;
         let vmax2 = vmax * vmax;
         let eps = self.cfg.xsph_viscosity;
-        for i in 0..n {
+        for i in 0..nf {
             let mut v = self.vel[i] + self.acc[i] * dt + self.xsph[i] * eps;
             let s2 = v.length_squared();
             if s2 > vmax2 {
@@ -384,53 +524,32 @@ impl FluidSystem {
     /// 它按均匀连续介质补，而流体实际的近壁分布（沉降后成层、各向异性）
     /// 的离散亏量与之错带（实测底层差 ~12% ρ0，补不齐 ⇒ p≥0 死区复活）。
     /// 鬼影随流体局部分布同步：流体压缩/成层，鬼影同压缩/成层。
+    ///
+    /// **2b 边界粒子**（同数组、索引 ≥ `n_fluid`）：质量**逐粒**取（`pmass`）、
+    /// 计入 `sum_b`。流体段的和式与遍历序与旧实现逐字相同 ⇒ **无边界粒子时
+    /// `dens = mass·sum + 0.0` 与原 `dens = mass·sum` 逐位同值**（正数 +0.0 精确）。
     fn density_pass(&mut self, providers: &dyn ProviderColliders) {
-        let walls = !self.boundaries.is_empty();
-        for i in 0..self.pos.len() {
-            // 收集 h 带内壁面（点 + 外法线；角部粒子可有多面）。
+        let nf = self.n_fluid;
+        let nt = self.pos.len();
+        for i in 0..nf {
+            let pi = self.pos[i];
             let mut pl_pt = [Vec3::ZERO; 8];
             let mut pl_n = [Vec3::ZERO; 8];
-            let mut np = 0usize;
-            if walls {
-                let pi = self.pos[i];
-                for &bid in &self.boundaries {
-                    if let Some(bb) = providers.bounds(bid) {
-                        // 预滤余量取 h（镜像带 = sdf < h）。
-                        let m = self.h;
-                        if pi.x < bb.min.x - m
-                            || pi.x > bb.max.x + m
-                            || pi.y < bb.min.y - m
-                            || pi.y > bb.max.y + m
-                            || pi.z < bb.min.z - m
-                            || pi.z > bb.max.z + m
-                        {
-                            continue;
-                        }
-                    }
-                    self.contacts.clear();
-                    if providers.contacts_point(bid, pi, self.h, &mut self.contacts) {
-                        for c in &self.contacts {
-                            // sdf = (p − 表面点)·外法线（粒子在固体外侧为正，
-                            // provider 无关）；穿透（≤ 0）交给投影，不补。
-                            let sdf = (pi - c.point).dot(c.normal);
-                            if sdf > 0.0 && sdf < self.h && np < 8 {
-                                pl_pt[np] = c.point;
-                                pl_n[np] = c.normal;
-                                np += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            let pi = self.pos[i];
+            let np = self.wall_planes(pi, providers, &mut pl_pt, &mut pl_n);
             let mut sum = self.w0;
-            self.for_neighbors(i, |_j, d, r2| {
+            let mut sum_b = 0.0f32;
+            self.for_neighbors(i, |j, d, r2| {
                 let t = self.h2 - r2;
-                sum += self.k6 * t * t * t;
-                for w in 0..np {
+                let w = self.k6 * t * t * t;
+                if j < nf {
+                    sum += w;
+                } else {
+                    sum_b += self.pmass[j] * w;
+                }
+                for k in 0..np {
                     let pj = pi - d;
-                    let dn = (pj - pl_pt[w]).dot(pl_n[w]);
-                    let g = pj - pl_n[w] * (2.0 * dn);
+                    let dn = (pj - pl_pt[k]).dot(pl_n[k]);
+                    let g = pj - pl_n[k] * (2.0 * dn);
                     let rg2 = (pi - g).length_squared();
                     if rg2 <= self.h2 {
                         let tg = self.h2 - rg2;
@@ -438,14 +557,80 @@ impl FluidSystem {
                     }
                 }
             });
-            self.dens[i] = self.mass * sum;
+            self.dens[i] = self.mass * sum + sum_b;
         }
+        // 边界粒子（2b）：**同一核、同一式**、含自身项，但密度只从**流体**取
+        // （`j < nf`）——这是 Akinci 口径的"边界压力 = 外推的流体压力"：若让边界
+        // 粒子互相供密度，**薄体**（厚度 < ~2h）两侧的内移层会在体内互相穿透，
+        // ρ_b 被自身堆积顶到 q≫1 ⇒ p_b 爆抬 ⇒ 体积力/反作用整片失真（实测：
+        // 0.12 m 盒给出 ρVg 的 5.9×、侧向 51 N 的假力，2026-09-22）。
+        // 只吃流体 ⇒ 贴壁处 ρ_b ≈ 该处流体密度 ⇒ p_b ≈ p_f，与"冻结流体粒子"
+        // 的原意一致，且对任意薄厚都稳定。自身项保留（与流体同式）。
+        for i in nf..nt {
+            let mut sum = 0.0f32;
+            self.for_neighbors(i, |j, _d, r2| {
+                if j >= nf {
+                    return; // 不吃边界-边界对（见上）
+                }
+                let t = self.h2 - r2;
+                sum += self.pmass[j] * (self.k6 * t * t * t);
+            });
+            self.dens[i] = self.pmass[i] * self.w0 + sum;
+        }
+    }
+
+    /// 收集粒子 `pi` 的 h 带内壁面（点 + 外法线；角部可有多面），≤ 8 面。
+    /// 供密度轮的镜像鬼影用（流体粒子专有；边界粒子不用，见 `density_pass`）。
+    /// 取 `&mut self` 是为了复用 `self.contacts` 缓冲（调用是顺序的，与随后的
+    /// `for_neighbors` 不重叠）。
+    fn wall_planes(
+        &mut self,
+        pi: Vec3,
+        providers: &dyn ProviderColliders,
+        pl_pt: &mut [Vec3; 8],
+        pl_n: &mut [Vec3; 8],
+    ) -> usize {
+        if self.boundaries.is_empty() {
+            return 0;
+        }
+        let mut np = 0usize;
+        for &bid in &self.boundaries {
+            if let Some(bb) = providers.bounds(bid) {
+                // 预滤余量取 h（镜像带 = sdf < h）。
+                let m = self.h;
+                if pi.x < bb.min.x - m
+                    || pi.x > bb.max.x + m
+                    || pi.y < bb.min.y - m
+                    || pi.y > bb.max.y + m
+                    || pi.z < bb.min.z - m
+                    || pi.z > bb.max.z + m
+                {
+                    continue;
+                }
+            }
+            self.contacts.clear();
+            if providers.contacts_point(bid, pi, self.h, &mut self.contacts) {
+                for c in &self.contacts {
+                    // sdf = (p − 表面点)·外法线（粒子在固体外侧为正，
+                    // provider 无关）；穿透（≤ 0）交给投影，不补。
+                    let sdf = (pi - c.point).dot(c.normal);
+                    if sdf > 0.0 && sdf < self.h && np < 8 {
+                        pl_pt[np] = c.point;
+                        pl_n[np] = c.normal;
+                        np += 1;
+                    }
+                }
+            }
+        }
+        np
     }
 
     /// 压力：Tait p = B·((ρ/ρ0)^γ − 1)；γ=7 走整数次幂乘法展开。
     /// `tensile_instability_suppression`（默认开）= Monaghan 自由面钳制
     /// p ≥ 0：表面密度截断（q ≈ 0.5） otherwise 会给出 p ≈ −B，经对称
     /// spiky 形式变成巨大粒子间吸力（单子步 Δv ~ 10² m/s）⇒ 全体炸散。
+    /// 覆盖**全部**粒子（含 2b 边界粒子——它们要参与压力对，也吃同一套钳制：
+    /// 悬空/真空里的边界粒子 ρ 很小 ⇒ p 钳到 0 ⇒ 不产生凭空吸力）。
     fn pressure_pass(&mut self) {
         let rho0 = self.cfg.rest_density;
         let g = self.cfg.gamma_tait;
@@ -470,13 +655,27 @@ impl FluidSystem {
     /// 与 XSPH 速度平滑（对称形式 Σ m·2/(ρ_i+ρ_j)·W·(v_j − v_i)；
     /// 系数逐对对称 ⇒ 与压力项一样动量守恒）。
     /// 压力项逐对反对称 ⇒ 零重力下总动量守恒（测试 #3 守门）。
+    ///
+    /// **2b**：质量逐粒取（`pmass`；流体段与旧常量同值 ⇒ 无边界时逐位不变）；
+    /// 邻居 j 为边界粒子时，把**同一对**的作用力（`−F_i`，逐对反对称）累加到
+    /// `bforce[j]` —— 这就是刚体受到的压力反作用（力 + 力矩，力矩在
+    /// `aggregate_reactions` 里按绕体原点取）。XSPH 对边界邻居照常计入 ⇒
+    /// 体面速度把流体拖向自身（无滑移近似，用的是既有那一式）。
     fn force_pass(&mut self) {
+        let nf = self.n_fluid;
         let g = self.cfg.gravity;
         let alpha_c = self.cfg.artificial_viscosity * self.cfg.sound_speed;
-        for i in 0..self.pos.len() {
+        // `for_neighbors` 借 `&self`，闭包里要写边界粒子受力 ⇒ 把缓冲整体借出
+        // （`Vec::take` 是 O(1)，不分配），循环后归还。
+        let mut bforce = std::mem::take(&mut self.bforce);
+        for f in &mut bforce[nf..] {
+            *f = Vec3::ZERO; // 每子步重新累加（反作用 = 本子步的力）
+        }
+        for i in 0..nf {
             let vi = self.vel[i];
             let rho_i = self.dens[i];
             let ci2 = self.press[i] / (rho_i * rho_i);
+            let mi = self.pmass[i];
             let mut acc = g;
             let mut xs = Vec3::ZERO;
             self.for_neighbors(i, |j, d, r2| {
@@ -484,25 +683,51 @@ impl FluidSystem {
                 let cj2 = self.press[j] / (rho_j * rho_j);
                 let r = r2.sqrt();
                 let t = self.h - r;
-                // a_i += m·(p_i/ρ_i² + p_j/ρ_j²)·45/(πh⁶)·(h−r)²·d̂（d̂ 指离 j）。
-                let coef = self.mass * (self.ks * t * t) * (ci2 + cj2);
-                acc += d * (coef / r.max(1e-9));
+                let mj = self.pmass[j];
+                // a_i += m_j·(p_i/ρ_i² + p_j/ρ_j²)·45/(πh⁶)·(h−r)²·d̂（d̂ 指离 j）。
+                let coef = mj * (self.ks * t * t) * (ci2 + cj2);
+                let denom = r.max(1e-9);
+                acc += d * (coef / denom);
                 // Monaghan 人工黏度：仅接近对（v_ij·d < 0），Π = α·c·μ/ρ̄、
                 // μ = h·|v_ij·d|/(r² + 0.01h²)；逐对反对称 ⇒ 动量守恒，耗散法向动能。
                 let vij = vi - self.vel[j];
                 let vdn = -vij.dot(d);
-                if vdn > 0.0 {
+                let cv = if vdn > 0.0 {
                     let mu = vdn * self.h / (r2 + 0.01 * self.h2);
-                    let cv =
-                        self.mass * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (self.ks * t * t);
-                    acc += d * (cv / r.max(1e-9));
+                    let c = mj * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (self.ks * t * t);
+                    acc += d * (c / denom);
+                    c
+                } else {
+                    0.0
+                };
+                if j >= nf {
+                    // 反作用（作用在边界粒子上）= −F_i = −m_i·d·(逐对系数/r)。
+                    bforce[j] -= d * (mi * (coef + cv) / denom);
                 }
                 let tt = self.h2 - r2;
                 let w = self.k6 * tt * tt * tt;
-                xs += (self.vel[j] - vi) * (self.mass * 2.0 / (rho_i + rho_j) * w);
+                xs += (self.vel[j] - vi) * (mj * 2.0 / (rho_i + rho_j) * w);
             });
             self.acc[i] = acc;
             self.xsph[i] = xs;
+        }
+        self.bforce = bforce;
+        self.aggregate_reactions();
+    }
+
+    /// 反作用聚合：逐粒 `bforce` → 每体 `(力, 绕**体原点**的力矩)`。
+    /// 求和序 = 段序（生成序）× 段内粒子索引序 ⇒ 确定性。
+    fn aggregate_reactions(&mut self) {
+        self.breact.clear();
+        for &(body, origin, start, end) in &self.spans {
+            let mut f = Vec3::ZERO;
+            let mut tau = Vec3::ZERO;
+            for k in start..end {
+                let fk = self.bforce[k as usize];
+                f += fk;
+                tau += (self.pos[k as usize] - origin).cross(fk);
+            }
+            self.breact.push((body, f, tau));
         }
     }
 
@@ -519,13 +744,15 @@ impl FluidSystem {
     /// 预滤余量 = h：必须 ≥ 单子步最大行程（CFL 上限 0.4h）+ 接触带，
     /// 否则快速粒子一步跨过查询带 → 永久脱离所有接触查询（自由落体逃逸）。
     /// 复用统一提供者通道：体素/三角网/喷溅无改动即为边界。
+    /// **只投影流体粒子**（索引前缀）：边界粒子在体内、由体运动学带着走，
+    /// 既不该被提供者推出，也不该被推出体外。
     fn boundary_pass(&mut self, providers: &dyn ProviderColliders) {
         if self.boundaries.is_empty() {
             return;
         }
         // 本子步被投影粒子：(索引, 接触法线和)。升序登记 ⇒ 消解序确定。
         let mut pushed: Vec<(usize, Vec3)> = Vec::new();
-        for i in 0..self.pos.len() {
+        for i in 0..self.n_fluid {
             let pi = self.pos[i];
             // 投影累计跨所有边界（角部粒子同帧吃地面+墙的多笔推出）。
             let mut p = pi;
@@ -637,7 +864,14 @@ impl MediumField for FluidSystem {
                     let idx =
                         ((ix as usize) * ny as usize + iy as usize) * nz as usize + iz as usize;
                     for &j in &self.grid.bins[idx] {
-                        let p = self.pos[j as usize];
+                        let j = j as usize;
+                        // **只认流体粒子**：本方法答的是"此处流体如何"，边界粒子（2b）
+                        // 是固体侧的代表粒子，计进来会把"体内部"读成"满水位"
+                        // （2a 的 `occupied` 会失真）。密度轮才计它们（那是流体自己的密度）。
+                        if j >= self.n_fluid {
+                            continue;
+                        }
+                        let p = self.pos[j];
                         let d = p - x;
                         let r2 = d.length_squared();
                         if r2 > self.h2 {
@@ -647,7 +881,7 @@ impl MediumField for FluidSystem {
                         let w = self.k6 * t * t * t;
                         wsum += w;
                         rho += self.mass * w;
-                        vsum += self.vel[j as usize] * w;
+                        vsum += self.vel[j] * w;
                     }
                 }
             }
@@ -666,7 +900,9 @@ impl MediumField for FluidSystem {
     }
 
     fn deposit(&mut self, _x: Vec3, _momentum: Vec3, _mass: f32, _pressure_work: f32) {
-        // 2b（Akinci 两层边界粒子）才落地反作用；此处**显式**留空，不假装已耦合。
+        // 2b 的动量交换已在 `force_pass` 里**按对**完成（边界粒子与流体同核同式，
+        // 逐对反对称 ⇒ 反作用自动等于流体受力的负值），不需要点式沉积。
+        // 本方法仍是**显式**空实现：软体/布等"真点式"受体落地前，不做假装耦合。
     }
 }
 
@@ -1047,5 +1283,214 @@ mod tests {
             s.velocity,
             v
         );
+    }
+
+    // ───────────────────────── 2b：Akinci 两层边界粒子 ─────────────────────────
+    // 判据见 `docs/M1-EXIT.md` §4：① 近壁密度天然正确 ② 稳定性 ③ 对无流体场景
+    // 逐位不变（由 `crates/vxl-phys` 的四哈希门守）④ 造价。
+    // 端到端（体真被浮起来 / 体推水）在 `crates/vxl-phys/tests/fluid_boundary.rs`。
+
+    /// 体面速度静止的静态体（本文件只把"体"当几何用）。
+    fn still_pose(pos: Vec3) -> BodyPose {
+        BodyPose {
+            pos,
+            rot: Quat::IDENTITY,
+            linvel: Vec3::ZERO,
+            angvel: Vec3::ZERO,
+        }
+    }
+
+    /// #11 **近壁密度补偿**（2b 的核心主张）：贴壁层密度靠边界粒子补到 ρ0 量级。
+    /// 对照 = 同水块**无地板**（自由面 ⇒ 贴壁层只剩 ~0.7ρ0）。两场景都只跑 1 步
+    /// （密度只依赖位置，位置在 1 步内几乎不动 ⇒ 对照干净、测试快）。
+    #[test]
+    fn boundary_particles_restore_near_floor_density() {
+        let cfg = FluidConfig::default();
+        let mk = || FluidSystem::new(cfg.clone(), Vec3::new(-0.15, 0.0, -0.15), [7, 7, 7], 0.05);
+        let mean_lo = |f: &FluidSystem| {
+            let (mut s, mut n) = (0.0f32, 0usize);
+            for (p, d) in f.positions().iter().zip(f.densities().iter()) {
+                if p.y < 0.06 {
+                    s += d;
+                    n += 1;
+                }
+            }
+            assert!(n > 0, "贴壁层应有粒子");
+            s / n as f32
+        };
+        // 对照：无地板。
+        let mut free = mk();
+        free.step(1.0 / 60.0, &NoProviders);
+        let rho_free = mean_lo(&free);
+        // 实验：地板 = 一层 Box 体的边界粒子（顶面 y = 0，托住水块底面）。
+        let mut on = mk();
+        let floor = (
+            0u32,
+            Shape::Box {
+                half: Vec3::new(0.3, 0.05, 0.3),
+            },
+            still_pose(Vec3::new(0.0, -0.05, 0.0)),
+        );
+        let n = on.set_boundary_particles(std::slice::from_ref(&floor));
+        assert!(n > 0, "地板应生成边界粒子");
+        on.step(1.0 / 60.0, &NoProviders);
+        let rho_on = mean_lo(&on);
+        let rho0 = on.config().rest_density;
+        assert!(
+            rho_free < 0.85 * rho0,
+            "自由面贴底密度应偏低：{rho_free:.0}"
+        );
+        assert!(
+            rho_on > rho_free + 0.15 * rho0,
+            "边界粒子应显著补回核质量：{rho_on:.0} vs 自由面 {rho_free:.0}"
+        );
+        assert!(
+            rho_on < 1.3 * rho0,
+            "补偿不得过量（会造虚假压力）：{rho_on:.0}"
+        );
+    }
+
+    /// #12 **压力承住流体**（不穿透）：只靠边界粒子地板，平台范围内的粒子不得漏下去。
+    /// ⚠️ 平台**边缘外**的粒子会（正确地）摊出去——那不是穿透。判据只看"站得住"：
+    /// 芯内（|xz| ≤ 0.25）最低点不得越过第二层边界粒子（−0.075）以下。
+    #[test]
+    fn boundary_particles_hold_fluid_column() {
+        let mut f = FluidSystem::new(
+            FluidConfig::default(),
+            Vec3::new(-0.3, 0.0, -0.3),
+            [12, 12, 10],
+            0.05,
+        );
+        let floor = (
+            0u32,
+            Shape::Box {
+                half: Vec3::new(0.5, 0.05, 0.5),
+            },
+            still_pose(Vec3::new(0.0, -0.05, 0.0)),
+        );
+        let n = f.set_boundary_particles(std::slice::from_ref(&floor));
+        assert!(n > 0);
+        for _ in 0..60 {
+            let _ = f.set_boundary_particles(std::slice::from_ref(&floor));
+            f.step(1.0 / 60.0, &NoProviders);
+        }
+        let mut core_min = f32::INFINITY;
+        for p in f.positions() {
+            assert!(
+                p.x.is_finite() && p.y.is_finite() && p.z.is_finite(),
+                "NaN/Inf"
+            );
+            if p.x.abs() <= 0.25 && p.z.abs() <= 0.25 {
+                core_min = core_min.min(p.y);
+            }
+        }
+        assert!(
+            core_min > -0.06,
+            "芯内粒子漏过边界粒子地板：min_y = {core_min:.4}"
+        );
+    }
+
+    /// #13 **反作用 = 浮力**（端到端量纲闸）：槽里全潜盒应受 ≈ `ρ·V·g` 的上浮力。
+    /// 槽用既有 `Tank` 提供者（**真实场景里围水是提供者通道的活**，边界粒子只管与体的
+    /// 动量交换——这条把两者分工钉死）。
+    ///
+    /// ⚠️ **实测口径与已知偏差**（2026-09-22，盒半长 0.06 = **1.2h**、240 tick）：
+    /// 浮力 **1.5–1.65×ρVg**（release/debug 两档），侧向假力 **0.6×（debug）～2.1×（release）ρVg**。
+    /// 三者同源：贴壁核质量（离散补偿）经 Tait q⁷ 放大 ⇒ 近壁压强量级远高于静水，
+    /// **净浮力是两个大数之差**，离散相位（流体晶格 vs 盒面栅格）+ 平滑不足都漏进净力。
+    /// 这与**既有提供者方案的已接受偏差同族**（`PLAN-0.3.md` §4.3：底压 ≈1.65× 静水，
+    /// 镜像鬼影 q⁷ 密度尾）——不是 2b 独有，也不是量纲错。
+    /// ⇒ **本门锁的是"量级带 + 方向"**（能抓回归，不假装精确）；侧向只设**失控闸**
+    /// （≤4×ρVg），不许当"近消"宣称。体尺寸 ≲ 2h 时该偏差最重——`docs/M1-EXIT.md` §4 记账。
+    #[test]
+    fn submerged_box_gets_buoyant_reaction() {
+        let cfg = FluidConfig {
+            xsph_viscosity: 0.05,
+            ..FluidConfig::default()
+        };
+        let mut f = FluidSystem::new(cfg, Vec3::new(-0.15, 0.05, -0.15), [7, 7, 7], 0.05);
+        f.set_boundaries(&[0]);
+        let half = 0.06f32;
+        let body = (
+            7u32,
+            Shape::Box {
+                half: Vec3::splat(half),
+            },
+            still_pose(Vec3::new(0.0, 0.12, 0.0)),
+        );
+        for _ in 0..240 {
+            let _ = f.set_boundary_particles(std::slice::from_ref(&body));
+            f.step(1.0 / 60.0, &Tank);
+        }
+        let react = f
+            .boundary_reactions()
+            .iter()
+            .find(|r| r.0 == 7)
+            .map(|r| (r.1, r.2))
+            .expect("潜体应有反作用");
+        let (force, tau) = react;
+        let expect = f.config().rest_density * (2.0 * half).powi(3) * 9.81;
+        println!(
+            "2b 浮力实测 {:+.2} N / ρVg = {expect:.2} N（比值 {:.2}）；侧向 ({:+.2}, {:+.2})；|τ| {:.3}",
+            force.y,
+            force.y / expect,
+            force.x,
+            force.z,
+            tau.length()
+        );
+        assert!(
+            force.y > 0.5 * expect && force.y < 2.0 * expect,
+            "浮力应 ≈ ρVg = {expect:.2} N（本档实测 1.65×），实测 {:+.2}（f = {force:?}）",
+            force.y
+        );
+        // 侧向假力：本分辨率下与浮力同量级（见上注）⇒ 只设**失控闸**，不当"近消"宣称。
+        assert!(
+            force.x.abs() < 4.0 * expect && force.z.abs() < 4.0 * expect,
+            "侧向假力失控（本档实测带 ≤2.1×ρVg）：{force:?}"
+        );
+        assert!(
+            tau.length() < 0.5 * expect * half,
+            "对称场景力矩应近消：{tau:?}"
+        );
+    }
+
+    /// #14 **确定性**（2b 在场）：同场景两跑，位置/密度/反作用**逐位一致**。
+    #[test]
+    fn boundary_coupling_is_deterministic() {
+        let digest = || {
+            let cfg = FluidConfig {
+                xsph_viscosity: 0.05,
+                ..FluidConfig::default()
+            };
+            let mut f = FluidSystem::new(cfg, Vec3::new(-0.15, 0.05, -0.15), [7, 7, 7], 0.05);
+            f.set_boundaries(&[0]);
+            let body = (
+                7u32,
+                Shape::Box {
+                    half: Vec3::splat(0.06),
+                },
+                still_pose(Vec3::new(0.0, 0.12, 0.0)),
+            );
+            for _ in 0..60 {
+                let _ = f.set_boundary_particles(std::slice::from_ref(&body));
+                f.step(1.0 / 60.0, &Tank);
+            }
+            (
+                f.positions()
+                    .iter()
+                    .flat_map(|p| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()])
+                    .collect::<Vec<u32>>(),
+                f.densities()
+                    .iter()
+                    .map(|d| d.to_bits())
+                    .collect::<Vec<u32>>(),
+                f.boundary_reactions()
+                    .iter()
+                    .flat_map(|r| [r.1.x.to_bits(), r.1.y.to_bits(), r.2.x.to_bits()])
+                    .collect::<Vec<u32>>(),
+                f.boundary_count(),
+            )
+        };
+        assert_eq!(digest(), digest(), "两次运行应逐位一致");
     }
 }

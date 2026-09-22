@@ -19,6 +19,11 @@ use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
 fn main() {
     let mut args = std::env::args().skip(1);
     let ticks: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(240);
+    // 追加 `2b` 参数 ⇒ 再跑一段 **Akinci 两层边界粒子（2b 双向耦合）** 对照：
+    // 同槽、同四密度，但体从**水面上方**落入，边界粒子每 tick 按体重建。
+    // （2b 下体不能**直接**落在已有水格上：边界粒子与流体粒子近同位 ⇒ ρ 爆 ⇒
+    //  CFL 把水抛出去。那是初值重叠，不是耦合失稳，见 `tests/fluid_boundary.rs` ②。）
+    let two_b = std::env::args().any(|a| a == "2b");
 
     let mut w = World::new(PhysConfig::default());
 
@@ -66,6 +71,7 @@ fn main() {
         densities
     );
     let y0 = 1.12f32;
+    let t_2a = std::time::Instant::now();
     for t in 1..=ticks {
         w.step();
         if t % 30 == 0 || t == ticks {
@@ -83,6 +89,7 @@ fn main() {
             println!("{line}");
         }
     }
+    let ms_2a = t_2a.elapsed().as_secs_f64() * 1e3 / ticks as f64;
 
     // ---- 判定表（浮/沉），与物理预期对照 ----
     let h = w.health();
@@ -124,6 +131,133 @@ fn main() {
             "✅ 演示通过：轻者浮、重者沉、吃水随密度单调（浮力+阻力按物理量纲生效）"
         } else {
             "❌ 演示不通过（见上表）"
+        }
+    );
+    println!("2a 档耗時 {ms_2a:.3} ms/tick");
+
+    if !two_b {
+        println!("（加参数 `2b` 可再跑 Akinci 两层边界粒子的双向耦合对照）");
+        return;
+    }
+
+    // ================= 2b：Akinci 两层边界粒子（刚体 → 液体，双向） =================
+    // 同一水槽/四密度；体从水面上方落入（干净开局）。浮力**只**来自边界粒子的压力
+    // 反作用（覆盖的体 2a 已让位）⇒ 这一档同时是"双向耦合能产生浮力"的演示。
+    let mut w2 = World::new(PhysConfig::default());
+    let mut vol2 =
+        vxl_phys_terrain::voxel::VoxelVolume::new(Vec3::new(-1.25, 0.0, -1.25), 0.5, 5, 3, 5);
+    vol2.fill_box(Vec3::new(-1.25, 0.0, -1.25), Vec3::new(1.25, 1.0, 1.25));
+    for ix in 0..5u32 {
+        for iz in 0..5u32 {
+            if ix == 2 && iz == 2 {
+                continue;
+            }
+            vol2.set(ix, 2, iz, true);
+        }
+    }
+    let voxel2 = w2.add_voxel(vol2);
+    let sys2 = vxl_phys_fluid::FluidSystem::new(
+        vxl_phys_fluid::FluidConfig::default(),
+        Vec3::new(-0.2, 1.05, -0.2),
+        [8, 8, 8],
+        0.05,
+    );
+    let fluid2 = w2.add_fluid_with_boundary_coupling(sys2, &[voxel2]);
+
+    let mut ids2 = Vec::new();
+    let y_start = 1.52f32; // 水面 ≈ 1.42、堰顶 1.50 ⇒ 体从水面之上落入
+    for (k, &rho) in densities.iter().enumerate() {
+        let id = w2.add_dynamic(
+            Shape::Box { half },
+            Vec3::new(xs[k], y_start, zs[k]),
+            Quat::IDENTITY,
+            rho,
+        );
+        ids2.push(id);
+    }
+    println!("----");
+    println!("2b（Akinci 两层边界粒子，双向耦合）：同槽同上四密度，起点 y = {y_start:.2}");
+    let t_2b = std::time::Instant::now();
+    for t in 1..=ticks {
+        w2.step();
+        if t % 60 == 0 || t == ticks {
+            let mut line = format!("t={t:3}:");
+            for (k, &id) in ids2.iter().enumerate() {
+                let p = w2.bodies.position[id as usize];
+                let v = w2.bodies.linvel[id as usize];
+                let wv = w2.bodies.angvel(id as usize);
+                line += &format!(
+                    "  ρ{:<4.0} y {:.3} |v| {:.2} |ω| {:.1}",
+                    densities[k],
+                    p.y,
+                    v.length(),
+                    wv.length()
+                );
+            }
+            println!("{line}");
+        }
+    }
+    let ms_2b = t_2b.elapsed().as_secs_f64() * 1e3 / ticks as f64;
+    let nb = w2.fluids()[fluid2].0.boundary_count();
+    let np = w2.fluids()[fluid2].0.len();
+    let h2 = w2.health();
+    println!("----");
+    println!("对照（末态吃水位 y；起点 2a {y0:.2} / 2b {y_start:.2}）：");
+    let mut ok_light = true;
+    let mut heavy_spike = false;
+    for (k, &id) in ids.iter().enumerate() {
+        let a = w.bodies.position[id as usize].y;
+        let b = w2.bodies.position[ids2[k] as usize].y;
+        let spin = w2.bodies.angvel(ids2[k] as usize).length();
+        if densities[k] < 1000.0 {
+            // 轻体：必须浮在水面（本档实测 ~1.24–1.28）。
+            ok_light &= b > 1.20;
+            println!(
+                "  ρ{:<4.0}  2a y {a:.3} | 2b y {b:.3}  浮 {}",
+                densities[k],
+                if b > 1.20 { "✅" } else { "❌" }
+            );
+        } else {
+            // 重体：**已知适用边界**（体 ≲ 2h 时离散挤压出尖峰 ⇒ 被推飞，M1-EXIT §4 记账），
+            // 不计入通过判据，但必须显式报出来（别把已知问题藏进"沉/浮"两个字）。
+            // "沉"必须是**沉到盆底附近**（1.03–1.20）：掉出世界（y ≪ 1）不算沉。
+            let sunk = (1.03..1.20).contains(&b);
+            heavy_spike |= !sunk;
+            println!(
+                "  ρ{:<4.0}  2a y {a:.3} | 2b y {b:.3}  {}（|ω| {:.1}）{}",
+                densities[k],
+                if sunk { "沉 ✅" } else { "未沉 ⚠️" },
+                spin,
+                if sunk {
+                    ""
+                } else {
+                    "  ← 已知边界：≲2h 重体被离散挤压尖峰推飞"
+                }
+            );
+        }
+    }
+    println!(
+        "  ρ700 吃水比 ρ300 深（2b）：{} | 健康：NaN {} | 深穿透 {}",
+        if w2.bodies.position[ids2[1] as usize].y < w2.bodies.position[ids2[0] as usize].y {
+            "✅"
+        } else {
+            "❌"
+        },
+        h2.nan_bodies,
+        h2.deep_penetrations
+    );
+    println!(
+        "造价：边界粒子 {nb} / 流体粒子 {np}（{:.2}×）| 耗时 2a {ms_2a:.3} ｜ 2b {ms_2b:.3} ms/tick",
+        nb as f32 / np as f32
+    );
+    println!(
+        "{}",
+        if ok_light && h2.nan_bodies == 0 && h2.deep_penetrations == 0 && !heavy_spike {
+            "✅ 2b 演示通过：浮力由边界粒子的压力**反作用**给出（覆盖体 2a 已让位，无叠加）"
+        } else if ok_light && h2.nan_bodies == 0 && h2.deep_penetrations == 0 {
+            "✅ 2b 轻体通过（浮力/吃水序正确）；⚠️ 重体见上表已知边界（≲2h 离散挤压尖峰，记账在 M1-EXIT §4）"
+        } else {
+            "❌ 2b 演示不通过（见上表）"
         }
     );
 }
