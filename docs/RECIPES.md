@@ -545,6 +545,10 @@ cargo run --release -p vxl-phys --example fluid_buoyancy -- 180 2b
 # 反作用是"两个大数之差"，单帧端点值可整号翻转（实测端点 −6.11× 而窗口均值是另一个值）。
 # 结论与表见 docs/OPEN-PROBLEMS.md P7。
 cargo test --release -p vxl-phys-fluid --test boundary_accuracy_probe -- --ignored --nocapture
+# 漂浮体**安分度**（仪表，只打印）：把反作用波动落到用户看得见的量上——
+# 轻盒漂稳后取窗口，给 y 峰峰 / |v| / |ω| / 力峰峰；含"层数扫描"（2/3/4/6 层）。
+# 实测结论：2b 档漂浮体 y 峰峰 19.9 mm（2a 对照 10.9）、|ω| 峰 1.22 rad/s；层数**非单调**（4 层更差）。
+cargo test --release -p vxl-phys --test float_quiet_probe -- --ignored --nocapture
 # T4 并行扩展（12 000 体碎片雨）：扩展倍数 + 串行/并行哈希逐位一致
 cargo run --release -p vxl-phys --example m1_islands
 # T6 8A 碰撞行（10×1200 静态格 + 10k tiles + 100 探针；验收 p95 ≤1.5ms）

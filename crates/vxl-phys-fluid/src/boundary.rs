@@ -57,23 +57,28 @@ impl BoundaryLattice {
 /// `Σ_b W` 比无限介质小 ⇒ `1/Σ_bW > s³`（实测平面两层 ≈1.4×）⇒ 旧口径**低估**了近壁补偿。
 /// 形状不受支持 ⇒ 空（facade 回退粗档，不静默造粒）。
 ///
-/// **层深按最薄半厚钳制**（`d_k = min((k+0.5)·s, (0.45+0.45k)·half_min)`）：
-/// 薄体（某向半厚 < 1.5s）若老实内移 1.5s，两侧层的粒子会**穿过体心互相穿透**
-/// ⇒ 体内堆积的边界粒子互相供密度 ⇒ ρ_b 虚高 ⇒ 体积力/反作用整片失真（实测
-/// 0.12 m 盒：假侧向力 51 N、浮力 5.9×ρVg，2026-09-22）。钳制是**几何约束**
-/// （粒子必须留在体内、不许互穿），不是新物理式；厚体（half_min ≥ 1.5s）钳制不生效，
-/// 层位仍是 0.5s/1.5s。
-pub fn lattice(shape: &Shape, s: f32, h: f32) -> BoundaryLattice {
+/// **层深**：`d_k = (k+½)·s`（k = 0..layers），整体按"**最深层 ≤ 0.95·half_min**"统一缩放
+/// （薄体钳制）。薄体若老实内移，两侧层的粒子会**穿过体心互穿** ⇒ 体内堆积 ⇒ 体积力失真
+/// （实测 0.12 m 盒：假侧向力 51 N、浮力 5.9×ρVg，2026-09-22）；钳制是**几何约束**
+/// （粒子必须留在体内、不许互穿），不是新物理式。厚体不生效（缩放系数 = 1）⇒ 层位就是 `(k+½)·s`。
+///
+/// `layers` 由 [`super::FluidConfig::boundary_layers`] 给（默认 **2**；2026-09-22 起可调，
+/// 用于实测"层数 ↑ ⇒ 反作用波动 ↓"这条候选）。
+pub fn lattice(shape: &Shape, s: f32, h: f32, layers: u32) -> BoundaryLattice {
     let s = s.max(1e-6);
+    let layers = layers.max(1) as usize;
     let mut surf = SurfaceLattice::default();
     surface(shape, s, &mut surf);
     let n0 = surf.points.len();
     let hm = min_half_extent(shape);
-    let mut pts = Vec::with_capacity(n0 * 2);
-    for k in 0..2 {
+    // 层深 = `min((k+½)·s, (0.45+0.45k)·half_min, 0.95·half_min)`：
+    // 前两项就是**单层钳制**的旧式（⇒ `layers = 2` 与旧行为**逐位一致**，已发布的读数不变），
+    // 第三项兜底（层数多时最深层不许越体心；多层会在 0.95·half_min 附近叠住，已知且可接受）。
+    let mut pts = Vec::with_capacity(n0 * layers);
+    for k in 0..layers {
         let want = (k as f32 + 0.5) * s;
         let cap = (0.45 + 0.45 * k as f32) * hm;
-        let d = want.min(cap).max(1e-6);
+        let d = want.min(cap).min(0.95 * hm).max(1e-6);
         for (p, n) in surf.points.iter().zip(surf.normals.iter()) {
             pts.push(*p - *n * d);
         }
@@ -348,7 +353,7 @@ mod tests {
     fn box_lattice_two_layers_inside() {
         let half = 0.06f32;
         let s = 0.05f32;
-        let l = lattice(&boxed(half), s, 2.0 * s);
+        let l = lattice(&boxed(half), s, 2.0 * s, 2);
         // 面内格数 = round(0.12/0.05) = 2 ⇒ 6 面 × 2×2 = 24 表面点。
         assert_eq!(l.n0, 24, "表面点数应 = 6×2×2");
         assert_eq!(l.len(), 48, "两层应翻倍");
@@ -382,7 +387,7 @@ mod tests {
     fn sphere_lattice_inside_shell() {
         let r = 0.2f32;
         let s = 0.05f32;
-        let l = lattice(&Shape::Sphere { radius: r }, s, 2.0 * s);
+        let l = lattice(&Shape::Sphere { radius: r }, s, 2.0 * s, 2);
         assert!(!l.is_empty());
         assert_eq!(l.len() % 2, 0);
         for p in &l.pts {
@@ -411,7 +416,7 @@ mod tests {
             },
         ];
         for sh in shapes {
-            let l = lattice(&sh, s, 2.0 * s);
+            let l = lattice(&sh, s, 2.0 * s, 2);
             assert!(!l.is_empty(), "应生成粒子：{sh:?}");
             assert_eq!(l.len() % 2, 0, "两层 ⇒ 偶数");
             let rr = sh.bounding_sphere_radius() + 1e-4;
@@ -437,7 +442,7 @@ mod tests {
                 half: Vec3::splat(0.1),
             },
         ] {
-            assert_eq!(lattice(&sh, s, 2.0 * s).len(), 0, "不支持：{sh:?}");
+            assert_eq!(lattice(&sh, s, 2.0 * s, 2).len(), 0, "不支持：{sh:?}");
         }
     }
 
@@ -453,8 +458,8 @@ mod tests {
                 radius: 0.09,
             },
         ] {
-            let a = lattice(&sh, s, 2.0 * s);
-            let b = lattice(&sh, s, 2.0 * s);
+            let a = lattice(&sh, s, 2.0 * s, 2);
+            let b = lattice(&sh, s, 2.0 * s, 2);
             assert_eq!(a, b, "两次生成应逐位一致：{sh:?}");
         }
     }

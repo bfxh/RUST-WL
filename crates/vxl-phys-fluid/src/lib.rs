@@ -78,6 +78,11 @@ pub struct FluidConfig {
     pub gamma_tait: f32,
     /// 每 tick 的子步数。
     pub substeps: u32,
+    /// **2b 边界粒子的层数**（默认 2；SPEC §4.8 的两层形态）。
+    /// 2026-09-22 起可调：实测用于"层数 ↑ ⇒ 反作用波动 ↓"这条候选
+    /// （波动会透传到体上——漂浮体 y 峰峰 19.9 mm、|ω| 峰峰 1.22 rad/s，见
+    /// `crates/vxl-phys/tests/float_quiet_probe.rs`）。
+    pub boundary_layers: u32,
     /// 重力（m/s²）。
     pub gravity: Vec3,
     /// CFL 限速：|v| ≤ frac·h/dt（防穿隧/防爆炸）。
@@ -102,6 +107,7 @@ impl Default for FluidConfig {
             sound_speed: 10.0,
             gamma_tait: 7.0,
             substeps: 4,
+            boundary_layers: 2,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             max_speed_frac: 0.4,
             artificial_viscosity: 1.0,
@@ -394,7 +400,8 @@ impl FluidSystem {
             let idx = match cache.iter().position(|(s, _)| *s == shape) {
                 Some(i) => i,
                 None => {
-                    let lat = boundary::lattice(&shape, self.spacing, self.h);
+                    let lat =
+                        boundary::lattice(&shape, self.spacing, self.h, self.cfg.boundary_layers);
                     if lat.is_empty() {
                         continue; // 不支持 ⇒ 不造粒、不缓存（回退粗档的信号）
                     }
