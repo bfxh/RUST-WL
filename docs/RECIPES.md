@@ -555,8 +555,13 @@ cargo run --release -p vxl-phys --example m1_islands
 cargo run --release -p vxl-phys --example m1_collision_row
 # T1 万级验收主体（10k 动力堆 600 tick）。⚠️ **必须带配方**：默认 `substeps=1` 是"延伸目标"、
 # 落在稳定区之外（实测沸腾：|v|max 77、494/600 tick 深穿透）；稳定区在 **substeps ≥ 8**。
-# 当前状态（2026-09-22，本代）：`16 4 8` = 干净 ✓（0 深穿透 tick）但**不睡**（5411/10001 体幅值在阈上）
-cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 0
+# 当前状态（2026-09-22 复查）：**不睡**（原配方末态 awake 9999；最优配置 9686，见 EXPERIMENTS）。
+# 参数序 = <iters> <substeps> <threads> <ticks> <shock> <stab>（后两个 2026-09-22 起显式可给）。
+# ⚠️ 原配方 `16 4 8` 是 substeps **4** 档：干净 ✓（0 深穿透 tick）但**有 14 体快体**（|v|max 10.17）；
+#   无快体的那一档是 substeps 8（|v|max 0.163）。两档各自逐位可复现，别混写。
+# ⚠️ `shock`/`stab` 压低缺口体但会**抬高 wake 率越过 SPEC §3 的 <1** ⇒ 别为了入睡打开它们。
+#   矩阵与三条结论见 EXPERIMENTS.md「万级入睡复查」。
+cargo run --release -p vxl-phys --example m1_pile -- 16 4 8 600 0 0
 ```
 
 ## 宽相研究资产（不在生产路径，ADR 0001）

@@ -7,8 +7,11 @@
 //!   ③ 入睡后 p50 显著低于活动期（接近零）——稳态不再耗预算。
 //!
 //! 运行：
-//!   cargo run --release -p vxl-phys --example m1_pile -- [iters] [substeps] [threads] [ticks] [shock]
-//! 默认：iters=16, substeps=1, threads=8, ticks=600, shock=0（与 m0_gates 压力场景同构）。
+//!   cargo run --release -p vxl-phys --example m1_pile -- [iters] [substeps] [threads] [ticks] [shock] [stab]
+//! 默认：iters=16, substeps=1, threads=8, ticks=600, shock=0, stab=0（与 m0_gates 压力场景同构）。
+//! `stab` = `PhysConfig::stabilization_iterations`（Rapier 式**无偏置末趟**，默认关；见
+//! `SESSION-2026-09-18-SLEEP.md` §4：对 2000 体大堆 入睡 1735→1960，但 125 体场景 KE 退化
+//! ⇒ 默认关、按需开）。**金样保真档配方 = substeps 8 + stab 2**。
 
 use std::time::Instant;
 
@@ -18,12 +21,13 @@ const SIDE: usize = 20;
 const LAYERS: usize = 25;
 const SPACING: f32 = 0.52;
 
-fn build(iters: u32, substeps: u32, threads: usize, shock: u32) -> World {
+fn build(iters: u32, substeps: u32, threads: usize, shock: u32, stab: u32) -> World {
     let cfg = PhysConfig {
         velocity_iterations: iters,
         substeps,
         threads,
         shock_iterations: shock,
+        stabilization_iterations: stab,
         ..PhysConfig::default()
     };
     let mut w = World::new(cfg);
@@ -54,11 +58,12 @@ fn main() {
     let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
     let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
     let shock: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let stab: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    let mut w = build(iters, substeps, threads, shock);
+    let mut w = build(iters, substeps, threads, shock, stab);
     let boxes = w.bodies.len();
     println!(
-        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock} | {ticks} tick"
+        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock} stab {stab} | {ticks} tick"
     );
     for _ in 0..10 {
         w.step();
@@ -184,6 +189,57 @@ fn main() {
     println!(
         "速度分布：未达睡眠阈(>0.04/0.05) {n_slow} 体 | 中速(>0.1/0.2) {n_mid} 体 | 快速(>0.5/1.0) {n_fast} 体 | |v|max {vmax:.3} |ω|max {wmax:.3}"
     );
+    // —— 诊断（2026-09-22 加）：残差**在哪**、离阈值**多远** ——
+    // ① |v| 直方图（对数带）：整体刚过阈 vs 少数拖尾；
+    // ② 按**高度三分位**统计缺口体：底层载重抖 vs 顶层还在沉/被挤出。
+    let mut bins = [0u32; 7];
+    let (mut ymin, mut ymax) = (f32::MAX, f32::MIN);
+    for i in 0..boxes {
+        let lin = w.bodies.linvel[i].length();
+        let ang = w.bodies.angvel(i).length();
+        let idx = if lin < 0.02 {
+            0
+        } else if lin < 0.04 {
+            1
+        } else if lin < 0.08 {
+            2
+        } else if lin < 0.16 {
+            3
+        } else if lin < 0.32 {
+            4
+        } else if lin < 1.0 {
+            5
+        } else {
+            6
+        };
+        if lin >= 0.04 || ang >= 0.05 {
+            bins[idx] += 1; // 只统计"离判据还差"的体（线速或角速任一超阈）
+        }
+        ymin = ymin.min(w.bodies.position[i].y);
+        ymax = ymax.max(w.bodies.position[i].y);
+    }
+    let span = (ymax - ymin).max(1e-6);
+    let (mut lo3, mut mid3, mut hi3) = (0u32, 0u32, 0u32);
+    for i in 0..boxes {
+        let lin = w.bodies.linvel[i].length();
+        let ang = w.bodies.angvel(i).length();
+        if lin < 0.04 && ang < 0.05 {
+            continue;
+        }
+        let yy = (w.bodies.position[i].y - ymin) / span;
+        if yy < 1.0 / 3.0 {
+            lo3 += 1;
+        } else if yy < 2.0 / 3.0 {
+            mid3 += 1;
+        } else {
+            hi3 += 1;
+        }
+    }
+    println!(
+        "  缺口 |v| 直方图：<0.02 {} | <0.04 {} | <0.08 {} | <0.16 {} | <0.32 {} | <1.0 {} | ≥1.0 {}",
+        bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]
+    );
+    println!("  缺口体高度三分位（y {ymin:.3}..{ymax:.3}）：底 {lo3} | 中 {mid3} | 顶 {hi3}");
 
     let slept = sleep_tick.map(|t| t < ticks).unwrap_or(false);
     let clean = h.nan_bodies == 0 && h.deep_penetrations == 0;
