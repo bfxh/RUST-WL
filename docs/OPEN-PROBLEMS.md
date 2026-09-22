@@ -1920,21 +1920,32 @@ M0 门禁 ✅、确定性域（ADR 0004）✅。
 
 ---
 
-## P8 — `rolling_probe` 的 `debug_assert` 与自身代码矛盾（**新**，2026-09-22 顺带发现）
+## P8 — `sat` 的面轴断言与自身契约矛盾 ✅ **已清（2026-09-22）**
 
-`crates/vxl-phys-narrow/src/lib.rs:1004`：
+`crates/vxl-phys-narrow/src/lib.rs` 的 `sat()` 里原文（T3 盒对快路径提交 `9883dbc` 引入）：
 ```rust
 debug_assert!(box_axes.is_some() || (na == 6 && nb == 6));
 ```
-圆柱碰撞体是 18 面多面体（`CYLINDER_SEGMENTS = 16` + 两端面）⇒ 该断言为假；
-但**紧接着的代码显式支持 `None` 分支**（`match box_axes { Some(_) => (6,6), None => (na, nb) }`）
-⇒ **断言与自己的契约矛盾**。触发场景：`cargo test -p vxl-phys --test rolling_probe`
-（圆柱在盒地板上滚动）。
+**为什么是错的**（分派侧查证）：盒对走 T3 专用路径、轴由 `(rot, half)` **直生**、**不填多面体**；
+圆柱/圆锥参与的对走通用分支、进 `sat` 前**已 `poly_*.fill`**（世界多面体缓存命中则用同 (体,多面体)
+的上一次填充）。圆柱是 **18 面**（`CYLINDER_SEGMENTS = 16` + 两端面）⇒ "非盒对且 6 面"这个条件
+**永远不成立**，而紧随其后的 `match box_axes { None => (na, nb) }` 明确要读 `na/nb` ⇒ 断言把自己的
+契约写反了。触发：`cargo test -p vxl-phys --test rolling_probe`（圆柱在盒地板上滚动）。
 
-**影响面**：`debug_assert` 在 release 被编译掉 ⇒ CI（`cargo test --workspace --release`）**不受影响**；
-**debug 档 `cargo test --workspace` 会红**（本任务门链走 release，故全绿）。
-**修法**：放宽/删除该断言（`None` 分支是正当路径），或把 T3 快路径的面轴计数契约写清楚。
-由 T3 快路径提交 `9883dbc` 引入；**不是 2b 引起的**（2b 不碰窄相；且无流体场景四哈希逐位不变）。
+**处置**（改断言、不删）：换成**真契约**并通过实测验证——
+```rust
+debug_assert!(box_axes.is_some() || (na > 0 && nb > 0), "通用路径的多面体必须已填：na={na}, nb={nb}");
+```
+它抓的是**真 bug**（"进了通用路径却没填多面体" ⇒ 轴表为空 ⇒ 静默出垃圾接触），而不是"圆柱不该来这儿"。
+
+**验证**：`cargo test --workspace`（**debug**，先前唯一红）⇒ **52 个测试目标全绿、零 panic**
+（新断言在整套场景里无误报 ⇒ 契约被实测钉住）；`cargo test --workspace --release` 全绿；
+`m0_gates` 三读数**逐位不变**（`0x6536fa72…` / `0x417be20a…`）——`debug_assert` 在 release 被编译掉
+⇒ **零性能影响**（T3 窄相峰值不受影响，无需重跑计时门）。
+
+**教训**：`debug_assert` 被 release 编译掉 ⇒ **CI 跑 release 时它会静默**（本次 CI 一直全绿、
+只有 `cargo test --workspace` 的 debug 档才暴露）⇒ 写"只有 debug 才看的门"时要有人跑 debug。
+
 
 ---
 

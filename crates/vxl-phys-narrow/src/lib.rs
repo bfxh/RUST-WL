@@ -1001,7 +1001,21 @@ impl DefaultNarrowPhase {
                 }
             }
         }
-        debug_assert!(box_axes.is_some() || (na == 6 && nb == 6));
+        // 契约（写清楚，因为原断言把它写反了）：**通用路径的多面体必须已填**
+        // （`na/nb` 即面轴条数）。分派侧保证这件事：盒对走 T3 专用路径、**不填**多面体
+        // （轴由 (rot, half) 直生）；圆柱/圆锥参与的对走通用分支，进 `sat` 前已
+        // `poly_a/poly_b.fill`（世界多面体缓存命中时用的是上一次同 (体, 多面体) 的填充，
+        // 长度同源）。⇒ 通用路径下 `na/nb` 恒 > 0；读它们当"面轴数"是对的。
+        // ⚠️ 原文是 `debug_assert!(box_axes.is_some() || (na == 6 && nb == 6))`——
+        // 第二个析取项与紧随其后的 `match box_axes { None => (na, nb) }` 自相矛盾：
+        // 圆柱是 **18 面**（`CYLINDER_SEGMENTS=16` + 两端面），盒×柱是正当组合。
+        // 实测（2026-09-22）：debug 档把 `tests/rolling_probe.rs` 打成 panic，
+        // 而 release 因 `debug_assert` 被编译掉**掩盖**了它（CI 跑 release ⇒ 全绿）。
+        // 现在断言的是真契约——"进了通用路径却没填多面体"才是要抓的 bug（会静默出垃圾接触）。
+        debug_assert!(
+            box_axes.is_some() || (na > 0 && nb > 0),
+            "通用路径的多面体必须已填：na={na}, nb={nb}"
+        );
         // 面轴计数：专用路径恒 6+6（体轴直生，未填多面体），通用路径读多面体。
         let (n_face_a, n_face_b) = match box_axes {
             Some(_) => (6usize, 6usize),
