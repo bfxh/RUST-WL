@@ -1938,16 +1938,22 @@ debug_assert!(box_axes.is_some() || (na == 6 && nb == 6));
 
 ---
 
-## P9 — `feat/solver-limits` 的 CI 预存红（**新**，2026-09-22 核）
+## P9 — `feat/solver-limits` 的 CI 预存红 ✅ **已清（2026-09-22，`8a80052` / run `35673664157` 全绿）**
 
 **两条静态门在 `ee12545` 之前就红**（`f14a9e6` / run `35669561181`、`35669181045` 同样红）——
 **与 2b 无关**：2b 的提交在 GCC/MSVC/Clang × x86_64、跨编译器确定性（含 aarch64/QEMU）、miri、
 loom、TSan、ASan、跨平台哈希比对上**全绿**（`gh run view 35672803307`）。
 
-| 门 | 现象 | 修法 |
+**处置**（两条都落地，`8a80052`）：
+
+| 门 | 现象 | 实际修法 |
 |---|---|---|
-| `静态 (依赖)` | `cargo deny` → `error[wildcard]`：`crates/vxl-phys-splat/Cargo.toml:8` 的 `vxl-phys-core = { path = "../vxl-phys-core" }` 缺版本 ⇒ 判为 wildcard（crates.io 不允许 path 依赖） | 改成 `{ workspace = true }`（其余 crate 同款；本机 `deps_lock.py` 抓不到，只有 CI 的 cargo-deny 抓） |
-| `静态 (文本/工作流/纪律)` | `zizmor --persona=regular .` 退出 13：`ref-version-mismatch`（钉的 SHA 与版本注释不符）。例：`ci.yml:383` 的 `taiki-e/install-action@3f74d7c… # v2` 而 tag `v2.87.12` 指向 `94c31af…`；`release.yml:99` 的 `actions/download-artifact@fa0a91b… # v4` vs tag `v4.1.8` | 把注释改成该 SHA 实际对应的 tag 版本（**只动注释、不动钉**），或把这两个 action 与 `dtolnay/rust-toolchain` 一起列入具名例外 |
+| `静态 (依赖)` | `cargo deny` → `error[wildcard]`：`crates/vxl-phys-splat/Cargo.toml:8` 的 `vxl-phys-core = { path = "../vxl-phys-core" }` 缺版本 ⇒ 判为 wildcard（crates.io 不允许 path 依赖） | 改成 `{ workspace = true }`（唯一写成裸 path 的 crate；Cargo.lock 逐字不变、machete 无未用依赖） |
+| `静态 (文本/工作流/纪律)` | `zizmor --persona=regular .` 退出 13：`ref-version-mismatch` 5 处 | **钉没问题**（`ls-remote` 核实：`3f74d7c…` 就是 `v2.87.12`、`fa0a91b…` 就是 `v4.1.8`）——是**注释在说移动标签**（`# v2`/`# v4` 已走到别处）⇒ 注释改成精确版本（`# v2.87.12` ×4、`# v4.1.8` ×1），**只动注释、不动钉**（零供应链变更） |
+
+**判据规则（记下来，下次直接照做）**：zizmor 要求**注释指向钉所在的那个 tag**——
+`actions/checkout@11d5960… # v4` 不被判，正因为它的钉恰好是 `v4` 标签的尖端（`v4` 与 `v4.4.0` 同提交）。
+
 
 ⚠️ **“合并前 CI 全绿”（`M1-EXIT.md` §2.3 的条件）当前不成立** ⇒ 先清这两条。
 ⚠️ **本机 `gate_all.sh` 全绿 ≠ CI 全绿**：它跑的是仓内自研门（`deps_lock.py` + 本地 typos 二进制），
