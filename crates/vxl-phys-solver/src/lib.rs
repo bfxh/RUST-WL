@@ -1907,6 +1907,14 @@ fn solve_island_group(
                     if vn.abs() >= hold_max_vn {
                         continue; // 真撞击/真分离：不碰
                     }
+                    // ⚠️ 目标 = **0**（不是 `rhs`）：投到 `rhs` 等于把"去穿透分离速度"加回去
+                    // ⇒ 实测比不开还差（默认路径 awake 7491 → 9756）。
+                    // 深穿透由**下面的深度守卫**处理：只在**浅接触**（`depth0 ≤ 0.05`）上安座，
+                    // 深穿透接触一概不碰、照常让求解器把它们推出来（首版无守卫 ⇒ 实测
+                    // 默认路径深穿透 5 tick / 0.295 m：把恢复速度一起冻掉了）。
+                    if p.depth0 > 0.05 {
+                        continue;
+                    }
                     let dl = -vn * m_eff * HOLD_OMEGA;
                     if dl != 0.0 {
                         let imp = normal * dl;

@@ -25,21 +25,28 @@ fn build(
     iters: u32,
     substeps: u32,
     threads: usize,
-    shock: u32,
-    stab: u32,
-    wake_gate_k: u32,
-    hold: u32,
+    shock: Option<u32>,
+    stab: Option<u32>,
+    wake_gate_k: Option<u32>,
+    hold: Option<u32>,
 ) -> World {
-    let cfg = PhysConfig {
+    let mut cfg = PhysConfig {
         velocity_iterations: iters,
         substeps,
         threads,
-        shock_iterations: shock,
-        stabilization_iterations: stab,
-        wake_gate_k,
-        settled_hold_iterations: hold,
+        // 不传 = 用配置默认（2026-09-22 起 shock 默认 2）；传 = 显式覆盖（0 = 关）。
+        shock_iterations: shock.unwrap_or(PhysConfig::default().shock_iterations),
+        stabilization_iterations: stab.unwrap_or(PhysConfig::default().stabilization_iterations),
+        // 不传 = **用配置默认值**（2026-09-22 起默认 8 / 4）；传 = 显式覆盖（可传 0 复现旧行为）。
         ..PhysConfig::default()
     };
+    // 显式覆盖（`None` = 保持默认；`Some(0)` = 关掉该机制）。
+    if let Some(k) = wake_gate_k {
+        cfg.wake_gate_k = k;
+    }
+    if let Some(h) = hold {
+        cfg.settled_hold_iterations = h;
+    }
     let mut w = World::new(cfg);
     w.add_heightfield(HeightField::flat(-8.0, -8.0, 17, 17, 1.0, 0.0));
     let off = (SIDE as f32 - 1.0) * 0.5 * SPACING;
@@ -67,15 +74,15 @@ fn main() {
     let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
     let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
     let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
-    let shock: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let stab: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let wake_gate_k: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let hold: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let shock: Option<u32> = args.next().and_then(|s| s.parse().ok());
+    let stab: Option<u32> = args.next().and_then(|s| s.parse().ok());
+    let wake_gate_k: Option<u32> = args.next().and_then(|s| s.parse().ok());
+    let hold: Option<u32> = args.next().and_then(|s| s.parse().ok());
 
     let mut w = build(iters, substeps, threads, shock, stab, wake_gate_k, hold);
     let boxes = w.bodies.len();
     println!(
-        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock} stab {stab} wakeK {wake_gate_k} hold {hold} | {ticks} tick"
+        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock:?} stab {stab:?} wakeK {wake_gate_k:?} hold {hold:?} | {ticks} tick"
     );
     for _ in 0..10 {
         w.step();
