@@ -12,6 +12,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod probe;
+
 /// GPU 后端统一入口。
 pub trait PhysGpuBackend: Send + Sync {
     fn name(&self) -> &'static str;

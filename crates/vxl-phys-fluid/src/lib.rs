@@ -294,6 +294,17 @@ impl UniformGrid {
     }
 }
 
+/// 邻域网格的**只读导出**（见 `FluidSystem::neighbor_grid`）：`start` 长 `total+1`、
+/// `items` 长 `n`；`min/inv/dims` 供调用方复算粒子所在格（与 CPU 同一公式）。
+#[derive(Clone, Copy, Debug)]
+pub struct NeighborGrid<'a> {
+    pub min: Vec3,
+    pub inv: f32,
+    pub dims: (u32, u32, u32),
+    pub start: &'a [u32],
+    pub items: &'a [u32],
+}
+
 /// WCSPH 粒子流体系统（SoA；零外部依赖）。
 pub struct FluidSystem {
     cfg: FluidConfig,
@@ -457,6 +468,21 @@ impl FluidSystem {
     /// 单粒质量（晶格标定结果；导出/审计用）。
     pub fn particle_mass(&self) -> f32 {
         self.mass
+    }
+
+    /// **邻域网格导出**（只读；GPU 后端与诊断用）。
+    ///
+    /// 语义：与 CPU 相位**同一张表**（计数排序：`start[c]..start[c+1]` = 格 c 的粒子、
+    /// 格内按**索引升序**）⇒ GPU 侧按同一序枚举邻域即可与 CPU **同求和序**
+    /// （这是 `docs/PLAN-gpu.md` §4 口径 A"能位级就位级"的前提）。
+    pub fn neighbor_grid(&self) -> NeighborGrid<'_> {
+        NeighborGrid {
+            min: self.grid.min,
+            inv: self.grid.inv,
+            dims: (self.grid.nx, self.grid.ny, self.grid.nz),
+            start: &self.grid.start,
+            items: &self.grid.items,
+        }
     }
 
     /// 流体粒子位置（前缀；不含边界粒子）。

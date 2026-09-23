@@ -3,6 +3,15 @@ name = "vxl-phys-gpu"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vxl_phys 专项模块（骨架，见 docs/SPEC.md）"
+description = "vxl_phys GPU 后端（§8）：wgpu 统一入口 + CPU 回退；M4 档（首个里程碑 = 密度+力相位）"
 
 [dependencies]
+# wgpu = 统一入口（Vulkan/Metal/DX12/WebGPU 由它自己选后端 ⇒ **不绑厂商**，SPEC §8）。
+# 版本钉死（本仓依赖纪律：钉版本 + 基线登记理由，见 scripts/deps-baseline.json）。
+wgpu = "27"
+# 本仓内部 crate：Vec3/几何与流体状态布局（GPU 后端要复用同一份表示）。
+vxl-phys-core = { workspace = true }
+
+[dev-dependencies]
+# 探针要用现有 CPU 流体做"苹果对苹果"对拍（同数学/同场景）；只进 dev ⇒ 不进发布依赖面。
+vxl-phys-fluid = { workspace = true }

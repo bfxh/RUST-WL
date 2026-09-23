@@ -1,9 +1,21 @@
 {
   "deps": {
+    "<root>·workspace": {
+      "wgpu": {
+        "why": "GPU 档（SPEC §8 / M4）的统一入口：Vulkan/Metal/DX12/WebGPU 由它在运行时自选 ⇒ **不绑单一厂商**，与骨架硬性要求一致（另需 CPU 回退且结果一致）。它是**本仓最大的一次依赖扩张**（+101 个传递 crate、冷构建 debug ≈31 s、需 nightly 的 rust-gpu 是另一条工具链问题），因此理由必须写实：① 只给 `vxl-phys-gpu` 用（引擎其它 crate 不依赖它 ⇒ CPU 档的依赖面不变）；② 首个里程碑（密度+力相位）要拿它与 CPU 对拍（同数学/同场景/同哈希口径），**在拿到加速比与一致性读数之前不扩面**；③ 版本钉死（`27`），靠本基线的 ratchet 与 `cargo-deny` 双守。",
+        "version": "27.0.1"
+      }
+    },
     "vxl-phys-core": {
       "loom": {
         "why": "并发原语的模型测试（见 crates/vxl-phys-core/tests/loom_primitives.rs）。只在 cfg(loom) 下编译进去、只服务「loom (并发原语)」那一门，不进任何发布构建；它同时带来 tracing 系与 windows-sys 的传递闭包（见本文件 lock_packages）。",
         "version": "0.7.2"
+      }
+    },
+    "vxl-phys-gpu": {
+      "wgpu": {
+        "why": "GPU 档（SPEC §8 / M4）的统一入口：Vulkan/Metal/DX12/WebGPU 由它在运行时自选 ⇒ **不绑单一厂商**，与骨架硬性要求一致（另需 CPU 回退且结果一致）。它是**本仓最大的一次依赖扩张**（+101 个传递 crate、冷构建 debug ≈31 s、需 nightly 的 rust-gpu 是另一条工具链问题），因此理由必须写实：① 只给 `vxl-phys-gpu` 用（引擎其它 crate 不依赖它 ⇒ CPU 档的依赖面不变）；② 首个里程碑（密度+力相位）要拿它与 CPU 对拍（同数学/同场景/同哈希口径），**在拿到加速比与一致性读数之前不扩面**；③ 版本钉死（`27`），靠本基线的 ratchet 与 `cargo-deny` 双守。",
+        "version": "27.0.1"
       }
     },
     "vxl-phys-replay": {
@@ -22,6 +34,50 @@
       "1.1.5"
     ],
     [
+      "android_system_properties",
+      "0.1.6"
+    ],
+    [
+      "arrayvec",
+      "0.7.8"
+    ],
+    [
+      "ash",
+      "0.38.0+1.3.281"
+    ],
+    [
+      "autocfg",
+      "1.5.1"
+    ],
+    [
+      "bit-set",
+      "0.8.0"
+    ],
+    [
+      "bit-vec",
+      "0.8.0"
+    ],
+    [
+      "bitflags",
+      "2.13.2"
+    ],
+    [
+      "block",
+      "0.1.6"
+    ],
+    [
+      "bumpalo",
+      "3.20.3"
+    ],
+    [
+      "bytemuck",
+      "1.25.2"
+    ],
+    [
+      "bytemuck_derive",
+      "1.12.1"
+    ],
+    [
       "cc",
       "1.4.5"
     ],
@@ -30,12 +86,156 @@
       "1.0.4"
     ],
     [
+      "cfg_aliases",
+      "0.2.2"
+    ],
+    [
+      "codespan-reporting",
+      "0.12.0"
+    ],
+    [
+      "core-foundation",
+      "0.10.1"
+    ],
+    [
+      "core-foundation-sys",
+      "0.8.7"
+    ],
+    [
+      "core-graphics-types",
+      "0.2.0"
+    ],
+    [
+      "crunchy",
+      "0.2.4"
+    ],
+    [
+      "document-features",
+      "0.2.12"
+    ],
+    [
+      "equivalent",
+      "1.0.2"
+    ],
+    [
       "find-msvc-tools",
       "0.1.12"
     ],
     [
+      "foldhash",
+      "0.1.5"
+    ],
+    [
+      "foldhash",
+      "0.2.0"
+    ],
+    [
+      "foreign-types",
+      "0.5.0"
+    ],
+    [
+      "foreign-types-macros",
+      "0.2.4"
+    ],
+    [
+      "foreign-types-shared",
+      "0.3.1"
+    ],
+    [
+      "futures-core",
+      "0.3.34"
+    ],
+    [
+      "futures-task",
+      "0.3.34"
+    ],
+    [
+      "futures-util",
+      "0.3.34"
+    ],
+    [
       "generator",
       "0.8.9"
+    ],
+    [
+      "gl_generator",
+      "0.14.0"
+    ],
+    [
+      "glow",
+      "0.16.0"
+    ],
+    [
+      "glutin_wgl_sys",
+      "0.6.1"
+    ],
+    [
+      "gpu-alloc",
+      "0.6.2"
+    ],
+    [
+      "gpu-alloc-types",
+      "0.3.1"
+    ],
+    [
+      "gpu-allocator",
+      "0.27.0"
+    ],
+    [
+      "gpu-descriptor",
+      "0.3.2"
+    ],
+    [
+      "gpu-descriptor-types",
+      "0.2.0"
+    ],
+    [
+      "half",
+      "2.7.1"
+    ],
+    [
+      "hashbrown",
+      "0.15.5"
+    ],
+    [
+      "hashbrown",
+      "0.16.1"
+    ],
+    [
+      "hashbrown",
+      "0.17.1"
+    ],
+    [
+      "hexf-parse",
+      "0.2.1"
+    ],
+    [
+      "indexmap",
+      "2.14.2"
+    ],
+    [
+      "jni-sys",
+      "0.3.1"
+    ],
+    [
+      "jni-sys",
+      "0.4.1"
+    ],
+    [
+      "jni-sys-macros",
+      "0.4.1"
+    ],
+    [
+      "js-sys",
+      "0.3.105"
+    ],
+    [
+      "khronos-egl",
+      "6.0.0"
+    ],
+    [
+      "khronos_api",
+      "3.1.0"
     ],
     [
       "lazy_static",
@@ -46,12 +246,32 @@
       "0.2.189"
     ],
     [
+      "libloading",
+      "0.8.9"
+    ],
+    [
+      "libm",
+      "0.2.16"
+    ],
+    [
+      "litrs",
+      "1.0.0"
+    ],
+    [
+      "lock_api",
+      "0.4.14"
+    ],
+    [
       "log",
       "0.4.34"
     ],
     [
       "loom",
       "0.7.2"
+    ],
+    [
+      "malloc_buf",
+      "0.0.6"
     ],
     [
       "matchers",
@@ -62,16 +282,92 @@
       "2.8.3"
     ],
     [
+      "metal",
+      "0.32.0"
+    ],
+    [
+      "naga",
+      "27.0.3"
+    ],
+    [
+      "ndk-sys",
+      "0.6.0+11769913"
+    ],
+    [
       "nu-ansi-term",
       "0.50.3"
+    ],
+    [
+      "num-traits",
+      "0.2.19"
+    ],
+    [
+      "objc",
+      "0.2.7"
     ],
     [
       "once_cell",
       "1.21.4"
     ],
     [
+      "ordered-float",
+      "5.5.0"
+    ],
+    [
+      "parking_lot",
+      "0.12.5"
+    ],
+    [
+      "parking_lot_core",
+      "0.9.12"
+    ],
+    [
+      "paste",
+      "1.0.15"
+    ],
+    [
       "pin-project-lite",
       "0.2.17"
+    ],
+    [
+      "pkg-config",
+      "0.3.34"
+    ],
+    [
+      "portable-atomic",
+      "1.15.0"
+    ],
+    [
+      "portable-atomic-util",
+      "0.2.8"
+    ],
+    [
+      "presser",
+      "0.3.1"
+    ],
+    [
+      "proc-macro2",
+      "1.0.107"
+    ],
+    [
+      "profiling",
+      "1.0.18"
+    ],
+    [
+      "quote",
+      "1.0.47"
+    ],
+    [
+      "range-alloc",
+      "0.1.5"
+    ],
+    [
+      "raw-window-handle",
+      "0.6.2"
+    ],
+    [
+      "redox_syscall",
+      "0.5.18"
     ],
     [
       "regex-automata",
@@ -82,12 +378,36 @@
       "0.8.11"
     ],
     [
+      "renderdoc-sys",
+      "1.1.0"
+    ],
+    [
+      "rustc-hash",
+      "1.1.0"
+    ],
+    [
       "rustversion",
       "1.0.23"
     ],
     [
       "scoped-tls",
       "1.0.1"
+    ],
+    [
+      "scopeguard",
+      "1.2.0"
+    ],
+    [
+      "serde",
+      "1.0.229"
+    ],
+    [
+      "serde_core",
+      "1.0.229"
+    ],
+    [
+      "serde_derive",
+      "1.0.229"
     ],
     [
       "sharded-slab",
@@ -98,8 +418,52 @@
       "2.0.1"
     ],
     [
+      "slab",
+      "0.4.12"
+    ],
+    [
+      "slotmap",
+      "1.1.1"
+    ],
+    [
       "smallvec",
       "1.16.1"
+    ],
+    [
+      "spirv",
+      "0.3.0+sdk-1.3.268.0"
+    ],
+    [
+      "static_assertions",
+      "1.1.0"
+    ],
+    [
+      "syn",
+      "2.0.119"
+    ],
+    [
+      "syn",
+      "3.0.6"
+    ],
+    [
+      "termcolor",
+      "1.4.1"
+    ],
+    [
+      "thiserror",
+      "1.0.69"
+    ],
+    [
+      "thiserror",
+      "2.0.20"
+    ],
+    [
+      "thiserror-impl",
+      "1.0.69"
+    ],
+    [
+      "thiserror-impl",
+      "2.0.20"
     ],
     [
       "thread_local",
@@ -122,8 +486,20 @@
       "0.3.23"
     ],
     [
+      "unicode-ident",
+      "1.0.26"
+    ],
+    [
+      "unicode-width",
+      "0.2.2"
+    ],
+    [
       "valuable",
       "0.1.1"
+    ],
+    [
+      "version_check",
+      "0.9.5"
     ],
     [
       "vxl-phys",
@@ -206,20 +582,148 @@
       "0.1.0"
     ],
     [
+      "wasm-bindgen",
+      "0.2.128"
+    ],
+    [
+      "wasm-bindgen-futures",
+      "0.4.78"
+    ],
+    [
+      "wasm-bindgen-macro",
+      "0.2.128"
+    ],
+    [
+      "wasm-bindgen-macro-support",
+      "0.2.128"
+    ],
+    [
+      "wasm-bindgen-shared",
+      "0.2.128"
+    ],
+    [
+      "web-sys",
+      "0.3.105"
+    ],
+    [
+      "wgpu",
+      "27.0.1"
+    ],
+    [
+      "wgpu-core",
+      "27.0.3"
+    ],
+    [
+      "wgpu-core-deps-apple",
+      "27.0.0"
+    ],
+    [
+      "wgpu-core-deps-emscripten",
+      "27.0.0"
+    ],
+    [
+      "wgpu-core-deps-windows-linux-android",
+      "27.0.0"
+    ],
+    [
+      "wgpu-hal",
+      "27.0.4"
+    ],
+    [
+      "wgpu-types",
+      "27.0.1"
+    ],
+    [
+      "winapi-util",
+      "0.1.11"
+    ],
+    [
+      "windows",
+      "0.58.0"
+    ],
+    [
+      "windows-core",
+      "0.58.0"
+    ],
+    [
+      "windows-implement",
+      "0.58.0"
+    ],
+    [
+      "windows-interface",
+      "0.58.0"
+    ],
+    [
       "windows-link",
       "0.2.1"
+    ],
+    [
+      "windows-result",
+      "0.2.0"
     ],
     [
       "windows-result",
       "0.4.1"
     ],
     [
+      "windows-strings",
+      "0.1.0"
+    ],
+    [
       "windows-sys",
       "0.61.2"
     ],
     [
+      "windows-targets",
+      "0.52.6"
+    ],
+    [
+      "windows_aarch64_gnullvm",
+      "0.52.6"
+    ],
+    [
+      "windows_aarch64_msvc",
+      "0.52.6"
+    ],
+    [
+      "windows_i686_gnu",
+      "0.52.6"
+    ],
+    [
+      "windows_i686_gnullvm",
+      "0.52.6"
+    ],
+    [
+      "windows_i686_msvc",
+      "0.52.6"
+    ],
+    [
+      "windows_x86_64_gnu",
+      "0.52.6"
+    ],
+    [
+      "windows_x86_64_gnullvm",
+      "0.52.6"
+    ],
+    [
+      "windows_x86_64_msvc",
+      "0.52.6"
+    ],
+    [
+      "xml-rs",
+      "0.8.29"
+    ],
+    [
       "xxhash-rust",
       "0.8.18"
+    ],
+    [
+      "zerocopy",
+      "0.8.57"
+    ],
+    [
+      "zerocopy-derive",
+      "0.8.57"
     ]
   ]
 }

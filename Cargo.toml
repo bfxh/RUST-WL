@@ -43,6 +43,9 @@ vxl-phys-integrate = { version = "0.1.0", path = "crates/vxl-phys-integrate" }
 vxl-phys-field = { version = "0.1.0", path = "crates/vxl-phys-field" }
 vxl-phys-fluid = { version = "0.1.0", path = "crates/vxl-phys-fluid" }
 vxl-phys-terrain = { version = "0.1.0", path = "crates/vxl-phys-terrain" }
+# GPU 档（§8/M4）：统一入口 wgpu（Vulkan/Metal/DX12/WebGPU 由它自选 ⇒ **不绑厂商**）。
+# 钉版本 + 基线登记理由见 scripts/deps-baseline.json。
+wgpu = "27"
 vxl-phys-splat = { version = "0.1.0", path = "crates/vxl-phys-splat" }
 vxl-phys-replay = { version = "0.1.0", path = "crates/vxl-phys-replay" }
 
