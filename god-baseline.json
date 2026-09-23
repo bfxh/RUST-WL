@@ -395,9 +395,9 @@
   "max_type_members": 4
  },
  "crates/vxl-phys-narrow/src/sat.rs": {
-  "file_lines": 421,
-  "max_fn_lines": 178,
-  "max_type_members": 6
+  "file_lines": 444,
+  "max_fn_lines": 74,
+  "max_type_members": 10
  },
  "crates/vxl-phys-narrow/src/simd.rs": {
   "file_lines": 388,

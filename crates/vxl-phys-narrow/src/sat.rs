@@ -5,6 +5,14 @@ use super::*;
 type BoxAxes = Option<([Vec3; 3], [Vec3; 3])>;
 
 impl DefaultNarrowPhase {
+    /// 盒对体轴 `(a, b)`：两侧都置了才走专用路径（盒×盒）。
+    fn box_axes(&self) -> BoxAxes {
+        match (self.box_axes_a, self.box_axes_b) {
+            (Some(aa), Some(ab)) => Some((aa, ab)),
+            _ => None,
+        }
+    }
+
     /// 参考面：与「ref → incident」方向最对齐的面（盒对读体轴、通用读多面体）。
     fn select_ref_face(
         &self,
@@ -191,21 +199,8 @@ impl DefaultNarrowPhase {
         true
     }
 
-    /// SAT：双侧分离判定，返回 (分离距离 ≤ skin, 轴 a→b, 来源)。
-    ///
-    /// 对每根轴同时测两个方向（A 在负侧 / B 在负侧），取较大分离度；
-    /// 法线统一取向为 a→b。此前单侧公式的取向错误会造成深度失真（能量泵）。
-    pub(crate) fn sat(&mut self, _hint: Vec3) -> Option<(f32, Vec3, AxisSrc)> {
-        let na = self.poly_a.face_normal.len();
-        let nb = self.poly_b.face_normal.len();
-        self.axes.clear();
-        // 轴表：盒对专用路径由体轴直生（面 6 轴 + 棱叉积 9 轴，顺序与通用
-        // 路径逐条对应——面序 [±X,±Y,±Z]、棱序 [+Y,+Z,+X]×[+Y,+Z,+X]，后者由
-        // polytope 测试钉死）；其余形状读多面体。
-        let box_axes = match (self.box_axes_a, self.box_axes_b) {
-            (Some(aa), Some(ab)) => Some((aa, ab)),
-            _ => None,
-        };
+    /// 分离轴表：盒对由体轴直生（面 6 轴 + 棱叉积 9 轴），其余读多面体。
+    fn build_axes(&mut self, box_axes: BoxAxes, na: usize, nb: usize) {
         if let Some((aa, ab)) = box_axes {
             for f in &BOX_FACES {
                 self.axes.push(face_normal_of(&aa, f.0));
@@ -241,6 +236,104 @@ impl DefaultNarrowPhase {
                 }
             }
         }
+    }
+
+    /// 盒对快路径：SIMD 4 轴并行扫描；`None` = 该路径不适用（落到通用标量扫描）。
+    fn box_pair_scan(
+        &self,
+        box_axes: BoxAxes,
+        n_face_a: usize,
+        n_face_b: usize,
+    ) -> Option<(f32, Vec3, AxisSrc)> {
+        let (aa, ab) = box_axes?;
+        let (ha, pa) = self.box_a.expect("盒对快路径必置 box_a");
+        let (hb, pb) = self.box_b.expect("盒对快路径必置 box_b");
+        let scanned = simd::sat_scan(&self.axes, ha, &aa, pa, hb, &ab, pb, self.skin);
+        scanned.map(|(sep, n, idx)| {
+            let src = if idx < n_face_a {
+                AxisSrc::FaceA
+            } else if idx < n_face_a + n_face_b {
+                AxisSrc::FaceB
+            } else {
+                AxisSrc::Edge
+            };
+            (sep, n, src)
+        })
+    }
+
+    /// 单轴投影区间 `(min_a, max_a, min_b, max_b)`：盒对走 T3 extents 公式，其余逐顶点。
+    fn axis_extents(&self, n0: Vec3, box_axes: BoxAxes) -> (f32, f32, f32, f32) {
+        let mut min_a = f32::MAX;
+        let mut max_a = f32::MIN;
+        let mut min_b = f32::MAX;
+        let mut max_b = f32::MIN;
+        // T3 快路径：盒对用 extents 投影公式（面法线 [0]/[2]/[4] 即体轴，
+        // 与逐顶点 min/max 数学等价），轴序/取向/来源分类与通用路径同。
+        if let (Some((ha, pa)), Some((hb, pb)), Some((aa, ab))) = (self.box_a, self.box_b, box_axes)
+        {
+            let ra = ha.x * aa[0].dot(n0).abs()
+                + ha.y * aa[1].dot(n0).abs()
+                + ha.z * aa[2].dot(n0).abs();
+            let rb = hb.x * ab[0].dot(n0).abs()
+                + hb.y * ab[1].dot(n0).abs()
+                + hb.z * ab[2].dot(n0).abs();
+            let ca = pa.dot(n0);
+            let cb = pb.dot(n0);
+            min_a = ca - ra;
+            max_a = ca + ra;
+            min_b = cb - rb;
+            max_b = cb + rb;
+        } else if let (Some((ha, pa)), Some((hb, pb))) = (self.box_a, self.box_b) {
+            let ax = &self.poly_a.face_normal;
+            let bx = &self.poly_b.face_normal;
+            let ra = ha.x * ax[0].dot(n0).abs()
+                + ha.y * ax[2].dot(n0).abs()
+                + ha.z * ax[4].dot(n0).abs();
+            let rb = hb.x * bx[0].dot(n0).abs()
+                + hb.y * bx[2].dot(n0).abs()
+                + hb.z * bx[4].dot(n0).abs();
+            let ca = pa.dot(n0);
+            let cb = pb.dot(n0);
+            min_a = ca - ra;
+            max_a = ca + ra;
+            min_b = cb - rb;
+            max_b = cb + rb;
+        } else {
+            for &v in &self.poly_a.verts {
+                let d = v.dot(n0);
+                if d < min_a {
+                    min_a = d;
+                }
+                if d > max_a {
+                    max_a = d;
+                }
+            }
+            for &v in &self.poly_b.verts {
+                let d = v.dot(n0);
+                if d < min_b {
+                    min_b = d;
+                }
+                if d > max_b {
+                    max_b = d;
+                }
+            }
+        }
+        (min_a, max_a, min_b, max_b)
+    }
+
+    /// SAT：双侧分离判定，返回 (分离距离 ≤ skin, 轴 a→b, 来源)。
+    ///
+    /// 对每根轴同时测两个方向（A 在负侧 / B 在负侧），取较大分离度；
+    /// 法线统一取向为 a→b。此前单侧公式的取向错误会造成深度失真（能量泵）。
+    pub(crate) fn sat(&mut self, _hint: Vec3) -> Option<(f32, Vec3, AxisSrc)> {
+        let na = self.poly_a.face_normal.len();
+        let nb = self.poly_b.face_normal.len();
+        self.axes.clear();
+        // 轴表：盒对专用路径由体轴直生（面 6 轴 + 棱叉积 9 轴，顺序与通用
+        // 路径逐条对应——面序 [±X,±Y,±Z]、棱序 [+Y,+Z,+X]×[+Y,+Z,+X]，后者由
+        // polytope 测试钉死）；其余形状读多面体。
+        let box_axes = self.box_axes();
+        self.build_axes(box_axes, na, nb);
         // 契约（写清楚，因为原断言把它写反了）：**通用路径的多面体必须已填**
         // （`na/nb` 即面轴条数）。分派侧保证这件事：盒对走 T3 专用路径、**不填**多面体
         // （轴由 (rot, half) 直生）；圆柱/圆锥参与的对走通用分支，进 `sat` 前已
@@ -266,20 +359,8 @@ impl DefaultNarrowPhase {
         // `simd::tests::simd_matches_scalar_bitwise` 逐位对照守门。
         // 注：曾试「面轴/棱轴分段扫描（分离时跳过棱轴构建）」——实测**更慢**
         // （窄相峰 26.51 → 28.79，棱轴构建不是瓶颈、分段徒增重入）⇒ 已回退。
-        if let Some((aa, ab)) = box_axes {
-            let (ha, pa) = self.box_a.expect("盒对快路径必置 box_a");
-            let (hb, pb) = self.box_b.expect("盒对快路径必置 box_b");
-            let scanned = simd::sat_scan(&self.axes, ha, &aa, pa, hb, &ab, pb, self.skin);
-            return scanned.map(|(sep, n, idx)| {
-                let src = if idx < n_face_a {
-                    AxisSrc::FaceA
-                } else if idx < n_face_a + n_face_b {
-                    AxisSrc::FaceB
-                } else {
-                    AxisSrc::Edge
-                };
-                (sep, n, src)
-            });
+        if let Some(r) = self.box_pair_scan(box_axes, n_face_a, n_face_b) {
+            return Some(r);
         }
         // ===== 非盒对（球/圆柱/高度场参与）：通用标量扫描 =====
         let mut best = f32::MIN;
@@ -289,62 +370,7 @@ impl DefaultNarrowPhase {
             if n0.length_squared() < 0.5 {
                 continue;
             }
-            let mut min_a = f32::MAX;
-            let mut max_a = f32::MIN;
-            let mut min_b = f32::MAX;
-            let mut max_b = f32::MIN;
-            // T3 快路径：盒对用 extents 投影公式（面法线 [0]/[2]/[4] 即体轴，
-            // 与逐顶点 min/max 数学等价），轴序/取向/来源分类与通用路径同。
-            if let (Some((ha, pa)), Some((hb, pb)), Some((aa, ab))) =
-                (self.box_a, self.box_b, box_axes)
-            {
-                let ra = ha.x * aa[0].dot(n0).abs()
-                    + ha.y * aa[1].dot(n0).abs()
-                    + ha.z * aa[2].dot(n0).abs();
-                let rb = hb.x * ab[0].dot(n0).abs()
-                    + hb.y * ab[1].dot(n0).abs()
-                    + hb.z * ab[2].dot(n0).abs();
-                let ca = pa.dot(n0);
-                let cb = pb.dot(n0);
-                min_a = ca - ra;
-                max_a = ca + ra;
-                min_b = cb - rb;
-                max_b = cb + rb;
-            } else if let (Some((ha, pa)), Some((hb, pb))) = (self.box_a, self.box_b) {
-                let ax = &self.poly_a.face_normal;
-                let bx = &self.poly_b.face_normal;
-                let ra = ha.x * ax[0].dot(n0).abs()
-                    + ha.y * ax[2].dot(n0).abs()
-                    + ha.z * ax[4].dot(n0).abs();
-                let rb = hb.x * bx[0].dot(n0).abs()
-                    + hb.y * bx[2].dot(n0).abs()
-                    + hb.z * bx[4].dot(n0).abs();
-                let ca = pa.dot(n0);
-                let cb = pb.dot(n0);
-                min_a = ca - ra;
-                max_a = ca + ra;
-                min_b = cb - rb;
-                max_b = cb + rb;
-            } else {
-                for &v in &self.poly_a.verts {
-                    let d = v.dot(n0);
-                    if d < min_a {
-                        min_a = d;
-                    }
-                    if d > max_a {
-                        max_a = d;
-                    }
-                }
-                for &v in &self.poly_b.verts {
-                    let d = v.dot(n0);
-                    if d < min_b {
-                        min_b = d;
-                    }
-                    if d > max_b {
-                        max_b = d;
-                    }
-                }
-            }
+            let (min_a, max_a, min_b, max_b) = self.axis_extents(n0, box_axes);
             // 两个分离方向：A 在负侧（n 指向 a→b）或 B 在负侧（翻转）。
             let sep1 = min_b - max_a;
             let sep2 = min_a - max_b;
@@ -382,10 +408,7 @@ impl DefaultNarrowPhase {
         // 面轴来源：盒对专用路径（体轴直生，免多面体填充）或通用多面体。
         // 两者给出的面法线序列逐位相同（BOX_FACES 顺序 = 多面体面序，
         // ±v 精确），故参考/入射面选择与平局分解不变。
-        let box_axes = match (self.box_axes_a, self.box_axes_b) {
-            (Some(aa), Some(ab)) => Some((aa, ab)),
-            _ => None,
-        };
+        let box_axes = self.box_axes();
         let (ref_face_idx, n_ref) = self.select_ref_face(ref_is_a, dir_to_incident, box_axes);
         // 参考面世界顶点入 scratch（含全局基准号，供侧平面特征号复用）。
         let ref_base = self.collect_ref_verts(box_axes, ref_is_a, ref_face_idx);
