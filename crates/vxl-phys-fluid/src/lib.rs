@@ -131,6 +131,12 @@ const GRID_MAX_BINS: usize = 1 << 20;
 
 /// 均匀网格：格边 = h（或粗化后），27 邻域。
 /// **格内序 = 登记序 = 粒子索引序** —— 确定性求和的根。
+///
+/// **存储 = 计数排序**（2026-09-23，规模档第二刀）：`items` 是"按格分组、格内按索引序"的
+/// 紧凑 `u32` 数组，`start` 是每格起点（长度 total+1）。相对旧的 `Vec<Vec<u32>>`：
+/// ① 免掉每格一次 `Vec` 的分配/增长/清空（30 万粒档实测重建 25.8 ms ⇒ 换后见 §6.2）；
+/// ② 邻居遍历变成**连续切片扫描**（旧版是 27 条指针链各自追堆块）⇒ 缓存友好。
+/// **逐位一致**：散射按粒子**索引升序**写入 ⇒ 每格内序与旧实现（同样索引序 push）**相同**。
 #[derive(Default)]
 struct UniformGrid {
     bin: f32,
@@ -139,17 +145,24 @@ struct UniformGrid {
     nx: u32,
     ny: u32,
     nz: u32,
-    bins: Vec<Vec<u32>>,
+    /// 按格分组的粒子索引（格内索引升序）。
+    items: Vec<u32>,
+    /// 每格起点（`start[c]..start[c+1]` = 格 c 的粒子）；长度 = 格数 + 1。
+    start: Vec<u32>,
+    /// 计数 scratch（复用，免每帧分配）。
+    counts: Vec<u32>,
 }
 
 impl UniformGrid {
     fn rebuild(&mut self, pos: &[Vec3], h: f32) {
-        self.bins.clear();
         let n = pos.len();
         if n == 0 {
             self.nx = 0;
             self.ny = 0;
             self.nz = 0;
+            self.items.clear();
+            self.start.clear();
+            self.start.push(0);
             return;
         }
         let mut lo = pos[0];
@@ -179,12 +192,37 @@ impl UniformGrid {
         self.ny = dims[1];
         self.nz = dims[2];
         let total = self.nx as usize * self.ny as usize * self.nz as usize;
-        self.bins.resize_with(total, Vec::new);
-        for (i, p) in pos.iter().enumerate() {
-            let (bx, by, bz) = self.bin_of(*p);
-            let idx = (bx * self.ny + by) * self.nz + bz;
-            self.bins[idx as usize].push(i as u32);
+        // —— 计数排序（两遍扫 + 前缀和；无每格分配）——
+        self.counts.clear();
+        self.counts.resize(total + 1, 0);
+        for p in pos {
+            let c = self.bin_index_of(*p, total);
+            self.counts[c + 1] += 1;
         }
+        for c in 0..total {
+            self.counts[c + 1] += self.counts[c];
+        }
+        self.start.clear();
+        self.start.extend_from_slice(&self.counts);
+        self.items.clear();
+        self.items.resize(n, 0);
+        for (i, p) in pos.iter().enumerate() {
+            let c = self.bin_index_of(*p, total);
+            let slot = self.counts[c] as usize;
+            self.items[slot] = i as u32;
+            self.counts[c] += 1; // 游标：索引升序写入 ⇒ 格内序不变
+        }
+    }
+
+    /// 粒子所在格的**线性下标**（钳到网格内；`total` 由调用方给以省一次乘）。
+    #[inline]
+    fn bin_index_of(&self, p: Vec3, total: usize) -> usize {
+        let f = |o: f32, v: f32, n: u32| -> u32 {
+            (((v - o) * self.inv).floor().max(0.0) as u32).min(n - 1)
+        };
+        let idx = (f(self.min.x, p.x, self.nx) * self.ny + f(self.min.y, p.y, self.ny)) * self.nz
+            + f(self.min.z, p.z, self.nz);
+        (idx as usize).min(total.saturating_sub(1))
     }
 
     /// 粒子所在格坐标（钳到网格内）。
@@ -198,6 +236,14 @@ impl UniformGrid {
             f(self.min.y, p.y, self.ny),
             f(self.min.z, p.z, self.nz),
         )
+    }
+
+    /// 格 `c` 的粒子切片（格内索引升序）。
+    #[inline]
+    fn bin_items(&self, c: usize) -> &[u32] {
+        let a = self.start[c] as usize;
+        let b = self.start[c + 1] as usize;
+        &self.items[a..b]
     }
 
     /// 邻域公共体（**自由函数形态**，供并行相位在分块闭包里调用）：粒子 `i` 的
@@ -231,7 +277,7 @@ impl UniformGrid {
                         continue;
                     }
                     let idx = ((x as u32 * ny + y as u32) * nz + z as u32) as usize;
-                    for &j in &self.bins[idx] {
+                    for &j in self.bin_items(idx) {
                         let j = j as usize;
                         if j == i {
                             continue;
@@ -1179,7 +1225,7 @@ impl FluidSystem {
 ///   本实现**不编造换算常数**（耦合侧用"密度 + 流速"算阻力即可，别依赖这个字段）。
 impl MediumField for FluidSystem {
     fn sample(&self, x: Vec3) -> MediumSample {
-        if self.pos.is_empty() || self.grid.bins.is_empty() || self.grid.nz == 0 {
+        if self.pos.is_empty() || self.grid.items.is_empty() || self.grid.nz == 0 {
             return MediumSample::VACUUM;
         }
         let (bx, by, bz) = self.grid.bin_of(x);
@@ -1201,7 +1247,7 @@ impl MediumField for FluidSystem {
                     }
                     let idx =
                         ((ix as usize) * ny as usize + iy as usize) * nz as usize + iz as usize;
-                    for &j in &self.grid.bins[idx] {
+                    for &j in self.grid.bin_items(idx) {
                         let j = j as usize;
                         // **只认流体粒子**：本方法答的是"此处流体如何"，边界粒子（2b）
                         // 是固体侧的代表粒子，计进来会把"体内部"读成"满水位"
