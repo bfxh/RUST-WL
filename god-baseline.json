@@ -570,8 +570,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/dam_break.rs": {
-  "file_lines": 139,
-  "max_fn_lines": 122,
+  "file_lines": 148,
+  "max_fn_lines": 101,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/determinism.rs": {
@@ -680,8 +680,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/voxel_rest_probe.rs": {
-  "file_lines": 159,
-  "max_fn_lines": 129,
+  "file_lines": 152,
+  "max_fn_lines": 102,
   "max_type_members": 0
  },
  "crates/vxl-phys/src/arenas.rs": {

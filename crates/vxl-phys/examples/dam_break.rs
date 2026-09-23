@@ -14,6 +14,36 @@ use vxl_phys_core::{PhysConfig, Vec3};
 
 const VERSION: u32 = 3;
 
+/// 体素占据位图（x-major 线性序，每格 1 bit）。
+fn write_voxel_bits(f: &mut impl Write, v: &vxl_phys_terrain::voxel::VoxelVolume) {
+    let (nx, ny, nz) = v.dims();
+    let mut bits: Vec<u8> = vec![0u8; ((nx * ny * nz) as usize).div_ceil(8)];
+    for ix in 0..nx {
+        for iy in 0..ny {
+            for iz in 0..nz {
+                if v.get(ix, iy, iz) {
+                    let idx = (ix * ny * nz + iy * nz + iz) as usize;
+                    bits[idx / 8] |= 1 << (idx % 8);
+                }
+            }
+        }
+    }
+    f.write_all(&bits).unwrap();
+}
+
+/// 帧尾流体节：每系统「粒子数 + 逐粒子 xyz」。
+fn write_fluid_frame(f: &mut impl Write, w: &World) {
+    for (sys, _) in w.fluids() {
+        let ps = sys.positions();
+        f.write_all(&(ps.len() as u32).to_le_bytes()).unwrap();
+        for p in ps {
+            for v in [p.x, p.y, p.z] {
+                f.write_all(&v.to_le_bytes()).unwrap();
+            }
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let ticks: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(400);
@@ -90,29 +120,8 @@ fn main() {
         f.write_all(&(t as u32).to_le_bytes()).unwrap();
         f.write_all(&(ms as f32).to_le_bytes()).unwrap();
         f.write_all(&0u32.to_le_bytes()).unwrap(); // 刚体 0 个
-        let v = w.providers().voxel(voxel_id).unwrap();
-        let (nx, ny, nz) = v.dims();
-        let mut bits: Vec<u8> = vec![0u8; ((nx * ny * nz) as usize).div_ceil(8)];
-        for ix in 0..nx {
-            for iy in 0..ny {
-                for iz in 0..nz {
-                    if v.get(ix, iy, iz) {
-                        let idx = (ix * ny * nz + iy * nz + iz) as usize;
-                        bits[idx / 8] |= 1 << (idx % 8);
-                    }
-                }
-            }
-        }
-        f.write_all(&bits).unwrap();
-        for (sys, _) in w.fluids() {
-            let ps = sys.positions();
-            f.write_all(&(ps.len() as u32).to_le_bytes()).unwrap();
-            for p in ps {
-                for v in [p.x, p.y, p.z] {
-                    f.write_all(&v.to_le_bytes()).unwrap();
-                }
-            }
-        }
+        write_voxel_bits(&mut f, w.providers().voxel(voxel_id).unwrap());
+        write_fluid_frame(&mut f, &w);
     }
     f.flush().unwrap();
     let frames = ticks / 2;

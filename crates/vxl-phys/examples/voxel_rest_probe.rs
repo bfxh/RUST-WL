@@ -27,103 +27,96 @@ fn floor_volume() -> VoxelVolume {
     v
 }
 
+/// 在体素地板上按 `spawn` 落一个体、跑满 `TICKS`，返回末态 `(位置, 清醒, |v|)`。
+///
+/// 三段探针（盒 / 球 / 凸包）共用"建世界 → 加地板与材质 → 落体 → 推进 → 取末态"这条链，
+/// 差别只在 `spawn` 里造什么体 ⇒ 收成一个入口，读数口径（末态 y 与间隙）就只写一遍。
+fn settle_on_floor(spawn: impl FnOnce(&mut World) -> usize) -> (Vec3, bool, f32) {
+    let mut w = World::new(PhysConfig::default());
+    w.add_voxel(floor_volume());
+    let m = w.add_material(vxl_phys_core::Material {
+        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
+        restitution: 0.02,
+    });
+    let i = spawn(&mut w);
+    w.bodies.set_material(i, m);
+    for _ in 0..TICKS {
+        w.step();
+    }
+    let (pos, _) = w.bodies.pose(i);
+    (pos, w.bodies.awake[i], w.bodies.linvel[i].length())
+}
+
 fn main() {
     println!("【体素静置高度】8×2×8 格、边长 0.5、顶面 y = 1.0；{TICKS} tick、默认档、μ=0.9\n");
     println!("  形状           末态 y      离地间隙     清醒  |v|");
 
     // 盒（半高 0.35）：期望 y = 1.35
     for half in [0.25f32, 0.35, 0.5] {
-        let mut w = World::new(PhysConfig::default());
-        w.add_voxel(floor_volume());
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
+        let (pos, awake, lv) = settle_on_floor(|w| {
+            w.add_dynamic(
+                Shape::Box {
+                    half: Vec3::splat(half),
+                },
+                Vec3::new(0.25, 1.0 + half + 0.5, 0.25),
+                Quat::IDENTITY,
+                1000.0,
+            ) as usize
         });
-        let i = w.add_dynamic(
-            Shape::Box {
-                half: Vec3::splat(half),
-            },
-            Vec3::new(0.25, 1.0 + half + 0.5, 0.25),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
-        for _ in 0..TICKS {
-            w.step();
-        }
-        let (pos, _) = w.bodies.pose(i);
         println!(
             "  盒(半高 {half:4.2})  {:8.4}   {:+9.4}   {}  {:.4}",
             pos.y,
             pos.y - (1.0 + half),
-            w.bodies.awake[i],
-            w.bodies.linvel[i].length()
+            awake,
+            lv
         );
     }
 
     // 球（对照：`depth = radius − sdf`，本来就不该有偏置）
     for r in [0.25f32, 0.35, 0.5] {
-        let mut w = World::new(PhysConfig::default());
-        w.add_voxel(floor_volume());
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
+        let (pos, awake, lv) = settle_on_floor(|w| {
+            w.add_dynamic(
+                Shape::Sphere { radius: r },
+                Vec3::new(0.25, 1.0 + r + 0.5, 0.25),
+                Quat::IDENTITY,
+                1000.0,
+            ) as usize
         });
-        let i = w.add_dynamic(
-            Shape::Sphere { radius: r },
-            Vec3::new(0.25, 1.0 + r + 0.5, 0.25),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
-        for _ in 0..TICKS {
-            w.step();
-        }
-        let (pos, _) = w.bodies.pose(i);
         println!(
             "  球(半径 {r:4.2})  {:8.4}   {:+9.4}   {}  {:.4}",
             pos.y,
             pos.y - (1.0 + r),
-            w.bodies.awake[i],
-            w.bodies.linvel[i].length()
+            awake,
+            lv
         );
     }
 
     // 对照：**凸包**（走"逐顶点 `contacts_point`"那一路，与盒的 `contacts_box_voxel` 不同）
     // ⇒ 若体素的点查询仍是 `depth = skin − d`，包体应**悬空 ≈ band**，而同一块板上的盒贴住。
     for half in [0.25f32, 0.35] {
-        let mut w = World::new(PhysConfig::default());
-        w.add_voxel(floor_volume());
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
-        });
-        let mut pts = Vec::new();
-        for sx in [-1.0f32, 1.0] {
-            for sy in [-1.0f32, 1.0] {
-                for sz in [-1.0f32, 1.0] {
-                    pts.push(Vec3::new(sx * half, sy * half, sz * half));
+        let (pos, awake, lv) = settle_on_floor(|w| {
+            let mut pts = Vec::new();
+            for sx in [-1.0f32, 1.0] {
+                for sy in [-1.0f32, 1.0] {
+                    for sz in [-1.0f32, 1.0] {
+                        pts.push(Vec3::new(sx * half, sy * half, sz * half));
+                    }
                 }
             }
-        }
-        let hull = w.add_hull(pts);
-        let i = w.spawn_hull_body(
-            hull,
-            Vec3::new(0.25, 1.0 + half + 0.5, 0.25),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
-        for _ in 0..TICKS {
-            w.step();
-        }
-        let (pos, _) = w.bodies.pose(i);
+            let hull = w.add_hull(pts);
+            w.spawn_hull_body(
+                hull,
+                Vec3::new(0.25, 1.0 + half + 0.5, 0.25),
+                Quat::IDENTITY,
+                1000.0,
+            ) as usize
+        });
         println!(
             "  包(半高 {half:4.2})  {:8.4}   {:+9.4}   {}  {:.4}",
             pos.y,
             pos.y - (1.0 + half),
-            w.bodies.awake[i],
-            w.bodies.linvel[i].length()
+            awake,
+            lv
         );
     }
 
