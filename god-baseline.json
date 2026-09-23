@@ -225,7 +225,7 @@
   "max_type_members": 26
  },
  "crates/vxl-phys-fluid/src/tests.rs": {
-  "file_lines": 664,
+  "file_lines": 662,
   "max_fn_lines": 68,
   "max_type_members": 3
  },
@@ -410,7 +410,7 @@
   "max_type_members": 16
  },
  "crates/vxl-phys-narrow/src/tests.rs": {
-  "file_lines": 838,
+  "file_lines": 836,
   "max_fn_lines": 97,
   "max_type_members": 0
  },
@@ -544,7 +544,7 @@
   "max_fn_lines": 26,
   "max_type_members": 6
  },
- "crates/vxl-phys/examples/arena_bench.rs": {
+ "crates/vxl-phys/examples/arena_bench/main.rs": {
   "file_lines": 132,
   "max_fn_lines": 109,
   "max_type_members": 0
@@ -705,7 +705,7 @@
   "max_type_members": 10
  },
  "crates/vxl-phys/src/tests.rs": {
-  "file_lines": 711,
+  "file_lines": 709,
   "max_fn_lines": 45,
   "max_type_members": 0
  },

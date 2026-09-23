@@ -1,8 +1,6 @@
 //! tests：从 `lib.rs` 拆出的单元测试（纯搬移 + 去一层缩进）。
 
 use super::*;
-
-use super::*;
 use vxl_phys_core::{BodySet, SerialJobSystem};
 
 fn manifolds_for(b: &BodySet, hf: &[HeightField]) -> Vec<Manifold> {

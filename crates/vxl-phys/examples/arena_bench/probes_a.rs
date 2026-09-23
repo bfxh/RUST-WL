@@ -1,4 +1,4 @@
-//! probes_a：从 arena_bench.rs 按域拆出（纯搬移，语义未改）。
+//! probes_a：从 main.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
 /// PhysArena `triangularLevels(n)` 的复刻。

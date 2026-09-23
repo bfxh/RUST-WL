@@ -2,8 +2,6 @@
 
 use super::*;
 
-use super::*;
-
 /// 立方体点云（外壳测试用；顶点序固定 ⇒ 确定性）。
 fn cube_hull_points(half: f32) -> Vec<Vec3> {
     let mut pts = Vec::new();
