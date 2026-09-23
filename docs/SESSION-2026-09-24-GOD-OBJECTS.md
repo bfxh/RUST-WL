@@ -3,7 +3,7 @@
 > 一句话：**文件级已清零**；**函数级门面内剩 29 个**（>120 行；B8+B9 两批已清 6 个）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
-## 1. 已落地（分支 `feat/solver-limits`，18 个提交 `8c650bd` → `981cbcf`，CI 全绿）
+## 1. 已落地（分支 `feat/solver-limits`，19 个提交 `8c650bd` → `c3905ee`，CI 全绿）
 
 | 提交 | 内容 |
 |---|---|
@@ -22,6 +22,7 @@
 | `81432f3` | **B10a**：`contacts_box_voxel` 174→**99**（`gather_cells` / `sd_over_cells` / `face_samples`）+ 采样循环与发射循环的采样点推导**去重** |
 | `bcf5cb5` | **B10b**：`solve_island_group` 210→**79**（按 `ISLAND_SEG_PROBE` 计时段拆五个 helper） |
 | `981cbcf` | **B11**：示例探针重复段收口 —— `dam_break` 122→**101**、`voxel_rest_probe` 129→**102**（`settle_on_floor` 收三组同形探针） |
+| `c3905ee` | **B12**：`solve_joint` 214→**38**（五段横幅各一 helper；累加器 `max_dv` 改值进值出） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -40,7 +41,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 25 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 24 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -58,7 +59,7 @@ PY
 
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
-| 库内**大分发** | 5 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad）· `solve_joint` 214 | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }` |
+| 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
 | **示例 main** | 17 | `trimesh_rest_probe` 360 · `showcase` 344 · `gpu_density_probe` 272 · `gpu_tick_probe` 266 · `m1_scale` 263 · `splat_rest_probe` 249 · `fluid_buoyancy` 245 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m1_islands` 178 · `m0_gates` 174 · `diag_eject` 149 · `m1_collision_row` 138 · `diag_col` 135 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**（多个 for 里各写一遍同样的"建世界→落体→打印"）收成一个收闭包的 helper（B11 范例），判据见下 |
 | 测试 + 脚本 | 3 | `float_motion_vs_local_water_motion` 144 · `diag_query_cost_across_tree_shapes` 137 · `render_demo.py::main` 241 | 同上 |
 
@@ -67,10 +68,10 @@ PY
 1. `compute_pairs`（256，broad 的 trait 方法）：五相位 + 探针计时（`0)` AABB / `0.5)` 睡眠翻转检测 /
    `1)` 代理更新 / `2)` 清醒动体查询 / `3)` 精确过滤 + 排序去重）⇒ 每个 `// N)` 段一个 helper；
    缓冲都在 `self` 上 ⇒ 仍是方法（签名长，按热路径惯例 allow）。
-2. `solve_joint`（214，solver/joints/solve.rs）：横幅 `// ---- 线性行 / 角行 / 马达行 / 转动限位 /
-   棱柱行程限位 ----` 是天然切点，但要注意：① 段位**比横幅看起来更靠后**（前面还有 AABB/`rel_vel`
-   准备段）；② 各段都要 `bodies`/`ai`/`bi`/`ra`/`rb`/`qa`/`qb`/`sp`，且 `max_dv` 是**累加器**
-   ⇒ 提成 helper 时把累加改成返回值（`max_dv = max_dv.max(f(..))`）。
+2. **已做**（B12）：`solve_joint` 214→38（五段横幅各一 helper）。留下的可复用招：
+   横幅段提 helper 时**讲顺序/纪律的注释留在调用方**（那是调用序的约束）；段内的累加器
+   （`max_dv`）改成**值进值出**；裸 `if` 段用 `scope: inner` + `replace_outer`（`pre` 补 `if` 行、
+   `tail` 收括号 —— 但 `tail` 只有一行，"收括号 + 返回累加器"要分两步，返回那行手补）。
 3. **B10a 留下的死代码**：`contacts_box_voxel` 里"主导面选择"那一段的结果 `best` 已无人用
    （`let _ = best;`），`deepest` 也只喂那条判据 ⇒ 整段可退化成
    `if count.iter().all(|&c| c == 0) { return false; }`（语义等价：全零时发射循环本来也什么都不发）。
