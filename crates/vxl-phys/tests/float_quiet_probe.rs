@@ -400,3 +400,172 @@ fn spin_bias_impact_vs_steady() {
         println!("  {name}：累计偏航 {yaw:+.4} rad | |ω| 峰 {wpp:.3} rad/s");
     }
 }
+
+/// **合格协议下的稳态自旋测量**（仪表，只打印）。
+///
+/// 为什么重做（2026-09-22，我自己的复核教训）：此前所有自旋读数都用"从 1.5 m 落下"的投放，
+/// 而重落/轻放两格**连符号都翻** ⇒ 那些 yaw 是**投放瞬态**，不是稳态偏置。本协议三件套：
+/// 1. **零冲击就位**：先从**无体**仿真测出自由水面高度，再按浮力平衡位（吃水 = ρ_body/ρ_water × 2·half）
+///    把体**精确放在平衡高度**（干槽则放在"槽底顶面 + half + 0.5 mm"）⇒ 无落差、无冲击；
+/// 2. **长静置**（`SETTLE` tick）；
+/// 3. **窗口前自检**：体在窗口起点必须**确已静止**（`|v| < 0.01` 且 `|ω| < 0.01`），
+///    否则打印 **"窗口前未静止 ⇒ 本次读数无效"**，不给数字（宁可空着，不给伪影）。
+#[test]
+#[ignore = "仪表（只打印）：合格协议下的稳态自旋；见上注"]
+fn steady_spin_with_valid_protocol() {
+    let settle_ticks: usize = 900;
+    let win_ticks: usize = 480;
+    for (tag, cfg) in [
+        ("默认档", PhysConfig::default()),
+        (
+            "机制开(wakeK8+hold4)",
+            PhysConfig {
+                wake_gate_k: 8,
+                settled_hold_iterations: 4,
+                ..PhysConfig::default()
+            },
+        ),
+    ] {
+        println!(
+            "== {tag} ==（静置 {settle_ticks}、窗口 {win_ticks} tick；盒半长 0.06、300 kg/m³）"
+        );
+        run_protocol_block(cfg, settle_ticks, win_ticks);
+    }
+}
+
+/// 一档配置下的完整协议表。
+fn run_protocol_block(cfg: PhysConfig, settle_ticks: usize, win_ticks: usize) {
+    let _ = &cfg;
+    println!(
+        "{:>16} {:>9} {:>10} {:>10} {:>6} {:>9} {:>12} {:>12}",
+        "格", "就位y", "起点|v|", "起点|ω|", "awake", "箱体y", "累计偏航", "τ_y 均值"
+    );
+    // —— 干槽（无流体）：槽底顶面 y=1.0 ⇒ 体心平衡位 1.06 ——
+    for (name, rot) in [("干槽 0°", Quat::IDENTITY), ("干槽 45°", quat_y_45())] {
+        let mut w = World::new(cfg.clone());
+        let _v = tank(&mut w);
+        let y0 = 1.06 + 0.0005;
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Vec3::new(0.0, y0, 0.0),
+            rot,
+            300.0,
+        );
+        report(name, &mut w, b as usize, y0, settle_ticks, win_ticks, false);
+    }
+    // —— 流体：先从无体仿真测自由水面 ⇒ 算平衡位 ⇒ 精确就位 ——
+    for (name, shape, rot) in [
+        (
+            "流体 盒 0°",
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Quat::IDENTITY,
+        ),
+        (
+            "流体 盒 45°",
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            quat_y_45(),
+        ),
+        ("流体 球", Shape::Sphere { radius: 0.06 }, Quat::IDENTITY),
+    ] {
+        // ① 无体仿真：测自由水面（中心柱 x,z∈[−0.05,0.05] 内的最高粒子）
+        let (surface, fid) = {
+            let mut w = World::new(cfg.clone());
+            let v = tank(&mut w);
+            let sys = water(2);
+            let fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
+            for _ in 0..300 {
+                w.step();
+            }
+            let mut hi = 0.0f32;
+            for (p, _) in w.fluids()[fid]
+                .0
+                .positions()
+                .iter()
+                .zip(w.fluids()[fid].0.velocities().iter())
+            {
+                if p.x.abs() < 0.05 && p.z.abs() < 0.05 {
+                    hi = hi.max(p.y);
+                }
+            }
+            (hi, fid)
+        };
+        // ② 按浮力平衡位精确就位（盒：吃水 0.3×0.12；球：体积等效 —— 球半径 0.06 同径，
+        //    但密度 300 ⇒ 吃水按体积比 0.3 ⇒ 浸没深度 0.3×直径）
+        let half_equiv = 0.06f32;
+        let draft = 0.3 * 2.0 * half_equiv;
+        let y0 = surface - draft + half_equiv;
+        let mut w = World::new(cfg.clone());
+        let v = tank(&mut w);
+        let sys = water(2);
+        let _f2 = w.add_fluid_with_boundary_coupling(sys, &[v]);
+        let _ = fid;
+        let b = w.add_dynamic(shape, Vec3::new(0.0, y0, 0.0), rot, 300.0);
+        report(name, &mut w, b as usize, y0, settle_ticks, win_ticks, true);
+    }
+}
+
+fn quat_y_45() -> Quat {
+    Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_4)
+}
+
+/// 静置后**自检**再取窗口；未静止则报"无效"。
+fn report(
+    name: &str,
+    w: &mut World,
+    body: usize,
+    y0: f32,
+    settle: usize,
+    win: usize,
+    coupled: bool,
+) {
+    for _ in 0..settle {
+        w.step();
+    }
+    let v0 = w.bodies.linvel[body].length();
+    let w0 = w.bodies.angvel(body).length();
+    let valid = v0 < 0.01 && w0 < 0.01;
+    let mut prev = yaw_of(w.bodies.rot(body));
+    let mut unwrapped = 0.0f32;
+    let mut ty = 0.0f64;
+    let mut n = 0.0f64;
+    for _ in 0..win {
+        w.step();
+        let y = yaw_of(w.bodies.rot(body));
+        let mut d = y - prev;
+        while d > std::f32::consts::PI {
+            d -= 2.0 * std::f32::consts::PI;
+        }
+        while d < -std::f32::consts::PI {
+            d += 2.0 * std::f32::consts::PI;
+        }
+        unwrapped += d;
+        prev = y;
+        if coupled {
+            if let Some(r) = w.fluids()[0]
+                .0
+                .boundary_reactions()
+                .iter()
+                .find(|r| r.0 as usize == body)
+            {
+                ty += r.2.y as f64;
+                n += 1.0;
+            }
+        }
+    }
+    let tym = if n > 0.0 { (ty / n) as f32 } else { 0.0 };
+    println!(
+        "        ↳ awake={} 箱体y={:.4} sleep_timer={:.3}（判据：静置后应 awake=false 且 |v|/|ω| ≈ 0）",
+        w.bodies.awake[body], w.bodies.position[body].y, w.bodies.sleep_timer[body]
+    );
+    if valid {
+        println!("{name:>16} {y0:>9.4} {v0:>10.4} {w0:>10.4} {unwrapped:>12.4} {tym:>12.5}");
+    } else {
+        println!("{name:>16} {y0:>9.4} {v0:>10.4} {w0:>10.4}   ← 窗口前未静止 ⇒ 本次读数无效");
+    }
+}
