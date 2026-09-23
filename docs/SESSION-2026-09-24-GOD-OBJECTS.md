@@ -3,7 +3,7 @@
 > 一句话：**文件级已清零**；**函数级门面内剩 29 个**（>120 行；B8+B9 两批已清 6 个）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
-## 1. 已落地（分支 `feat/solver-limits`，20 个提交 `8c650bd` → `d211afa`，CI 全绿）
+## 1. 已落地（分支 `feat/solver-limits`，23 个提交 `8c650bd` → `dbd21bb`，CI 全绿）
 
 | 提交 | 内容 |
 |---|---|
@@ -24,6 +24,8 @@
 | `981cbcf` | **B11**：示例探针重复段收口 —— `dam_break` 122→**101**、`voxel_rest_probe` 129→**102**（`settle_on_floor` 收三组同形探针） |
 | `c3905ee` | **B12**：`solve_joint` 214→**38**（五段横幅各一 helper；累加器 `max_dv` 改值进值出） |
 | `d211afa` | **B13**：`diag_col` 135→**100**（`ke_of` 闭包提成同名 fn——调用点一字未动）、`m1_collision_row` 138→**106**（`run_ticks` 用类型别名避长元组 + `finish`） |
+| `2d46461` | **B14**：`diag_eject` 149→**97**（`ke_of` / `dump_body_manifolds` / `print_cum_top5`） |
+| `dbd21bb` | **B15**：`m1_islands` 178→**80**（99 行"岛并行拆分读数"整块提 `report_island_breakdown`） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -42,7 +44,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 22 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 20 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -61,7 +63,7 @@ PY
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
 | 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
-| **示例 main** | 15 | `trimesh_rest_probe` 360 · `showcase` 344 · `gpu_density_probe` 272 · `gpu_tick_probe` 266 · `m1_scale` 263 · `splat_rest_probe` 249 · `fluid_buoyancy` 245 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m1_islands` 178 · `m0_gates` 174 · `diag_eject` 149 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**（多个 for 里各写一遍同样的"建世界→落体→打印"）收成一个收闭包的 helper（B11 范例），判据见下 |
+| **示例 main** | 13 | `trimesh_rest_probe` 360 · `showcase` 344 · `gpu_density_probe` 272 · `gpu_tick_probe` 266 · `m1_scale` 263 · `splat_rest_probe` 249 · `fluid_buoyancy` 245 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m0_gates` 174 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**收成收闭包的 helper（B11）；**自包含的大诊断块**整块提（B15 的 99 行范例，用 `scope: inner` + `replace_outer`）；判据见下 |
 | 测试 + 脚本 | 3 | `float_motion_vs_local_water_motion` 144 · `diag_query_cost_across_tree_shapes` 137 · `render_demo.py::main` 241 | 同上 |
 
 **建议切点（已侦察）**：
