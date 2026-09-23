@@ -569,3 +569,53 @@ fn report(
         println!("{name:>16} {y0:>9.4} {v0:>10.4} {w0:>10.4}   ← 窗口前未静止 ⇒ 本次读数无效");
     }
 }
+
+/// **P10 逐 tick 轨迹**（仪表，只打印）：单盒静置在干槽地板上的前 40 tick + 每 100 tick 采样，
+/// 回答三个判别问题：① **绕哪个轴转**（ω 分量）；② **逐 tick 注入还是自增长**（|ω| 走势）；
+/// ③ **有没有"睡着又被叫醒"**（awake / sleep_timer）；并顺带打印**流形**（点数与相对体心的面内偏移
+/// —— 判"接触补丁是否对称"：对称补丁的点应成 ±x / ±z 对出现）。
+#[test]
+#[ignore = "仪表（只打印）：P10 单盒自旋的逐 tick 轨迹；见上注"]
+fn p10_single_box_spin_trace() {
+    let mut w = World::new(PhysConfig::default());
+    let _v = tank(&mut w);
+    let b = w.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.06),
+        },
+        Vec3::new(0.0, 1.0605, 0.0),
+        Quat::IDENTITY,
+        300.0,
+    ) as usize;
+    println!("P10 轨迹：单盒（半长 0.06、300 kg/m³）零冲击就位在干槽地板（平衡位 1.06）");
+    println!(
+        "{:>5} {:>8} {:>8} {:>9} {:>9} {:>9} {:>6} {:>7} {:>7}",
+        "tick", "y", "|v|", "ωx", "ωy", "ωz", "awake", "timer", "流形点"
+    );
+    for t in 1..=600 {
+        w.step();
+        if t <= 20 || t % 100 == 0 {
+            let p = w.bodies.position[b];
+            let v = w.bodies.linvel[b].length();
+            let wv = w.bodies.angvel(b);
+            let man = w.manifolds();
+            let mut pts = 0usize;
+            let mut offs = String::new();
+            for m in man {
+                if m.a as usize == b || m.b as usize == b {
+                    for q in m.points.iter() {
+                        pts += 1;
+                        if offs.len() < 60 {
+                            offs += &format!("({:+.3},{:+.3})", q.point.x - p.x, q.point.z - p.z);
+                        }
+                    }
+                }
+            }
+            println!(
+                "{t:>5} {y:>8.4} {v:>8.4} {wx:>9.4} {wy:>9.4} {wz:>9.4} {aw:>6} {tm:>7.3} {pts:>7}  {offs}",
+                y = p.y, v = v, wx = wv.x, wy = wv.y, wz = wv.z,
+                aw = w.bodies.awake[b], tm = w.bodies.sleep_timer[b], pts = pts, offs = offs
+            );
+        }
+    }
+}
