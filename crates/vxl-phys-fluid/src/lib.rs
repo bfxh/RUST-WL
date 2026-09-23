@@ -78,6 +78,15 @@ pub struct FluidConfig {
     pub gamma_tait: f32,
     /// 每 tick 的子步数。
     pub substeps: u32,
+    /// **相位并行线程数**（1 = 串行，默认）。
+    ///
+    /// 并行对象 = 逐粒独立的相位：**密度**与**力+黏度**（`phase_us` 实测这两项占
+    /// 30 万粒档的 **96%**：密度 32% / 力 64%）。**逐位一致契约**：每个粒子的邻域
+    /// 遍历序不随分块变化（见 `UniformGrid::for_neighbors_in`）⇒ 并行结果与串行
+    /// **逐位相同**（不是"近似相同"）；唯一跨粒子的量 `bforce`（2b 反作用）在有
+    /// 边界粒子时走**串行补趟**，同样保逐位。
+    /// ⇒ 默认 1 时**完全不进入并行路径**（与旧行为逐位一致）。
+    pub threads: usize,
     /// **2b 边界粒子的层数**（默认 2；SPEC §4.8 的两层形态）。
     /// 2026-09-22 起可调：实测用于"层数 ↑ ⇒ 反作用波动 ↓"这条候选
     /// （波动会透传到体上——漂浮体 y 峰峰 19.9 mm、|ω| 峰峰 1.22 rad/s，见
@@ -107,6 +116,7 @@ impl Default for FluidConfig {
             sound_speed: 10.0,
             gamma_tait: 7.0,
             substeps: 4,
+            threads: 1,
             boundary_layers: 2,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             max_speed_frac: 0.4,
@@ -189,6 +199,53 @@ impl UniformGrid {
             f(self.min.z, p.z, self.nz),
         )
     }
+
+    /// 邻域公共体（**自由函数形态**，供并行相位在分块闭包里调用）：粒子 `i` 的
+    /// 27 邻域格（钳边）内、`r ≤ h` 的 `j` 交给 `f`。访问序 = 格坐标序
+    /// （dz, dy, dx 固定）× 格内索引序 ⇒ 求和序是位置的确定函数
+    /// ⇒ **并行分块不改变任一粒子的求和序**（这就是"并行 = 串行逐位一致"的根据）。
+    #[inline]
+    fn for_neighbors_in(
+        &self,
+        pos: &[Vec3],
+        h2: f32,
+        i: usize,
+        mut f: impl FnMut(usize, Vec3, f32),
+    ) {
+        let pi = pos[i];
+        let (cx, cy, cz) = self.bin_of(pi);
+        let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        for dz in -1i32..=1 {
+            let z = cz as i32 + dz;
+            if z < 0 || z >= nz as i32 {
+                continue;
+            }
+            for dy in -1i32..=1 {
+                let y = cy as i32 + dy;
+                if y < 0 || y >= ny as i32 {
+                    continue;
+                }
+                for dx in -1i32..=1 {
+                    let x = cx as i32 + dx;
+                    if x < 0 || x >= nx as i32 {
+                        continue;
+                    }
+                    let idx = ((x as u32 * ny + y as u32) * nz + z as u32) as usize;
+                    for &j in &self.bins[idx] {
+                        let j = j as usize;
+                        if j == i {
+                            continue;
+                        }
+                        let d = pi - pos[j];
+                        let r2 = d.length_squared();
+                        if r2 <= h2 {
+                            f(j, d, r2);
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// WCSPH 粒子流体系统（SoA；零外部依赖）。
@@ -235,6 +292,9 @@ pub struct FluidSystem {
     bforce: Vec<Vec3>,
     /// 形状 → 局部两层采样缓存（形状集小 ⇒ 线性查找；免逐 tick 重建）。
     lattice_cache: Vec<(Shape, BoundaryLattice)>,
+    /// **相位计时累加器**（微秒；仅诊断，不改行为）：网格/密度/压力/力/积分+边界。
+    /// 口径：每子步各相位一次 `probe::us`（`vxl-phys-core::probe`，wasm 下退化为 0）。
+    phase_us: [u64; 5],
 }
 
 impl FluidSystem {
@@ -305,6 +365,7 @@ impl FluidSystem {
             // 随 `pos` 一起 resize；`truncate_to_fluid` 一起截断）。
             bforce: vec![Vec3::ZERO; n],
             lattice_cache: Vec::new(),
+            phase_us: [0; 5],
             pos,
             cfg,
         }
@@ -465,10 +526,18 @@ impl FluidSystem {
         }
         // 网格含**全部**粒子（邻域必须看得见边界粒子）；边界粒子的位置/速度每 tick
         // 由 `set_boundary_particles` 整体重建，本子步内不动（运动学冻结）。
+        let t = vxl_phys_core::probe::start();
         self.grid.rebuild(&self.pos, self.h);
+        self.phase_us[0] += vxl_phys_core::probe::us(t);
+        let t = vxl_phys_core::probe::start();
         self.density_pass(providers);
+        self.phase_us[1] += vxl_phys_core::probe::us(t);
+        let t = vxl_phys_core::probe::start();
         self.pressure_pass();
+        self.phase_us[2] += vxl_phys_core::probe::us(t);
+        let t = vxl_phys_core::probe::start();
         self.force_pass();
+        self.phase_us[3] += vxl_phys_core::probe::us(t);
         // 半隐式欧拉：v ← v + dt·a + ε·xsph；CFL 限速防穿隧。
         // **只积分流体粒子**（索引前缀）——边界粒子不作积分。
         let vmax = self.cfg.max_speed_frac * self.h / dt;
@@ -483,46 +552,28 @@ impl FluidSystem {
             self.vel[i] = v;
             self.pos[i] += v * dt;
         }
+        let t = vxl_phys_core::probe::start();
         self.boundary_pass(providers);
+        self.phase_us[4] += vxl_phys_core::probe::us(t);
+    }
+
+    /// **相位计时**（诊断）：`[网格, 密度, 压力, 力, 积分+边界]` 的**累计微秒**。
+    /// 与 `reset_phase_us()` 配合取窗口差值（本函数不改行为、不进哈希）。
+    pub fn phase_us(&self) -> [u64; 5] {
+        self.phase_us
+    }
+
+    /// 清零相位计时累加器（取窗口前调用）。
+    pub fn reset_phase_us(&mut self) {
+        self.phase_us = [0; 5];
     }
 
     /// 邻域公共体：粒子 i 的 27 邻域格（钳边）内、r ≤ h 的 j 交给 `f`。
     /// 访问序 = 格坐标序（dz, dy, dx 固定）× 格内索引序 ⇒ 求和序是位置的确定函数。
+    /// **转发给 `UniformGrid::for_neighbors_in`**（并行相位在分块闭包里用同一实现）。
     #[inline]
-    fn for_neighbors(&self, i: usize, mut f: impl FnMut(usize, Vec3, f32)) {
-        let pi = self.pos[i];
-        let (cx, cy, cz) = self.grid.bin_of(pi);
-        let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
-        for dz in -1i32..=1 {
-            let z = cz as i32 + dz;
-            if z < 0 || z >= nz as i32 {
-                continue;
-            }
-            for dy in -1i32..=1 {
-                let y = cy as i32 + dy;
-                if y < 0 || y >= ny as i32 {
-                    continue;
-                }
-                for dx in -1i32..=1 {
-                    let x = cx as i32 + dx;
-                    if x < 0 || x >= nx as i32 {
-                        continue;
-                    }
-                    let idx = ((x as u32 * ny + y as u32) * nz + z as u32) as usize;
-                    for &j in &self.grid.bins[idx] {
-                        let j = j as usize;
-                        if j == i {
-                            continue;
-                        }
-                        let d = pi - self.pos[j];
-                        let r2 = d.length_squared();
-                        if r2 <= self.h2 {
-                            f(j, d, r2);
-                        }
-                    }
-                }
-            }
-        }
+    fn for_neighbors(&self, i: usize, f: impl FnMut(usize, Vec3, f32)) {
+        self.grid.for_neighbors_in(&self.pos, self.h2, i, f);
     }
 
     /// 密度：ρ_i = m·(W(0) + Σ_j W(r_ij) + Σ_ghost W)（poly6，含自身项）。
@@ -536,6 +587,10 @@ impl FluidSystem {
     /// 计入 `sum_b`。流体段的和式与遍历序与旧实现逐字相同 ⇒ **无边界粒子时
     /// `dens = mass·sum + 0.0` 与原 `dens = mass·sum` 逐位同值**（正数 +0.0 精确）。
     fn density_pass(&mut self, providers: &dyn ProviderColliders) {
+        if self.cfg.threads > 1 {
+            self.density_pass_parallel(providers);
+            return;
+        }
         let nf = self.n_fluid;
         let nt = self.pos.len();
         for i in 0..nf {
@@ -588,8 +643,160 @@ impl FluidSystem {
 
     /// 收集粒子 `pi` 的 h 带内壁面（点 + 外法线；角部可有多面），≤ 8 面。
     /// 供密度轮的镜像鬼影用（流体粒子专有；边界粒子不用，见 `density_pass`）。
-    /// 取 `&mut self` 是为了复用 `self.contacts` 缓冲（调用是顺序的，与随后的
-    /// `for_neighbors` 不重叠）。
+    /// **自由函数形态**（并行密度相位在分块闭包里调用；`scratch` 由调用方给，
+    /// 并行时每块一份 ⇒ 无共享可变状态）。
+    fn wall_planes_in(
+        boundaries: &[u32],
+        h: f32,
+        pi: Vec3,
+        providers: &dyn ProviderColliders,
+        scratch: &mut Vec<InteropContact>,
+        pl_pt: &mut [Vec3; 8],
+        pl_n: &mut [Vec3; 8],
+    ) -> usize {
+        if boundaries.is_empty() {
+            return 0;
+        }
+        let mut np = 0usize;
+        for &bid in boundaries {
+            if let Some(bb) = providers.bounds(bid) {
+                // 预滤余量取 h（镜像带 = sdf < h）。
+                let m = h;
+                if pi.x < bb.min.x - m
+                    || pi.x > bb.max.x + m
+                    || pi.y < bb.min.y - m
+                    || pi.y > bb.max.y + m
+                    || pi.z < bb.min.z - m
+                    || pi.z > bb.max.z + m
+                {
+                    continue;
+                }
+            }
+            scratch.clear();
+            if providers.contacts_point(bid, pi, h, scratch) {
+                for c in scratch.iter() {
+                    // sdf = (p − 表面点)·外法线（粒子在固体外侧为正，
+                    // provider 无关）；穿透（≤ 0）交给投影，不补。
+                    let sdf = (pi - c.point).dot(c.normal);
+                    if sdf > 0.0 && sdf < h && np < 8 {
+                        pl_pt[np] = c.point;
+                        pl_n[np] = c.normal;
+                        np += 1;
+                    }
+                }
+            }
+        }
+        np
+    }
+
+    /// **密度相位·并行**（`threads > 1`）：逐粒独立（每粒只读他人的 pos/pmass、
+    /// 只写自己的 `dens[i]`）⇒ 分块并行；壁面查询用**每块一份 scratch**
+    /// （无共享可变状态）⇒ 结果与串行**逐位一致**。
+    fn density_pass_parallel(&mut self, providers: &dyn ProviderColliders) {
+        let nf = self.n_fluid;
+        let nt = self.pos.len();
+        let threads = self.cfg.threads.max(1);
+        {
+            let Self {
+                pos,
+                dens,
+                pmass,
+                grid,
+                h,
+                h2,
+                k6,
+                w0,
+                mass,
+                boundaries,
+                ..
+            } = self;
+            let (h, h2, k6, w0, mass) = (*h, *h2, *k6, *w0, *mass);
+            let per = nf.div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                for (ci, d_out) in dens[..nf].chunks_mut(per).enumerate() {
+                    let base = ci * per;
+                    let (pos, pmass, grid, boundaries) = (&*pos, &*pmass, &*grid, &*boundaries);
+                    s.spawn(move || {
+                        let mut scratch: Vec<InteropContact> = Vec::new();
+                        for (k, d_out) in d_out.iter_mut().enumerate() {
+                            let i = base + k;
+                            let pi = pos[i];
+                            let mut pl_pt = [Vec3::ZERO; 8];
+                            let mut pl_n = [Vec3::ZERO; 8];
+                            let np = Self::wall_planes_in(
+                                boundaries,
+                                h,
+                                pi,
+                                providers,
+                                &mut scratch,
+                                &mut pl_pt,
+                                &mut pl_n,
+                            );
+                            let mut sum = w0;
+                            let mut sum_b = 0.0f32;
+                            grid.for_neighbors_in(pos, h2, i, |j, d, r2| {
+                                let t = h2 - r2;
+                                let w = k6 * t * t * t;
+                                if j < nf {
+                                    sum += w;
+                                } else {
+                                    sum_b += pmass[j] * w;
+                                }
+                                for kk in 0..np {
+                                    let pj = pi - d;
+                                    let dn = (pj - pl_pt[kk]).dot(pl_n[kk]);
+                                    let g = pj - pl_n[kk] * (2.0 * dn);
+                                    let rg2 = (pi - g).length_squared();
+                                    if rg2 <= h2 {
+                                        let tg = h2 - rg2;
+                                        sum += k6 * tg * tg * tg;
+                                    }
+                                }
+                            });
+                            *d_out = mass * sum + sum_b;
+                        }
+                    });
+                }
+            });
+        }
+        // 边界粒子（2b）：同一式、只吃流体邻居（见串行路径注）。
+        if nt > nf {
+            let Self {
+                pos,
+                dens,
+                pmass,
+                grid,
+                h2,
+                k6,
+                w0,
+                ..
+            } = self;
+            let (h2, k6, w0) = (*h2, *k6, *w0);
+            let nb = nt - nf;
+            let per = nb.div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                for (ci, d_out) in dens[nf..].chunks_mut(per).enumerate() {
+                    let base = nf + ci * per;
+                    let (pos, pmass, grid) = (&*pos, &*pmass, &*grid);
+                    s.spawn(move || {
+                        for (k, d_out) in d_out.iter_mut().enumerate() {
+                            let i = base + k;
+                            let mut sum = 0.0f32;
+                            grid.for_neighbors_in(pos, h2, i, |j, _d, r2| {
+                                if j >= nf {
+                                    return;
+                                }
+                                let t = h2 - r2;
+                                sum += pmass[j] * (k6 * t * t * t);
+                            });
+                            *d_out = pmass[i] * w0 + sum;
+                        }
+                    });
+                }
+            });
+        }
+    }
+
     fn wall_planes(
         &mut self,
         pi: Vec3,
@@ -669,6 +876,130 @@ impl FluidSystem {
     /// `aggregate_reactions` 里按绕体原点取）。XSPH 对边界邻居照常计入 ⇒
     /// 体面速度把流体拖向自身（无滑移近似，用的是既有那一式）。
     fn force_pass(&mut self) {
+        // 并行档（`cfg.threads > 1`）：逐粒独立 ⇒ 分块并行（逐位一致，见 config 注）。
+        if self.cfg.threads > 1 {
+            self.force_pass_parallel();
+            return;
+        }
+        self.force_pass_serial();
+    }
+
+    /// **力相位·并行**（`threads > 1`）：`acc`/`xsph` 逐粒独立 ⇒ 分块并行；
+    /// 唯一跨粒子的 `bforce`（2b 反作用）在有边界粒子时走**串行补趟** ⇒ 保逐位一致。
+    fn force_pass_parallel(&mut self) {
+        let nf = self.n_fluid;
+        let nt = self.pos.len();
+        let threads = self.cfg.threads.max(1);
+        let g = self.cfg.gravity;
+        let alpha_c = self.cfg.artificial_viscosity * self.cfg.sound_speed;
+        for f in &mut self.bforce[nf..] {
+            *f = Vec3::ZERO;
+        }
+        {
+            let Self {
+                pos,
+                vel,
+                dens,
+                press,
+                acc,
+                xsph,
+                pmass,
+                grid,
+                h,
+                h2,
+                k6,
+                ks,
+                ..
+            } = self;
+            let (h, h2, k6, ks) = (*h, *h2, *k6, *ks);
+            let per = nf.div_ceil(threads).max(1);
+            std::thread::scope(|s| {
+                for (ci, (acc_c, xs_c)) in acc[..nf]
+                    .chunks_mut(per)
+                    .zip(xsph[..nf].chunks_mut(per))
+                    .enumerate()
+                {
+                    let base = ci * per;
+                    let (pos, vel, dens, press, pmass, grid) =
+                        (&*pos, &*vel, &*dens, &*press, &*pmass, &*grid);
+                    s.spawn(move || {
+                        for (k, (a_out, x_out)) in acc_c.iter_mut().zip(xs_c.iter_mut()).enumerate()
+                        {
+                            let i = base + k;
+                            let vi = vel[i];
+                            let rho_i = dens[i];
+                            let ci2 = press[i] / (rho_i * rho_i);
+                            let mut a = g;
+                            let mut xs = Vec3::ZERO;
+                            grid.for_neighbors_in(pos, h2, i, |j, d, r2| {
+                                let rho_j = dens[j];
+                                let cj2 = press[j] / (rho_j * rho_j);
+                                let r = r2.sqrt();
+                                let t = h - r;
+                                let mj = pmass[j];
+                                let coef = mj * (ks * t * t) * (ci2 + cj2);
+                                let denom = r.max(1e-9);
+                                a += d * (coef / denom);
+                                let vij = vi - vel[j];
+                                let vdn = -vij.dot(d);
+                                if vdn > 0.0 {
+                                    let mu = vdn * h / (r2 + 0.01 * h2);
+                                    let c = mj
+                                        * (alpha_c * mu / (0.5 * (rho_i + rho_j)))
+                                        * (ks * t * t);
+                                    a += d * (c / denom);
+                                }
+                                let tt = h2 - r2;
+                                let w = k6 * tt * tt * tt;
+                                xs += (vel[j] - vi) * (mj * 2.0 / (rho_i + rho_j) * w);
+                            });
+                            *a_out = a;
+                            *x_out = xs;
+                        }
+                    });
+                }
+            });
+        }
+        // 2b 反作用（逐粒 bforce）：**串行补趟**（只有边界粒子存在时才走）——
+        // 与串行路径同一算式、同一遍历序 ⇒ 逐位一致。缓冲用 `take` 借出以便闭包内写。
+        if nt > nf {
+            let mut bforce = std::mem::take(&mut self.bforce);
+            for i in 0..nf {
+                let vi = self.vel[i];
+                let rho_i = self.dens[i];
+                let ci2 = self.press[i] / (rho_i * rho_i);
+                let mi = self.pmass[i];
+                self.for_neighbors(i, |j, d, r2| {
+                    if j < nf {
+                        return;
+                    }
+                    let rho_j = self.dens[j];
+                    let cj2 = self.press[j] / (rho_j * rho_j);
+                    let r = r2.sqrt();
+                    let t = self.h - r;
+                    let mj = self.pmass[j];
+                    let coef = mj * (self.ks * t * t) * (ci2 + cj2);
+                    let denom = r.max(1e-9);
+                    let cv = {
+                        let vij = vi - self.vel[j];
+                        let vdn = -vij.dot(d);
+                        if vdn > 0.0 {
+                            let mu = vdn * self.h / (r2 + 0.01 * self.h2);
+                            mj * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (self.ks * t * t)
+                        } else {
+                            0.0
+                        }
+                    };
+                    bforce[j] -= d * (mi * (coef + cv) / denom);
+                });
+            }
+            self.bforce = bforce;
+        }
+        self.aggregate_reactions();
+    }
+
+    /// **力相位·串行**（默认档：`threads == 1` ⇒ 与历史行为逐位一致）。
+    fn force_pass_serial(&mut self) {
         let nf = self.n_fluid;
         let g = self.cfg.gravity;
         let alpha_c = self.cfg.artificial_viscosity * self.cfg.sound_speed;
@@ -1523,5 +1854,67 @@ mod tests {
             )
         };
         assert_eq!(digest(), digest(), "两次运行应逐位一致");
+    }
+
+    /// **并行 = 串行逐位一致**（`FluidConfig::threads`；2026-09-23 规模档并行化的守门）：
+    /// 同一场景跑 `threads = 1` 与 `threads = 4`，末态位置/速度/密度**逐位相同**。
+    /// 覆盖**两条路径**：① 纯流体（无边界粒子）；② **含边界粒子**（2b）——后者是风险点，
+    /// 因为 `bforce` 是唯一的跨粒子累加量（并行路径用**串行补趟**保序）。
+    #[test]
+    fn parallel_equals_serial_bitwise() {
+        let digest = |threads: usize, with_boundary: bool| {
+            let cfg = FluidConfig {
+                threads,
+                ..FluidConfig::default()
+            };
+            let mut f = FluidSystem::new(cfg, Vec3::new(-0.15, 0.0, -0.15), [7, 7, 7], 0.05);
+            if with_boundary {
+                let floor = (
+                    0u32,
+                    Shape::Box {
+                        half: Vec3::new(0.3, 0.05, 0.3),
+                    },
+                    still_pose(Vec3::new(0.0, -0.05, 0.0)),
+                );
+                let _ = f.set_boundary_particles(std::slice::from_ref(&floor));
+            }
+            for _ in 0..40 {
+                if with_boundary {
+                    let floor = (
+                        0u32,
+                        Shape::Box {
+                            half: Vec3::new(0.3, 0.05, 0.3),
+                        },
+                        still_pose(Vec3::new(0.0, -0.05, 0.0)),
+                    );
+                    let _ = f.set_boundary_particles(std::slice::from_ref(&floor));
+                }
+                f.step(1.0 / 60.0, &NoProviders);
+            }
+            let mut d: Vec<u32> = Vec::new();
+            for p in f.positions() {
+                d.extend([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+            }
+            for v in f.velocities() {
+                d.extend([v.x.to_bits(), v.y.to_bits(), v.z.to_bits()]);
+            }
+            for r in f.densities() {
+                d.push(r.to_bits());
+            }
+            for r in f.boundary_reactions() {
+                d.extend([r.1.x.to_bits(), r.1.y.to_bits(), r.2.z.to_bits()]);
+            }
+            d
+        };
+        assert_eq!(
+            digest(1, false),
+            digest(4, false),
+            "纯流体：并行与串行应逐位一致"
+        );
+        assert_eq!(
+            digest(1, true),
+            digest(4, true),
+            "含边界粒子（2b）：并行与串行应逐位一致（bforce 走串行补趟）"
+        );
     }
 }
