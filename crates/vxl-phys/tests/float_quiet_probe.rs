@@ -251,3 +251,109 @@ fn yaw_of(q: Quat) -> f32 {
     let x = q.rotate_vec3(Vec3::X);
     x.z.atan2(x.x)
 }
+
+/// **自旋偏置来源隔离**（仪表，只打印）——上一轮已证"噪声与偏置是两个成分"，本测试只追偏置。
+///
+/// 三格对拍（同槽同体，窗口 180 tick）：
+/// - **干槽**（无流体）：体落在槽底。若它也转 ⇒ 偏置在**刚体接触侧**（排序/法线选择）；
+///   （干槽是刚体↔体素提供者接触，与 2b 无关，能一刀切开"流体 vs 刚体"。）
+/// - **静态体**（marker，inv_mass=0）+ 流体：体不动 ⇒ 读**反作用力矩均值**——
+///   非零即证明"流体对**静止**体也施加系统性转矩"（与体的转动反馈无关）。
+/// - **自由体 + 流体**：基准（复现上一轮的 −0.142 rad/3 s）。
+#[test]
+#[ignore = "仪表（只打印）：自旋偏置来源；见上注"]
+fn float_spin_bias_isolation() {
+    println!("自旋偏置来源隔离（窗口 180 tick；盒半长 0.06、300 kg/m³）");
+    // ① 干槽：无流体
+    {
+        let mut w = World::new(PhysConfig::default());
+        let _v = tank(&mut w);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Vec3::new(0.0, 1.50, 0.0),
+            Quat::IDENTITY,
+            300.0,
+        );
+        let (yaw, wpp) = run_yaw(&mut w, b as usize, 480, 180);
+        println!("  ① 干槽（无流体）：累计偏航 {yaw:+.3} rad | |ω| 峰 {wpp:.3} rad/s");
+    }
+    // ② 静态体 + 流体：读反作用力矩均值（含 τ_y 分量）
+    {
+        let mut w = World::new(PhysConfig::default());
+        let v = tank(&mut w);
+        let sys = water(2);
+        let fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
+        let half = Vec3::splat(0.06);
+        let s = w.add_static(
+            Shape::Box { half },
+            Vec3::new(0.0, 1.20, 0.0),
+            Quat::IDENTITY,
+        );
+        let mut tsum = Vec3::ZERO;
+        let mut n = 0.0f32;
+        for _ in 0..480 {
+            w.step();
+            if let Some(r) = w.fluids()[fid]
+                .0
+                .boundary_reactions()
+                .iter()
+                .find(|r| r.0 == s)
+            {
+                tsum += r.2;
+                n += 1.0;
+            }
+        }
+        let tm = tsum * (1.0 / n.max(1.0));
+        println!(
+            "  ② 静态体 + 流体：反作用力矩均值 τ = ({:+.4}, {:+.4}, {:+.4}) N·m | |τ| {:.4}",
+            tm.x,
+            tm.y,
+            tm.z,
+            tm.length()
+        );
+    }
+    // ③ 自由体 + 流体（基准）
+    {
+        let mut w = World::new(PhysConfig::default());
+        let v = tank(&mut w);
+        let sys = water(2);
+        let _fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Vec3::new(0.0, 1.50, 0.0),
+            Quat::IDENTITY,
+            300.0,
+        );
+        let (yaw, wpp) = run_yaw(&mut w, b as usize, 300, 180);
+        println!("  ③ 自由体 + 流体（基准）：累计偏航 {yaw:+.3} rad | |ω| 峰 {wpp:.3} rad/s");
+    }
+}
+
+/// 跑 `settle` 步再取 `win` 步窗口，返回（累计偏航、|ω| 峰）。
+fn run_yaw(w: &mut World, body: usize, settle: usize, win: usize) -> (f32, f32) {
+    for _ in 0..settle {
+        w.step();
+    }
+    let mut prev = yaw_of(w.bodies.rot(body));
+    let mut unwrapped = 0.0f32;
+    let mut wpeak = 0.0f32;
+    for _ in 0..win {
+        w.step();
+        let y = yaw_of(w.bodies.rot(body));
+        let mut d = y - prev;
+        while d > std::f32::consts::PI {
+            d -= 2.0 * std::f32::consts::PI;
+        }
+        while d < -std::f32::consts::PI {
+            d += 2.0 * std::f32::consts::PI;
+        }
+        unwrapped += d;
+        prev = y;
+        wpeak = wpeak.max(w.bodies.angvel(body).length());
+    }
+    (unwrapped, wpeak)
+}
