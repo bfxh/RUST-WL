@@ -1,16 +1,20 @@
-//! **GPU vs CPU 密度相位对拍**（首里程碑第一片；`docs/PLAN-gpu.md` §6）。
+//! **GPU vs CPU 两相位对拍**（首里程碑：密度 + 力/黏度；`docs/PLAN-gpu.md` §6/§9）。
 //!
-//! 产出三件（缺一不可）：
-//! ① **适配器清单**（含 Intel iGPU ⇒ 证明"不绑厂商"可验）；
-//! ② **一致性**：同一份状态、同一张邻域表 ⇒ GPU 密度 vs CPU 密度的**最大绝对差**与
-//!    **逐位相同**判定（口径 A 的判据）；
-//! ③ **性能**：GPU 一轮（上传+分派+回读）的墙钟 ms，与 CPU 密度相位的 ms/tick 并列（先给量级）。
+//! 产出四件：
+//! ① **适配器清单**（含 Intel iGPU ⇒ "不绑厂商"可验）；
+//! ② **一致性**：与 GPU **吃同一份输入**的 CPU 参考实现逐位/量化比对（口径 A 的判据）；
+//! ③ **性能**：GPU 两相位**稳态每轮**（含同步回读）与一次性 setup 分开报；
+//! ④ 与**引擎相位报表**（`sph_scale`）并列，给"离真实 tick 还有多远"的量级。
+//!
+//! ⚠️ **口径（首片踩过）**：不能拿引擎 `step()` 之后的 `densities()` 与"按当前位置算的 GPU 密度"
+//! 相比——引擎的密度是**积分前**位置算的，位置已经前进了一个子步（≈0.4–12 mm）⇒ 那是拿两个
+//! 不同输入在比。本示例因此自带 CPU 参考实现（与 GPU **同输入、同式、同遍历序**）。
 //!
 //! 运行：`cargo run --release -p vxl-phys-gpu --example gpu_density_probe -- [n] [--adapter K]`
-//! 默认 `n=40`（64 000 粒）；`n=50` ⇒ 125 000 粒。
 
+use vxl_phys_core::Vec3;
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
-use vxl_phys_gpu::probe::{self, DensityParams};
+use vxl_phys_gpu::probe::{self, PhaseInputs, PhaseParams};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -31,13 +35,13 @@ fn main() {
         println!("  [{i}] {a}");
     }
 
-    // —— CPU 侧：跑一个 tick（CPU 算好密度 + 建好邻域网格）——
+    // —— 场景（纯流体：无 provider、无边界粒子 ⇒ 与两核的"流体分支"口径一致）——
     let spacing = 0.05f32;
     let cfg = FluidConfig::default();
     let h = cfg.smoothing_radius;
     let mut f = FluidSystem::new(
         cfg,
-        vxl_phys_core::Vec3::new(
+        Vec3::new(
             -(n as f32) * spacing * 0.5,
             0.5,
             -(n as f32) * spacing * 0.5,
@@ -45,77 +49,208 @@ fn main() {
         [n, n, n],
         spacing,
     );
-    let t0 = std::time::Instant::now();
-    f.step(1.0 / 60.0, &vxl_phys_core::interop::NoProviders);
-    let cpu_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let cpu_dens = f.densities().to_vec();
+    // 跑几个 tick 让状态远离初始晶格（密度/压力有内容），再取**同一份**输入给两边
+    for _ in 0..5 {
+        f.step(1.0 / 60.0, &vxl_phys_core::interop::NoProviders);
+    }
     let np = f.len();
-
-    // CPU 侧参数（与 `FluidSystem::new` 内同式：k6/w0 由 h 推）
+    let pos: Vec<Vec3> = f.positions().to_vec();
+    let vel: Vec<Vec3> = f.velocities().to_vec();
+    let dens_cpu: Vec<f32> = f.densities().to_vec();
+    let press_cpu: Vec<f32> = f.pressures().to_vec();
+    let mass = f.particle_mass();
+    let g = f.config().gravity;
+    let alpha_c = f.config().artificial_viscosity * f.config().sound_speed;
     let h2 = h * h;
     let k6 = 315.0 / (64.0 * std::f32::consts::PI * h.powi(9));
+    let ks = 45.0 / (std::f32::consts::PI * h.powi(6));
     let w0 = k6 * h2 * h2 * h2;
-    let mass = f.particle_mass();
+    let gd = f.neighbor_grid();
 
-    // 扁平化位置（GPU 布局 = 每粒 3 个 f32）
-    let mut pos_flat: Vec<f32> = Vec::with_capacity(np * 3);
-    for p in f.positions() {
-        pos_flat.extend_from_slice(&[p.x, p.y, p.z]);
+    // —— CPU 参考实现（与 GPU 同输入、同式、同遍历序）——
+    let cell_range = |p: Vec3| -> (i32, i32, i32) {
+        let f = |o: f32, v: f32, m: u32| -> i32 {
+            ((((v - o) * gd.inv).floor().max(0.0) as u32).min(m - 1)) as i32
+        };
+        (
+            f(gd.min.x, p.x, gd.dims.0),
+            f(gd.min.y, p.y, gd.dims.1),
+            f(gd.min.z, p.z, gd.dims.2),
+        )
+    };
+    let (nx, ny, nz) = (gd.dims.0 as i32, gd.dims.1 as i32, gd.dims.2 as i32);
+    let mut ref_dens = vec![0.0f32; np];
+    let mut ref_acc = vec![Vec3::ZERO; np];
+    let mut ref_xsph = vec![Vec3::ZERO; np];
+    let t_cpu = std::time::Instant::now();
+    for i in 0..np {
+        let pi = pos[i];
+        let (cx, cy, cz) = cell_range(pi);
+        let mut sum = w0;
+        let vi = vel[i];
+        let rho_i = dens_cpu[i];
+        let ci2 = press_cpu[i] / (rho_i * rho_i);
+        let mut a = g;
+        let mut xs = Vec3::ZERO;
+        for dz in -1..=1i32 {
+            let z = cz + dz;
+            if z < 0 || z >= nz {
+                continue;
+            }
+            for dy in -1..=1i32 {
+                let y = cy + dy;
+                if y < 0 || y >= ny {
+                    continue;
+                }
+                for dx in -1..=1i32 {
+                    let x = cx + dx;
+                    if x < 0 || x >= nx {
+                        continue;
+                    }
+                    let ci = ((x as u32 * ny as u32 + y as u32) * nz as u32 + z as u32) as usize;
+                    for k in gd.start[ci]..gd.start[ci + 1] {
+                        let j = gd.items[k as usize] as usize;
+                        if j == i {
+                            continue;
+                        }
+                        let d = pi - pos[j];
+                        let r2 = d.x * d.x + d.y * d.y + d.z * d.z;
+                        if r2 > h2 {
+                            continue;
+                        }
+                        let t = h2 - r2;
+                        let w = k6 * t * t * t;
+                        sum += w;
+                        // 力相位（同 GPU 核）
+                        let rho_j = dens_cpu[j];
+                        let cj2 = press_cpu[j] / (rho_j * rho_j);
+                        let r = r2.sqrt();
+                        let tr = h - r;
+                        let coef = mass * (ks * tr * tr) * (ci2 + cj2);
+                        let denom = r.max(1e-9);
+                        a += d * (coef / denom);
+                        let vij = vi - vel[j];
+                        let vdn = -(vij.x * d.x + vij.y * d.y + vij.z * d.z);
+                        if vdn > 0.0 {
+                            let mu = vdn * h / (r2 + 0.01 * h2);
+                            let c =
+                                mass * (alpha_c * mu / (0.5 * (rho_i + rho_j))) * (ks * tr * tr);
+                            a += d * (c / denom);
+                        }
+                        xs += (vel[j] - vi) * (mass * 2.0 / (rho_i + rho_j) * w);
+                    }
+                }
+            }
+        }
+        ref_dens[i] = mass * sum;
+        ref_acc[i] = a;
+        ref_xsph[i] = xs;
     }
-    let pmass = vec![mass; np]; // 纯流体：逐粒质量 = mass（边界分支不会触发）
-    let g = f.neighbor_grid();
-    let params = DensityParams {
-        gmin: [g.min.x, g.min.y, g.min.z],
-        inv: g.inv,
+    let cpu_ms = t_cpu.elapsed().as_secs_f64() * 1e3;
+
+    // —— 扁平化输入（与 CPU 参考同一份）——
+    let mut pos_flat: Vec<f32> = Vec::with_capacity(np * 3);
+    let mut vel_flat: Vec<f32> = Vec::with_capacity(np * 3);
+    for k in 0..np {
+        pos_flat.extend_from_slice(&[pos[k].x, pos[k].y, pos[k].z]);
+        vel_flat.extend_from_slice(&[vel[k].x, vel[k].y, vel[k].z]);
+    }
+    let pmass = vec![mass; np];
+    let params = PhaseParams {
+        gmin: [gd.min.x, gd.min.y, gd.min.z],
+        inv: gd.inv,
         h2,
         k6,
         w0,
         mass,
+        ks,
+        h,
+        alpha_c,
+        _pad0: 0.0,
+        gvec: [g.x, g.y, g.z],
         n_fluid: np as u32,
-        nx: g.dims.0,
-        ny: g.dims.1,
-        nz: g.dims.2,
+        nx: gd.dims.0,
+        ny: gd.dims.1,
+        nz: gd.dims.2,
+        _pad: 0,
+    };
+    let inputs = PhaseInputs {
+        pos_flat: &pos_flat,
+        vel_flat: &vel_flat,
+        pmass: &pmass,
+        press: &press_cpu,
+        cell_start: gd.start,
+        cell_items: gd.items,
     };
 
-    // —— GPU 侧 ——
-    let out = probe::density_on_adapter(
-        adapter_index,
-        &pos_flat,
-        &pmass,
-        g.start,
-        g.items,
-        params,
-        np,
-        20,
-    );
+    let out = probe::phases_on_adapter(adapter_index, &inputs, params, np, 20);
     if let Some(e) = out.error {
         println!("GPU 路径不可用：{e}");
         return;
     }
-    // 一致性：最大绝对差 + 逐位相同计数
-    let mut max_diff = 0.0f32;
-    let mut bit_same = 0usize;
-    for (a, b) in cpu_dens.iter().zip(out.dens.iter()) {
-        let d = (a - b).abs();
-        if d > max_diff {
-            max_diff = d;
+
+    let cmp3 = |a: &[Vec3], b: &[f32]| -> (f32, f32, usize) {
+        let mut maxd = 0.0f32;
+        let mut maxr = 0.0f32;
+        let mut bit = 0usize;
+        for (i, v) in a.iter().enumerate() {
+            for (k, x) in [v.x, v.y, v.z].into_iter().enumerate() {
+                let y = b[i * 3 + k];
+                let d = (x - y).abs();
+                if d > maxd {
+                    maxd = d;
+                }
+                let den = x.abs().max(1e-6);
+                if d / den > maxr {
+                    maxr = d / den;
+                }
+                if x.to_bits() == y.to_bits() {
+                    bit += 1;
+                }
+            }
+        }
+        (maxd, maxr, bit)
+    };
+    // 密度：逐粒比
+    let mut dmx = 0.0f32;
+    let mut dbt = 0usize;
+    for (a, b) in ref_dens.iter().zip(out.dens.iter()) {
+        let dd = (a - b).abs();
+        if dd > dmx {
+            dmx = dd;
         }
         if a.to_bits() == b.to_bits() {
-            bit_same += 1;
+            dbt += 1;
         }
     }
-    println!("== 对拍（密度相位 {np} 粒）==");
+    let (amax, arel, abit) = cmp3(&ref_acc, &out.acc);
+    let (xmax, xrel, xbit) = cmp3(&ref_xsph, &out.xsph);
+
+    println!("== 对拍（两相位 {np} 粒；CPU 参考 = 示例内实现，与 GPU **同输入/同式/同遍历序**）==");
     println!("  适配器：{}", out.adapter);
     println!(
-        "  一致性：最大绝对差 {max_diff:.3e} kg/m³ | 逐位相同 {bit_same}/{np}（{:.2}%）",
-        100.0 * bit_same as f64 / np as f64
+        "  密度：最大绝对差 {dmx:.3e} kg/m³ | 逐位相同 {dbt}/{np}（{:.2}%）",
+        100.0 * dbt as f64 / np as f64
     );
     println!(
-        "  耗时：GPU **稳态每轮**（仅分派+提交，20 次均值）{:.3} ms | 一次性 setup（设备/缓冲/管线+上传+回读）{:.1} ms",
+        "  acc ：最大绝对差 {amax:.3e} m/s² | 最大相对差 {arel:.2e} | 逐位相同 {abit}/{}（{:.2}%）",
+        np * 3,
+        100.0 * abit as f64 / (np * 3) as f64
+    );
+    println!(
+        "  xsph：最大绝对差 {xmax:.3e} m/s | 最大相对差 {xrel:.2e} | 逐位相同 {xbit}/{}（{:.2}%）",
+        np * 3,
+        100.0 * xbit as f64 / (np * 3) as f64
+    );
+    println!(
+        "  耗时：GPU **稳态每轮**（两核 + 同步回读，20 次均值）{:.3} ms | 一次性 setup {:.1} ms | CPU 参考实现（单线程朴素）{cpu_ms:.1} ms",
         out.per_dispatch_ms, out.setup_ms
     );
     println!(
-        "  参照：CPU 完整 tick（网格+密度+压力+力+积分）{cpu_ms:.1} ms；其中**密度相位**请用 `sph_scale` 相位报表读同档读数"
+        "  参照（引擎同档相位报表）：密度+力 ≈ {:.0} ms/tick（`sph_scale` 读；4 子步）",
+        44.2 + 80.8
     );
-    println!("  口径：本片只搬了**密度相位**；GPU 侧尚未含「网格重建」与其它相位 ⇒ 只作首片量级与一致性对照。");
+    println!(
+        "  口径：GPU 侧尚未含「网格重建」与「积分」；口径 A（位级）未达 ⇒ 走量化+容差（见 §9.2）。"
+    );
 }

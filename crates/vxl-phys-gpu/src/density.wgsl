@@ -2,9 +2,14 @@
 //
 // 为什么要"同遍历序"：本仓确定性契约要求 GPU 与 CPU **可对拍**（口径 A：决定性设计 ⇒ 能位级就位级）。
 // 邻域按 `cell_start/cell_items`（CPU 侧计数排序网格）**格坐标序 × 格内索引序**枚举，
-// 与 CPU 的 `UniformGrid::for_neighbors_in` 完全一致 ⇒ 同一 f32 运算序 ⇒ 期望**逐位相同**。
+// 与 CPU 的 `UniformGrid::for_neighbors_in` 完全一致 ⇒ 同一运算序。
 //
-// 布局（避开 WGSL 的 vec3 对齐坑）：数组一律**扁平 f32**，`pmass`/`dens` 每粒一个 f32。
+// **绑定布局**（每核一张；wgpu 要求 storage 访问权限**精确匹配**，且每 stage ≤ 8 个 storage）：
+//   全局槽位号（两核一致）：0 params(uniform) | 1 pos | 2 vel | 3 pmass | 4 press
+//     | 5 cell_start | 6 cell_items | 7 dens | 8 out(acc.xyz + xsph.xyz 交错)
+// 本核只用 0/1/3/5/6/7（`dens` 为读写：本核写出，力核只读）。
+//
+// **量纲/口径**：本片取纯流体场景（无边界粒子、无 provider）⇒ 与 CPU 的流体分支一致。
 
 struct Params {
     gmin: vec3<f32>,
@@ -13,18 +18,23 @@ struct Params {
     k6: f32,
     w0: f32,
     mass: f32,
+    ks: f32,
+    h: f32,
+    alpha_c: f32,
+    gvec: vec3<f32>,
     n_fluid: u32,
     nx: u32,
     ny: u32,
     nz: u32,
+    _pad: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read> pos: array<f32>;
-@group(0) @binding(2) var<storage, read> pmass: array<f32>;
-@group(0) @binding(3) var<storage, read> cell_start: array<u32>;
-@group(0) @binding(4) var<storage, read> cell_items: array<u32>;
-@group(0) @binding(5) var<storage, read_write> dens: array<f32>;
+@group(0) @binding(3) var<storage, read> pmass: array<f32>;
+@group(0) @binding(5) var<storage, read> cell_start: array<u32>;
+@group(0) @binding(6) var<storage, read> cell_items: array<u32>;
+@group(0) @binding(7) var<storage, read_write> dens: array<f32>;
 
 fn p3(i: u32) -> vec3<f32> {
     return vec3<f32>(pos[i * 3u], pos[i * 3u + 1u], pos[i * 3u + 2u]);
