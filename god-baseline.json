@@ -45,9 +45,9 @@
   "max_type_members": 6
  },
  "crates/vxl-phys-broad/src/lib.rs": {
-  "file_lines": 963,
-  "max_fn_lines": 256,
-  "max_type_members": 13
+  "file_lines": 274,
+  "max_fn_lines": 66,
+  "max_type_members": 0
  },
  "crates/vxl-phys-broad/src/shape.rs": {
   "file_lines": 111,
