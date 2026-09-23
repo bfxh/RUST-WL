@@ -25,543 +25,20 @@
 
 use vxl_phys_core::{BodySet, Mat3, PhysConfig, Vec3};
 
-/// 关节类型（与 PhysArena 的 JointKind 同构；`Spring` 归入 `Distance`）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum JointKind {
-    /// 球形：两个锚点重合（3 线性约束），相对转动自由。
-    Spherical,
-    /// 转动：锚点重合 + 相对转动只允许绕 `axis`（锁 2 个角自由度）。
-    Revolute,
-    /// 固定：锚点重合 + 相对转动全锁（6 自由度）。
-    Fixed,
-    /// 棱柱：只允许沿 `axis` 平移（锁 2 线性 + 3 角自由度）。
-    Prismatic,
-    /// 距离：两锚点距离 = `rest`（1 约束）。
-    Distance,
-}
-
-/// 一条关节（引擎侧 IR；锚点/轴均为**体局部**）。
-#[derive(Clone, Copy, Debug)]
-pub struct Joint {
-    pub kind: JointKind,
-    pub a: u32,
-    pub b: u32,
-    pub anchor_a: Vec3,
-    pub anchor_b: Vec3,
-    /// 局部轴（转动/棱柱用；球形/固定/距离忽略）。
-    pub axis_a: Vec3,
-    pub axis_b: Vec3,
-    /// 距离关节的静止长度。
-    pub rest: f32,
-    /// **马达目标**（转动：自由轴的相对角速度 rad/s；棱柱：沿轴的相对线速度 m/s）。
-    /// `motor_max_force <= 0` = 无马达（默认）⇒ 逐位等价于无马达行为。
-    pub motor_target: f32,
-    /// 马达最大力/矩（N 或 N·m）；每子步的冲量上钳 = `motor_max_force · dt`。
-    pub motor_max_force: f32,
-    /// **转动限位**（rad，绕自由轴）与**棱柱行程限位**（m，沿轴；`lower >= upper`
-    /// 视为未设）。判据用**当前相对姿态/锚点几何**直接算（无跨帧累计状态 ⇒ 无漂移、
-    /// 逐位确定），越界时才建单边行 + 偏置推回。两者都在马达之后解（限位最后说话）。
-    pub limit_lower: f32,
-    pub limit_upper: f32,
-}
-
-impl Joint {
-    pub fn new(kind: JointKind, a: u32, b: u32, anchor_a: Vec3, anchor_b: Vec3) -> Self {
-        Self {
-            kind,
-            a,
-            b,
-            anchor_a,
-            anchor_b,
-            axis_a: Vec3::X,
-            axis_b: Vec3::X,
-            rest: 0.0,
-            motor_target: 0.0,
-            motor_max_force: 0.0,
-            limit_lower: 1.0,
-            limit_upper: -1.0,
-        }
-    }
-
-    /// 加**转动限位**（rad，绕 `axis_a`；`lower >= upper` 视为未设）。
-    pub fn with_limits(mut self, lower: f32, upper: f32) -> Self {
-        self.limit_lower = lower;
-        self.limit_upper = upper;
-        self
-    }
-
-    /// 加**马达**（转动：目标角速度 rad/s；棱柱：目标线速度 m/s；`max_force <= 0` = 关）。
-    /// 关节限位仍未实现（需累计相对转角状态）。
-    pub fn with_motor(mut self, target_velocity: f32, max_force: f32) -> Self {
-        self.motor_target = target_velocity;
-        self.motor_max_force = max_force;
-        self
-    }
-
-    pub fn with_axis(mut self, axis: Vec3) -> Self {
-        self.axis_a = axis;
-        self.axis_b = axis;
-        self
-    }
-
-    pub fn with_rest(mut self, rest: f32) -> Self {
-        self.rest = rest;
-        self
-    }
-}
-
-/// 关节集合（世界持有；每帧求解一遍）。
-#[derive(Default)]
-pub struct JointSet {
-    pub joints: Vec<Joint>,
-}
-
-/// 关节求解参数（与接触通道同口径：软约束偏置 + CFM 正则化近似）。
-#[derive(Clone, Copy)]
-struct JointParams {
-    /// 位置偏置率（1/s）：`β·inv_dt`。
-    bias_inv_dt: f32,
-    /// `1/dt`（马达冲量上钳换算用：`max_force·dt = max_force / inv_dt`）。
-    inv_dt: f32,
-    /// 速度级残差下限（早退判据，m/s）。
-    eps: f32,
-    /// 最少迭代数（早退前的保底）。
-    min_iters: u32,
-}
-
-fn params(cfg: &PhysConfig, dt: f32) -> JointParams {
-    let inv_dt = 1.0 / dt.max(1e-6);
-    // β 取配置的 baumgarte 档（默认 ≈0.2 档）——偏置率随步长归一，跨子步一致。
-    JointParams {
-        bias_inv_dt: cfg.baumgarte.max(0.0) * inv_dt,
-        inv_dt,
-        eps: 0.002,
-        min_iters: 4,
-    }
-}
-
-impl JointSet {
-    pub fn add(&mut self, j: Joint) -> u32 {
-        self.joints.push(j);
-        (self.joints.len() - 1) as u32
-    }
-
-    pub fn clear(&mut self) {
-        self.joints.clear();
-    }
-
-    pub fn len(&self) -> usize {
-        self.joints.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.joints.is_empty()
-    }
-
-    /// 唤醒传播（**每子步、接触解算之前**调用）：关节任一端是**清醒的动态体**
-    /// ⇒ 两端（动态端）一起醒。
-    ///
-    /// 静态端**不触发**唤醒：静态体的 `awake` 恒为 true，若按"任一端醒即醒"
-    /// 判定，每个挂在静态锚点上的关节都会把关着的体每子步踢醒——悬挂摆永不
-    /// 入睡（岛级休眠对关节场景失效）。
-    pub fn wake(&self, bodies: &mut BodySet) {
-        for j in &self.joints {
-            let (a, b) = (j.a as usize, j.b as usize);
-            let acting = (bodies.is_dynamic(a) && bodies.awake[a])
-                || (bodies.is_dynamic(b) && bodies.awake[b]);
-            if acting {
-                bodies.wake(a);
-                bodies.wake(b);
-            }
-        }
-    }
-
-    /// 每帧求解（**接触解算之后、位置积分之前**）：先唤醒传播，再按
-    /// `config.joint_iterations` 迭代（早退与接触通道同口径）。
-    pub fn solve(&mut self, bodies: &mut BodySet, config: &PhysConfig, dt: f32) {
-        if self.joints.is_empty() {
-            return;
-        }
-        self.wake(bodies);
-        let sp = params(config, dt);
-        // 关节独立迭代预算（接触档是标定过的接触预算；关节链的敏感度不同，
-        // 见 `PhysConfig::joint_iterations` 的分离-迭代标定表）。
-        let iters = config.joint_iterations.max(1);
-        for it in 0..iters {
-            let mut resid = 0.0f32;
-            for j in self.joints.iter_mut() {
-                let (a, b) = (j.a as usize, j.b as usize);
-                if !joint_active(bodies, a, b) {
-                    continue;
-                }
-                resid = resid.max(solve_joint(j, bodies, &sp));
-            }
-            if it + 1 >= sp.min_iters && resid < sp.eps {
-                break;
-            }
-        }
-    }
-}
-
-/// 该关节本子步是否活跃（至少一端是清醒动态体）。
-///
-/// 整组沉睡/双静态 ⇒ 不施加冲量：对沉睡体写速度/角速度会破坏岛级休眠语义
-/// （体明明睡着却被关节推着走，`stability-sleep` 类判据就失去意义）。
-#[inline]
-fn joint_active(bodies: &BodySet, a: usize, b: usize) -> bool {
-    (bodies.is_dynamic(a) && bodies.awake[a]) || (bodies.is_dynamic(b) && bodies.awake[b])
-}
-
-/// 求解一条关节一次（返回本次的最大速度级修正，供早退判据）。
-///
-/// **有效质量用完整 3×3 矩阵**（不是逐轴对角近似）：点约束的线性/角向耦合在
-/// 「锚点偏移大 + 惯量小」时对角近似的迭代会发散（实测：悬挂摆 1 步内速度 ×4
-/// 爆炸）——3×3 解是标准做法，也只在每关节每迭代算一次。
-fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
-    let (ai, bi) = (j.a as usize, j.b as usize);
-    let (pa, qa) = bodies.pose(ai);
-    let (pb, qb) = bodies.pose(bi);
-    let ra = Mat3::from_quat(qa).mul_vec3(j.anchor_a);
-    let rb = Mat3::from_quat(qb).mul_vec3(j.anchor_b);
-    let wa = pa + ra;
-    let wb = pb + rb;
-    let err = wb - wa; // 位置误差（a→b）
-    let inv_ma = bodies.inv_mass[ai];
-    let inv_mb = bodies.inv_mass[bi];
-    if inv_ma == 0.0 && inv_mb == 0.0 {
-        return 0.0; // 双静态：无自由度
-    }
-
-    // ---- 线性行 ----
-    let mut max_dv = match j.kind {
-        JointKind::Distance => {
-            // 单行：沿两锚点连线，约束 |d| = rest（一维，无耦合问题）。
-            let d = wb - wa;
-            let len = d.length();
-            if len <= 1e-6 {
-                0.0
-            } else {
-                let n = d * (1.0 / len);
-                let bias = -(len - j.rest) * sp.bias_inv_dt;
-                let v = rel_vel(bodies, ai, bi, ra, rb);
-                let k = row_mass(bodies, ai, bi, ra, rb, n);
-                let lambda = if k > 1e-9 {
-                    -(v.dot(n) + bias) / k
-                } else {
-                    0.0
-                };
-                apply_pair(bodies, ai, bi, ra, rb, n * lambda);
-                lambda.abs()
-            }
-        }
-        JointKind::Prismatic => {
-            // 锁两条与滑动轴垂直的线性自由度（2×2 投影求解）。
-            let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-            let [t1, t2] = perp_basis(axis_w);
-            let k3 = point_k(bodies, ai, bi, ra, rb);
-            let (k11, k12, k22) = (proj(k3, t1, t1), proj(k3, t1, t2), proj(k3, t2, t2));
-            let det = k11 * k22 - k12 * k12;
-            if det.abs() < 1e-12 {
-                0.0
-            } else {
-                let v = rel_vel(bodies, ai, bi, ra, rb);
-                let r1 = -(v.dot(t1) + err.dot(t1) * sp.bias_inv_dt);
-                let r2 = -(v.dot(t2) + err.dot(t2) * sp.bias_inv_dt);
-                let l1 = (r1 * k22 - r2 * k12) / det;
-                let l2 = (r2 * k11 - r1 * k12) / det;
-                apply_pair(bodies, ai, bi, ra, rb, t1 * l1 + t2 * l2);
-                l1.abs().max(l2.abs())
-            }
-        }
-        _ => {
-            // 球/转动/固定：三条线性行（锚点重合），3×3 求解。
-            let k3 = point_k(bodies, ai, bi, ra, rb);
-            let v = rel_vel(bodies, ai, bi, ra, rb);
-            let rhs = -(v + err * sp.bias_inv_dt);
-            match solve3(k3, rhs) {
-                Some(lambda) => {
-                    apply_pair(bodies, ai, bi, ra, rb, lambda);
-                    lambda.length()
-                }
-                None => 0.0,
-            }
-        }
-    };
-
-    // ---- 角行（固定/棱柱锁 3 轴；转动锁垂直于 `axis_a` 的 2 轴）----
-    let k_ang = ang_k(bodies, ai, bi);
-    match j.kind {
-        JointKind::Fixed | JointKind::Prismatic => {
-            let wrel = bodies.angvel(bi) - bodies.angvel(ai);
-            if let Some(lambda) = solve3(k_ang, -wrel) {
-                apply_ang_pair(bodies, ai, bi, lambda);
-                max_dv = max_dv.max(lambda.length());
-            }
-        }
-        JointKind::Revolute => {
-            let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-            let [t1, t2] = perp_basis(axis_w);
-            let wrel = bodies.angvel(bi) - bodies.angvel(ai);
-            let (k11, k12, k22) = (
-                proj(k_ang, t1, t1),
-                proj(k_ang, t1, t2),
-                proj(k_ang, t2, t2),
-            );
-            let det = k11 * k22 - k12 * k12;
-            if det.abs() >= 1e-12 {
-                let r1 = -wrel.dot(t1);
-                let r2 = -wrel.dot(t2);
-                let l1 = (r1 * k22 - r2 * k12) / det;
-                let l2 = (r2 * k11 - r1 * k12) / det;
-                apply_ang_pair(bodies, ai, bi, t1 * l1 + t2 * l2);
-                max_dv = max_dv.max(l1.abs().max(l2.abs()));
-            }
-        }
-        _ => {}
-    }
-
-    // ---- 马达行（转动/棱柱；`motor_max_force <= 0` 直接跳过 ⇒ 无马达时逐位不变）----
-    // 速度级马达：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
-    // **必须排在限位行之前**：限位是更硬的约束，要最后说话——否则马达会把限位刚
-    // 修正好的速度重新驱回越界方向（实测：6 rad/s 的马达直接把限位冲穿 5.77 rad）。
-    if j.motor_max_force > 0.0 && j.motor_max_force.is_finite() && sp.inv_dt > 0.0 {
-        let lim = j.motor_max_force / sp.inv_dt; // 本子步可用冲量上限
-        match j.kind {
-            JointKind::Revolute => {
-                let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-                let wrel = bodies.angvel(bi) - bodies.angvel(ai);
-                let k = axis_w.dot(bodies.apply_world_inv_inertia(ai, axis_w))
-                    + axis_w.dot(bodies.apply_world_inv_inertia(bi, axis_w));
-                if k > 1e-9 {
-                    let lambda = ((j.motor_target - wrel.dot(axis_w)) / k).clamp(-lim, lim);
-                    apply_ang_pair(bodies, ai, bi, axis_w * lambda);
-                    max_dv = max_dv.max(lambda.abs());
-                }
-            }
-            JointKind::Prismatic => {
-                let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-                let v = rel_vel(bodies, ai, bi, ra, rb);
-                let k = row_mass(bodies, ai, bi, ra, rb, axis_w);
-                if k > 1e-9 {
-                    let lambda = ((j.motor_target - v.dot(axis_w)) / k).clamp(-lim, lim);
-                    apply_pair(bodies, ai, bi, ra, rb, axis_w * lambda);
-                    max_dv = max_dv.max(lambda.abs());
-                }
-            }
-            _ => {}
-        }
-    }
-    // ---- 转动限位（绕自由轴的相对转角；单边行 + 偏置推回）**最后解** ----
-    // 角度从**当前相对姿态**直接算：`q_rel = q_a⁻¹·q_b` 沿轴的扭转角
-    // `θ = 2·atan2(q_rel.vec·axis, q_rel.w)`（两者都取体局部轴 ⇒ 与体姿态无关）。
-    // 用姿态而非累计角速度积分：无漂移、纯状态函数 ⇒ 确定性不受影响。
-    // 排在马达之后 ⇒ 越界时马达无法把速度驱回越界方向（限位是更硬的约束）。
-    if matches!(j.kind, JointKind::Revolute) && j.limit_lower < j.limit_upper {
-        let q_rel = qa.conjugate() * qb;
-        let v = Vec3::new(q_rel.x, q_rel.y, q_rel.z);
-        let theta = 2.0 * v.dot(j.axis_a).atan2(q_rel.w);
-        // err > 0 = 低于下界（需往正方向转回）；err < 0 = 高于上界（需往负方向）。
-        let err = if theta < j.limit_lower {
-            j.limit_lower - theta
-        } else if theta > j.limit_upper {
-            j.limit_upper - theta
-        } else {
-            0.0
-        };
-        if err != 0.0 {
-            let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-            let wrel = bodies.angvel(bi) - bodies.angvel(ai);
-            let k = axis_w.dot(bodies.apply_world_inv_inertia(ai, axis_w))
-                + axis_w.dot(bodies.apply_world_inv_inertia(bi, axis_w));
-            if k > 1e-9 {
-                // 单边行：冲量只往"转回限位内"的方向给（带偏置 `β·err/dt` 推回）。
-                // 偏置沿用接触档 β（`bias_inv_dt`）。**不要**改成 β=1：实测棱柱限位
-                // 在 8 m/s 强驱动下过冲 0.033 m（β=1 反而 0.067，Baumgarte 振荡）。
-                // 过冲的物理下界 ≈ **一子步位移 v·dt**（8 m/s × 1/120 = 0.067 m）——
-                // 想把过冲压到 0 需要**投机式限位**（在仍处于界内、但本子步会越过时
-                // 就建行，用预测速度 `s + v·dt` 判），与接触的 speculative margin 同思路。
-                let bias = sp.bias_inv_dt * err;
-                let vn = wrel.dot(axis_w);
-                let lambda = if err > 0.0 {
-                    ((bias - vn) / k).max(0.0)
-                } else {
-                    ((bias - vn) / k).min(0.0)
-                };
-                if lambda != 0.0 {
-                    apply_ang_pair(bodies, ai, bi, axis_w * lambda);
-                    max_dv = max_dv.max(lambda.abs());
-                }
-            }
-        }
-    }
-
-    // ---- 棱柱行程限位（沿轴；同样**最后解** + 单边行 + 偏置推回）----
-    // 行程 = 锚点沿轴的分离量（`err·axis_w`）——与转动限位同招：用**当前几何**
-    // 直接算，不累计位移 ⇒ 无漂移、纯状态函数。锁定行保证其余方向分离 ≈0。
-    if matches!(j.kind, JointKind::Prismatic) && j.limit_lower < j.limit_upper {
-        let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
-        let s = err.dot(axis_w);
-        // err > 0 = 低于下界（需沿正方向推回）；err < 0 = 高于上界。
-        let lerr = if s < j.limit_lower {
-            j.limit_lower - s
-        } else if s > j.limit_upper {
-            j.limit_upper - s
-        } else {
-            0.0
-        };
-        if lerr != 0.0 {
-            let v = rel_vel(bodies, ai, bi, ra, rb);
-            let k = row_mass(bodies, ai, bi, ra, rb, axis_w);
-            if k > 1e-9 {
-                // 偏置沿用接触档 β（同转动限位；β=1 会诱发 Baumgarte 振荡，实测更差）。
-                let bias = sp.bias_inv_dt * lerr;
-                let vn = v.dot(axis_w);
-                let lambda = if lerr > 0.0 {
-                    ((bias - vn) / k).max(0.0)
-                } else {
-                    ((bias - vn) / k).min(0.0)
-                };
-                if lambda != 0.0 {
-                    apply_pair(bodies, ai, bi, ra, rb, axis_w * lambda);
-                    max_dv = max_dv.max(lambda.abs());
-                }
-            }
-        }
-    }
-
-    max_dv
-}
-
-/// 角约束的 3×3 有效质量：`Ia⁻¹ + Ib⁻¹`（世界系）。
-#[inline]
-fn ang_k(bodies: &BodySet, ai: usize, bi: usize) -> [[f32; 3]; 3] {
-    let mut k = [[0.0f32; 3]; 3];
-    for (j, axis) in [Vec3::X, Vec3::Y, Vec3::Z].iter().enumerate() {
-        let c =
-            bodies.apply_world_inv_inertia(ai, *axis) + bodies.apply_world_inv_inertia(bi, *axis);
-        for (i, row) in k.iter_mut().enumerate() {
-            row[j] = [c.x, c.y, c.z][i];
-        }
-    }
-    k
-}
-
-/// 点约束的 3×3 有效质量：`(invMa+invMb)·I + [ra]×ᵀ·Ia⁻¹·[ra]× + [rb]×ᵀ·Ib⁻¹·[rb]×`。
-#[inline]
-fn point_k(bodies: &BodySet, ai: usize, bi: usize, ra: Vec3, rb: Vec3) -> [[f32; 3]; 3] {
-    let mut k = [[0.0f32; 3]; 3];
-    let diag = bodies.inv_mass[ai] + bodies.inv_mass[bi];
-    for (i, row) in k.iter_mut().enumerate() {
-        row[i] = diag;
-    }
-    // 角向贡献：K += Σ_j [ra]×ᵀ·Ia⁻¹·[ra]×，其 (i,j) 元 = e_i·((Ia⁻¹(ra×e_j)) × ra)
-    // ——**先叉（r×e）→ 过惯量 → 再叉 r**。写成 `ra × (I⁻¹(ra × e_j))` 会整体
-    // 反号（约束变成放大器：实测初速 2 m/s 在 3 步内炸到 1e5）；`row_mass`（距离
-    // 关节的单行通道）用的就是这个正确顺序，两者必须一致。
-    // 累加是 `+=`：对角线上已有 `invMa+invMb`，覆盖会把质量项冲掉（矩阵退化成
-    // 纯角向项 ⇒ 与 r 平行的轴对角为 0 ⇒ 奇异，解不出来、约束静默失效）。
-    for (j, axis) in [Vec3::X, Vec3::Y, Vec3::Z].iter().enumerate() {
-        let c_a = bodies
-            .apply_world_inv_inertia(ai, ra.cross(*axis))
-            .cross(ra);
-        let c_b = bodies
-            .apply_world_inv_inertia(bi, rb.cross(*axis))
-            .cross(rb);
-        let col = [c_a.x + c_b.x, c_a.y + c_b.y, c_a.z + c_b.z];
-        for (i, row) in k.iter_mut().enumerate() {
-            row[j] += col[i];
-        }
-    }
-    k
-}
-
-#[inline]
-fn proj(k: [[f32; 3]; 3], a: Vec3, b: Vec3) -> f32 {
-    let ka = [
-        k[0][0] * a.x + k[0][1] * a.y + k[0][2] * a.z,
-        k[1][0] * a.x + k[1][1] * a.y + k[1][2] * a.z,
-        k[2][0] * a.x + k[2][1] * a.y + k[2][2] * a.z,
-    ];
-    ka[0] * b.x + ka[1] * b.y + ka[2] * b.z
-}
-
-/// 3×3 解（克莱姆 + 行列式奇异守卫；确定性）。
-#[inline]
-fn solve3(k: [[f32; 3]; 3], rhs: Vec3) -> Option<Vec3> {
-    let det = k[0][0] * (k[1][1] * k[2][2] - k[1][2] * k[2][1])
-        - k[0][1] * (k[1][0] * k[2][2] - k[1][2] * k[2][0])
-        + k[0][2] * (k[1][0] * k[2][1] - k[1][1] * k[2][0]);
-    if det.abs() < 1e-12 {
-        return None;
-    }
-    let inv = 1.0 / det;
-    let d0 = rhs.x * (k[1][1] * k[2][2] - k[1][2] * k[2][1])
-        - k[0][1] * (rhs.y * k[2][2] - k[1][2] * rhs.z)
-        + k[0][2] * (rhs.y * k[2][1] - k[1][1] * rhs.z);
-    let d1 = k[0][0] * (rhs.y * k[2][2] - k[1][2] * rhs.z)
-        - rhs.x * (k[1][0] * k[2][2] - k[1][2] * k[2][0])
-        + k[0][2] * (k[1][0] * rhs.z - rhs.y * k[2][0]);
-    let d2 = k[0][0] * (k[1][1] * rhs.z - rhs.y * k[2][1])
-        - k[0][1] * (k[1][0] * rhs.z - rhs.y * k[2][0])
-        + rhs.x * (k[1][0] * k[2][1] - k[1][1] * k[2][0]);
-    Some(Vec3::new(d0 * inv, d1 * inv, d2 * inv))
-}
-
-/// 世界系锚点相对速度（b 侧 − a 侧）。
-#[inline]
-fn rel_vel(bodies: &BodySet, ai: usize, bi: usize, ra: Vec3, rb: Vec3) -> Vec3 {
-    let la = bodies.linvel[ai] + bodies.angvel(ai).cross(ra);
-    let lb = bodies.linvel[bi] + bodies.angvel(bi).cross(rb);
-    lb - la
-}
-
-/// 沿单位轴 `n` 的有效质量（对角近似）。
-#[inline]
-fn row_mass(bodies: &BodySet, ai: usize, bi: usize, ra: Vec3, rb: Vec3, n: Vec3) -> f32 {
-    let wa = bodies.apply_world_inv_inertia(ai, ra.cross(n)).cross(ra);
-    let wb = bodies.apply_world_inv_inertia(bi, rb.cross(n)).cross(rb);
-    bodies.inv_mass[ai] + bodies.inv_mass[bi] + n.dot(wa) + n.dot(wb)
-}
-
-/// 施加成对**角**冲量（b 侧 +、a 侧 −）。
-///
-/// **必须按世界系逆惯量缩放**：直接 `ω_a −= λ` 会给静态体写入非零角速度，
-/// 下一迭代 `wrel = ω_b − ω_a` 里越积越大 ⇒ 3 步内炸到 1e33（实测：固定/棱柱
-/// 关节在静态端点上直接爆掉）。静态体 Ia⁻¹ = 0 ⇒ 天然不动。
-#[inline]
-fn apply_ang_pair(bodies: &mut BodySet, ai: usize, bi: usize, imp: Vec3) {
-    let dwa = bodies.apply_world_inv_inertia(ai, imp);
-    let dwb = bodies.apply_world_inv_inertia(bi, imp);
-    bodies.set_angvel_raw(ai, bodies.angvel(ai) - dwa);
-    bodies.set_angvel_raw(bi, bodies.angvel(bi) + dwb);
-}
-
-/// 施加成对线性冲量（b 侧 +、a 侧 −）。#[inline]
-fn apply_pair(bodies: &mut BodySet, ai: usize, bi: usize, ra: Vec3, rb: Vec3, imp: Vec3) {
-    let (im_a, im_b) = (bodies.inv_mass[ai], bodies.inv_mass[bi]);
-    bodies.linvel[ai] -= imp * im_a;
-    bodies.linvel[bi] += imp * im_b;
-    let dwa = bodies.apply_world_inv_inertia(ai, ra.cross(imp));
-    let dwb = bodies.apply_world_inv_inertia(bi, rb.cross(imp));
-    bodies.set_angvel_raw(ai, bodies.angvel(ai) - dwa);
-    bodies.set_angvel_raw(bi, bodies.angvel(bi) + dwb);
-}
-
-/// 与 `axis` 垂直的单位正交基（固定顺序 ⇒ 确定性）。
-#[inline]
-fn perp_basis(axis: Vec3) -> [Vec3; 2] {
-    let a = if axis.x.abs() < 0.9 { Vec3::X } else { Vec3::Y };
-    let t1 = a.cross(axis).normalize();
-    let t2 = axis.cross(t1).normalize();
-    [t1, t2]
-}
+// ── 按域拆出的子模块（子目录 joints/）
+mod linalg;
+mod solve;
+mod types;
+pub(crate) use self::linalg::*;
+pub use self::types::*;
+// ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use vxl_phys_core::{PhysConfig as Cfg, Quat, Shape};
 
-    fn world() -> BodySet {
+    pub(crate) fn world() -> BodySet {
         let mut b = BodySet::new();
         // 锚点（静态，中心 y=10）
         b.push_static(
@@ -587,7 +64,7 @@ mod tests {
 
     /// 半步积分（与 `vxl-phys-integrate` 同一数学：位置 += v·dt、姿态走
     /// `Quat::integrate_angular`）——让关节真的"受力保持"。
-    fn integrate(bodies: &mut BodySet, dt: f32) {
+    pub(crate) fn integrate(bodies: &mut BodySet, dt: f32) {
         for i in 0..bodies.len() {
             if !bodies.is_dynamic(i) || !bodies.awake[i] {
                 continue;
@@ -599,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn spherical_holds_anchor_within_tolerance() {
+    pub(crate) fn spherical_holds_anchor_within_tolerance() {
         let mut bodies = world();
         // 给悬挂体一个侧向初速 ⇒ 摆动；关节须把锚点拉在容差内。
         bodies.linvel[1] = Vec3::new(2.0, 0.0, 0.0);
@@ -642,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_locks_both_position_and_orientation() {
+    pub(crate) fn fixed_locks_both_position_and_orientation() {
         let mut bodies = world();
         bodies.linvel[1] = Vec3::new(1.5, 0.0, 0.0);
         bodies.set_angvel_raw(1, Vec3::new(0.0, 0.0, 3.0));
@@ -679,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn revolute_spins_about_axis_and_locks_the_rest() {
+    pub(crate) fn revolute_spins_about_axis_and_locks_the_rest() {
         let mut bodies = world();
         bodies.set_angvel_raw(1, Vec3::new(0.0, 3.0, 0.0)); // 绕自由轴自转
         let mut set = JointSet::default();
@@ -716,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn prismatic_slides_only_along_axis() {
+    pub(crate) fn prismatic_slides_only_along_axis() {
         let mut bodies = world();
         bodies.linvel[1] = Vec3::new(1.5, 0.0, 0.0); // 侧向 ⇒ 必须被抑制
         bodies.set_angvel_raw(1, Vec3::new(0.0, 0.0, 2.0)); // 自转 ⇒ 必须被抑制
@@ -755,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn revolute_motor_drives_target_and_respects_force_clamp() {
+    pub(crate) fn revolute_motor_drives_target_and_respects_force_clamp() {
         // 强马达：60 步内把自由轴相对角速度驱到目标（3 rad/s），锚点仍被约束保持。
         let run = |max_force: f32, steps: usize| -> (f32, f32) {
             let mut bodies = world();
@@ -801,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn prismatic_motor_drives_along_axis() {
+    pub(crate) fn prismatic_motor_drives_along_axis() {
         let mut bodies = world();
         let mut set = JointSet::default();
         set.add(
@@ -830,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn revolute_limit_stops_rotation_at_both_ends() {
+    pub(crate) fn revolute_limit_stops_rotation_at_both_ends() {
         // 限位可正可负：给自由轴一个持续驱动（用马达当"载荷"），转角必须停在
         // [lower, upper] 内，且不振荡穿透（严苛：越界量 < 0.05 rad）。
         for (target, lo, hi) in [(6.0f32, -0.5f32, 0.5f32), (-6.0, -0.4, 0.9)] {
@@ -871,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn revolute_limit_allows_free_motion_inside() {
+    pub(crate) fn revolute_limit_allows_free_motion_inside() {
         // 区间内不得有阻力：给 0.3 rad/s 初速、区间 [-1,1]，300 步后应仍在转
         // （若限位实现误把区间内也约束住，这里会立刻停住）。
         let mut bodies = world();
@@ -903,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn prismatic_limit_stops_travel_at_both_ends() {
+    pub(crate) fn prismatic_limit_stops_travel_at_both_ends() {
         // 沿 Y 的自由轴 + 强马达（当持续载荷）驱向下；限位 [-0.5, 0.2] 必须挡住，
         // 越界量 < 0.02 m。再测反向驱动撞上界。
         for (target, lo, hi) in [(-8.0f32, -0.5f32, 0.2f32), (8.0, -0.5, 0.6)] {
@@ -955,7 +432,7 @@ mod tests {
     }
 
     #[test]
-    fn prismatic_limit_allows_free_travel_inside() {
+    pub(crate) fn prismatic_limit_allows_free_travel_inside() {
         // 区间内不得有阻力：0.5 m/s 初速、区间 [-2,2]，60 步后速度基本保持。
         let mut bodies = world();
         bodies.linvel[1] = Vec3::new(0.0, 0.5, 0.0);
@@ -985,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn distance_holds_rest_length() {
+    pub(crate) fn distance_holds_rest_length() {
         let mut bodies = world();
         // 静止长度取**初始真实距离**（锚点初重合 ⇒ 体心距 = 0.4 + 0.4? 用体心）
         let d0 = (bodies.pose(1).0 - bodies.pose(0).0).length();

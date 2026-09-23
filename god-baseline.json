@@ -289,15 +289,75 @@
   "max_fn_lines": 21,
   "max_type_members": 0
  },
+ "crates/vxl-phys-solver/src/cfg.rs": {
+  "file_lines": 64,
+  "max_fn_lines": 0,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/constraint.rs": {
+  "file_lines": 348,
+  "max_fn_lines": 340,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/helpers.rs": {
+  "file_lines": 136,
+  "max_fn_lines": 30,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/island.rs": {
+  "file_lines": 358,
+  "max_fn_lines": 210,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-solver/src/joints.rs": {
-  "file_lines": 1007,
+  "file_lines": 484,
+  "max_fn_lines": 50,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/joints/linalg.rs": {
+  "file_lines": 134,
+  "max_fn_lines": 26,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/joints/solve.rs": {
+  "file_lines": 306,
   "max_fn_lines": 214,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-solver/src/joints/types.rs": {
+  "file_lines": 107,
+  "max_fn_lines": 16,
   "max_type_members": 12
  },
  "crates/vxl-phys-solver/src/lib.rs": {
-  "file_lines": 2019,
+  "file_lines": 99,
+  "max_fn_lines": 52,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/solver_impl.rs": {
+  "file_lines": 615,
   "max_fn_lines": 551,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys-solver/src/stats.rs": {
+  "file_lines": 132,
+  "max_fn_lines": 9,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/types.rs": {
+  "file_lines": 220,
+  "max_fn_lines": 28,
   "max_type_members": 21
+ },
+ "crates/vxl-phys-solver/src/warm.rs": {
+  "file_lines": 34,
+  "max_fn_lines": 0,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/warm_data.rs": {
+  "file_lines": 57,
+  "max_fn_lines": 3,
+  "max_type_members": 1
  },
  "crates/vxl-phys-splat/src/lib.rs": {
   "file_lines": 686,
