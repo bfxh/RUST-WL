@@ -1,5 +1,6 @@
 //! solve：从 joints.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
+use vxl_phys_core::Quat;
 
 pub(crate) fn params(cfg: &PhysConfig, dt: f32) -> JointParams {
     let inv_dt = 1.0 / dt.max(1e-6);
@@ -89,26 +90,23 @@ pub(crate) fn joint_active(bodies: &BodySet, a: usize, b: usize) -> bool {
 /// **有效质量用完整 3×3 矩阵**（不是逐轴对角近似）：点约束的线性/角向耦合在
 /// 「锚点偏移大 + 惯量小」时对角近似的迭代会发散（实测：悬挂摆 1 步内速度 ×4
 /// 爆炸）——3×3 解是标准做法，也只在每关节每迭代算一次。
-pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
-    let (ai, bi) = (j.a as usize, j.b as usize);
-    let (pa, qa) = bodies.pose(ai);
-    let (pb, qb) = bodies.pose(bi);
-    let ra = Mat3::from_quat(qa).mul_vec3(j.anchor_a);
-    let rb = Mat3::from_quat(qb).mul_vec3(j.anchor_b);
-    let wa = pa + ra;
-    let wb = pb + rb;
-    let err = wb - wa; // 位置误差（a→b）
-    let inv_ma = bodies.inv_mass[ai];
-    let inv_mb = bodies.inv_mass[bi];
-    if inv_ma == 0.0 && inv_mb == 0.0 {
-        return 0.0; // 双静态：无自由度
-    }
-
-    // ---- 线性行 ----
-    let mut max_dv = match j.kind {
+/// 线性行：按关节类型解锚点约束，返回本次扫掠的最大速度级修正。
+#[allow(clippy::too_many_arguments)]
+fn linear_rows(
+    j: &Joint,
+    bodies: &mut BodySet,
+    ai: usize,
+    bi: usize,
+    qa: Quat,
+    ra: Vec3,
+    rb: Vec3,
+    err: Vec3,
+    sp: &JointParams,
+) -> f32 {
+    match j.kind {
         JointKind::Distance => {
             // 单行：沿两锚点连线，约束 |d| = rest（一维，无耦合问题）。
-            let d = wb - wa;
+            let d = err;
             let len = d.length();
             if len <= 1e-6 {
                 0.0
@@ -158,9 +156,18 @@ pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams)
                 None => 0.0,
             }
         }
-    };
+    }
+}
 
-    // ---- 角行（固定/棱柱锁 3 轴；转动锁垂直于 `axis_a` 的 2 轴）----
+/// 角行：固定/棱柱锁 3 轴、转动锁垂直于自由轴的 2 轴；返回更新后的最大修正。
+fn angular_rows(
+    j: &Joint,
+    bodies: &mut BodySet,
+    qa: Quat,
+    ai: usize,
+    bi: usize,
+    mut max_dv: f32,
+) -> f32 {
     let k_ang = ang_k(bodies, ai, bi);
     match j.kind {
         JointKind::Fixed | JointKind::Prismatic => {
@@ -192,10 +199,22 @@ pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams)
         _ => {}
     }
 
-    // ---- 马达行（转动/棱柱；`motor_max_force <= 0` 直接跳过 ⇒ 无马达时逐位不变）----
-    // 速度级马达：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
-    // **必须排在限位行之前**：限位是更硬的约束，要最后说话——否则马达会把限位刚
-    // 修正好的速度重新驱回越界方向（实测：6 rad/s 的马达直接把限位冲穿 5.77 rad）。
+    max_dv
+}
+
+/// 马达行（速度级）：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
+#[allow(clippy::too_many_arguments)]
+fn motor_rows(
+    j: &Joint,
+    bodies: &mut BodySet,
+    qa: Quat,
+    ai: usize,
+    bi: usize,
+    ra: Vec3,
+    rb: Vec3,
+    sp: &JointParams,
+    mut max_dv: f32,
+) -> f32 {
     if j.motor_max_force > 0.0 && j.motor_max_force.is_finite() && sp.inv_dt > 0.0 {
         let lim = j.motor_max_force / sp.inv_dt; // 本子步可用冲量上限
         match j.kind {
@@ -223,11 +242,21 @@ pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams)
             _ => {}
         }
     }
-    // ---- 转动限位（绕自由轴的相对转角；单边行 + 偏置推回）**最后解** ----
-    // 角度从**当前相对姿态**直接算：`q_rel = q_a⁻¹·q_b` 沿轴的扭转角
-    // `θ = 2·atan2(q_rel.vec·axis, q_rel.w)`（两者都取体局部轴 ⇒ 与体姿态无关）。
-    // 用姿态而非累计角速度积分：无漂移、纯状态函数 ⇒ 确定性不受影响。
-    // 排在马达之后 ⇒ 越界时马达无法把速度驱回越界方向（限位是更硬的约束）。
+    max_dv
+}
+
+/// 转动限位（**最后解**）：绕自由轴的相对转角越界时给单边冲量 + 偏置推回。
+#[allow(clippy::too_many_arguments)]
+fn revolute_limit_row(
+    j: &Joint,
+    bodies: &mut BodySet,
+    qa: Quat,
+    qb: Quat,
+    ai: usize,
+    bi: usize,
+    sp: &JointParams,
+    mut max_dv: f32,
+) -> f32 {
     if matches!(j.kind, JointKind::Revolute) && j.limit_lower < j.limit_upper {
         let q_rel = qa.conjugate() * qb;
         let v = Vec3::new(q_rel.x, q_rel.y, q_rel.z);
@@ -267,9 +296,23 @@ pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams)
         }
     }
 
-    // ---- 棱柱行程限位（沿轴；同样**最后解** + 单边行 + 偏置推回）----
-    // 行程 = 锚点沿轴的分离量（`err·axis_w`）——与转动限位同招：用**当前几何**
-    // 直接算，不累计位移 ⇒ 无漂移、纯状态函数。锁定行保证其余方向分离 ≈0。
+    max_dv
+}
+
+/// 棱柱行程限位（**最后解**）：沿轴行程越界时给单边冲量 + 偏置推回。
+#[allow(clippy::too_many_arguments)]
+fn prismatic_limit_row(
+    j: &Joint,
+    bodies: &mut BodySet,
+    qa: Quat,
+    ai: usize,
+    bi: usize,
+    ra: Vec3,
+    rb: Vec3,
+    err: Vec3,
+    sp: &JointParams,
+    mut max_dv: f32,
+) -> f32 {
     if matches!(j.kind, JointKind::Prismatic) && j.limit_lower < j.limit_upper {
         let axis_w = Mat3::from_quat(qa).mul_vec3(j.axis_a).normalize();
         let s = err.dot(axis_w);
@@ -300,6 +343,44 @@ pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams)
             }
         }
     }
+    max_dv
+}
+
+pub(crate) fn solve_joint(j: &mut Joint, bodies: &mut BodySet, sp: &JointParams) -> f32 {
+    let (ai, bi) = (j.a as usize, j.b as usize);
+    let (pa, qa) = bodies.pose(ai);
+    let (pb, qb) = bodies.pose(bi);
+    let ra = Mat3::from_quat(qa).mul_vec3(j.anchor_a);
+    let rb = Mat3::from_quat(qb).mul_vec3(j.anchor_b);
+    let wa = pa + ra;
+    let wb = pb + rb;
+    let err = wb - wa; // 位置误差（a→b）
+    let inv_ma = bodies.inv_mass[ai];
+    let inv_mb = bodies.inv_mass[bi];
+    if inv_ma == 0.0 && inv_mb == 0.0 {
+        return 0.0; // 双静态：无自由度
+    }
+
+    // ---- 线性行 ----
+    let mut max_dv = linear_rows(j, bodies, ai, bi, qa, ra, rb, err, sp);
+
+    // ---- 角行（固定/棱柱锁 3 轴；转动锁垂直于 `axis_a` 的 2 轴）----
+    max_dv = angular_rows(j, bodies, qa, ai, bi, max_dv);
+    // ---- 马达行（转动/棱柱；`motor_max_force <= 0` 直接跳过 ⇒ 无马达时逐位不变）----
+    // 速度级马达：把自由轴上的相对速度驱到 `motor_target`，冲量按 `max_force·dt` 上钳。
+    // **必须排在限位行之前**：限位是更硬的约束，要最后说话——否则马达会把限位刚
+    // 修正好的速度重新驱回越界方向（实测：6 rad/s 的马达直接把限位冲穿 5.77 rad）。
+    max_dv = motor_rows(j, bodies, qa, ai, bi, ra, rb, sp, max_dv);
+    // ---- 转动限位（绕自由轴的相对转角；单边行 + 偏置推回）**最后解** ----
+    // 角度从**当前相对姿态**直接算：`q_rel = q_a⁻¹·q_b` 沿轴的扭转角
+    // `θ = 2·atan2(q_rel.vec·axis, q_rel.w)`（两者都取体局部轴 ⇒ 与体姿态无关）。
+    // 用姿态而非累计角速度积分：无漂移、纯状态函数 ⇒ 确定性不受影响。
+    // 排在马达之后 ⇒ 越界时马达无法把速度驱回越界方向（限位是更硬的约束）。
+    max_dv = revolute_limit_row(j, bodies, qa, qb, ai, bi, sp, max_dv);
+    // ---- 棱柱行程限位（沿轴；同样**最后解** + 单边行 + 偏置推回）----
+    // 行程 = 锚点沿轴的分离量（`err·axis_w`）——与转动限位同招：用**当前几何**
+    // 直接算，不累计位移 ⇒ 无漂移、纯状态函数。锁定行保证其余方向分离 ≈0。
+    max_dv = prismatic_limit_row(j, bodies, qa, ai, bi, ra, rb, err, sp, max_dv);
 
     max_dv
 }
