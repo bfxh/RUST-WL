@@ -1,0 +1,19 @@
+{
+  "_doc": "上帝对象门配置（可移植：把 scripts/god_gate.py + 本文件抄到别的仓即可用；改阈值就改这里）",
+  "max_file_lines": 800,
+  "max_fn_lines": 120,
+  "max_type_members": 24,
+  "_file_growth_doc": "拆函数会让文件行数变大：若 max_fn_lines 严格下降且涨幅 ≤ 该百分比，判合法交换（逐条打印）；否则仍红",
+  "file_growth_with_fn_shrink_pct": 10,
+  "include": ["**/*.py", "**/*.rs", "**/*.js", "**/*.ts", "**/*.mjs"],
+  "exclude": [
+    "**/bench/manual_snaps/**",
+    "**/bench/results/**",
+    "**/docs/**",
+    "**/target/**",
+    "**/__pycache__/**",
+    "**/.git/**",
+    "**/gold-sample/**"
+  ],
+  "baseline": "god-baseline.json"
+}

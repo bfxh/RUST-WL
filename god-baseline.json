@@ -1,0 +1,472 @@
+{
+ "crates/vxl-phys-aero/src/lib.rs": {
+  "file_lines": 29,
+  "max_fn_lines": 8,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys-broad/src/bvh.rs": {
+  "file_lines": 806,
+  "max_fn_lines": 70,
+  "max_type_members": 22
+ },
+ "crates/vxl-phys-broad/src/bvh8.rs": {
+  "file_lines": 1022,
+  "max_fn_lines": 58,
+  "max_type_members": 31
+ },
+ "crates/vxl-phys-broad/src/lib.rs": {
+  "file_lines": 963,
+  "max_fn_lines": 256,
+  "max_type_members": 13
+ },
+ "crates/vxl-phys-broad/src/wide.rs": {
+  "file_lines": 1116,
+  "max_fn_lines": 91,
+  "max_type_members": 29
+ },
+ "crates/vxl-phys-broad/tests/diag_bvh.rs": {
+  "file_lines": 65,
+  "max_fn_lines": 56,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/tests/diag_wide.rs": {
+  "file_lines": 220,
+  "max_fn_lines": 137,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-core/src/aabb.rs": {
+  "file_lines": 67,
+  "max_fn_lines": 14,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-core/src/body.rs": {
+  "file_lines": 235,
+  "max_fn_lines": 22,
+  "max_type_members": 24
+ },
+ "crates/vxl-phys-core/src/config.rs": {
+  "file_lines": 309,
+  "max_fn_lines": 42,
+  "max_type_members": 31
+ },
+ "crates/vxl-phys-core/src/interop.rs": {
+  "file_lines": 354,
+  "max_fn_lines": 38,
+  "max_type_members": 20
+ },
+ "crates/vxl-phys-core/src/lib.rs": {
+  "file_lines": 35,
+  "max_fn_lines": 0,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-core/src/mass.rs": {
+  "file_lines": 172,
+  "max_fn_lines": 121,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-core/src/material.rs": {
+  "file_lines": 121,
+  "max_fn_lines": 22,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-core/src/math.rs": {
+  "file_lines": 405,
+  "max_fn_lines": 39,
+  "max_type_members": 11
+ },
+ "crates/vxl-phys-core/src/mem.rs": {
+  "file_lines": 473,
+  "max_fn_lines": 35,
+  "max_type_members": 9
+ },
+ "crates/vxl-phys-core/src/probe.rs": {
+  "file_lines": 93,
+  "max_fn_lines": 5,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-core/src/schedule.rs": {
+  "file_lines": 184,
+  "max_fn_lines": 31,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys-core/src/shape.rs": {
+  "file_lines": 107,
+  "max_fn_lines": 22,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys-core/tests/loom_primitives.rs": {
+  "file_lines": 56,
+  "max_fn_lines": 32,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-destruction/src/lib.rs": {
+  "file_lines": 47,
+  "max_fn_lines": 7,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-ffi/src/lib.rs": {
+  "file_lines": 74,
+  "max_fn_lines": 7,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys-field/src/lib.rs": {
+  "file_lines": 95,
+  "max_fn_lines": 10,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-fluid/examples/sph_scale.rs": {
+  "file_lines": 80,
+  "max_fn_lines": 64,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-fluid/src/boundary.rs": {
+  "file_lines": 467,
+  "max_fn_lines": 31,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-fluid/src/lib.rs": {
+  "file_lines": 2073,
+  "max_fn_lines": 111,
+  "max_type_members": 45
+ },
+ "crates/vxl-phys-fluid/tests/boundary_accuracy_probe.rs": {
+  "file_lines": 227,
+  "max_fn_lines": 70,
+  "max_type_members": 9
+ },
+ "crates/vxl-phys-gpu/examples/gpu_density_probe.rs": {
+  "file_lines": 291,
+  "max_fn_lines": 272,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_grid_probe.rs": {
+  "file_lines": 202,
+  "max_fn_lines": 183,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
+  "file_lines": 282,
+  "max_fn_lines": 266,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/src/grid.rs": {
+  "file_lines": 314,
+  "max_fn_lines": 247,
+  "max_type_members": 10
+ },
+ "crates/vxl-phys-gpu/src/lib.rs": {
+  "file_lines": 52,
+  "max_fn_lines": 8,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-gpu/src/pipeline.rs": {
+  "file_lines": 708,
+  "max_fn_lines": 310,
+  "max_type_members": 28
+ },
+ "crates/vxl-phys-gpu/src/probe.rs": {
+  "file_lines": 413,
+  "max_fn_lines": 293,
+  "max_type_members": 16
+ },
+ "crates/vxl-phys-integrate/src/lib.rs": {
+  "file_lines": 113,
+  "max_fn_lines": 35,
+  "max_type_members": 7
+ },
+ "crates/vxl-phys-marine/src/lib.rs": {
+  "file_lines": 33,
+  "max_fn_lines": 10,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-mech/src/lib.rs": {
+  "file_lines": 39,
+  "max_fn_lines": 8,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys-memfind/src/lib.rs": {
+  "file_lines": 70,
+  "max_fn_lines": 17,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-narrow/src/gjk.rs": {
+  "file_lines": 981,
+  "max_fn_lines": 132,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-narrow/src/heightfield.rs": {
+  "file_lines": 218,
+  "max_fn_lines": 22,
+  "max_type_members": 8
+ },
+ "crates/vxl-phys-narrow/src/lib.rs": {
+  "file_lines": 3248,
+  "max_fn_lines": 663,
+  "max_type_members": 62
+ },
+ "crates/vxl-phys-narrow/src/polytope.rs": {
+  "file_lines": 256,
+  "max_fn_lines": 44,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-narrow/src/simd.rs": {
+  "file_lines": 388,
+  "max_fn_lines": 111,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-replay/src/lib.rs": {
+  "file_lines": 279,
+  "max_fn_lines": 35,
+  "max_type_members": 3
+ },
+ "crates/vxl-phys-soft/src/lib.rs": {
+  "file_lines": 112,
+  "max_fn_lines": 10,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys-solver/src/ccd.rs": {
+  "file_lines": 68,
+  "max_fn_lines": 21,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-solver/src/joints.rs": {
+  "file_lines": 1007,
+  "max_fn_lines": 214,
+  "max_type_members": 12
+ },
+ "crates/vxl-phys-solver/src/lib.rs": {
+  "file_lines": 2019,
+  "max_fn_lines": 551,
+  "max_type_members": 21
+ },
+ "crates/vxl-phys-splat/src/lib.rs": {
+  "file_lines": 686,
+  "max_fn_lines": 58,
+  "max_type_members": 15
+ },
+ "crates/vxl-phys-terrain/src/lib.rs": {
+  "file_lines": 112,
+  "max_fn_lines": 13,
+  "max_type_members": 9
+ },
+ "crates/vxl-phys-terrain/src/mesh.rs": {
+  "file_lines": 533,
+  "max_fn_lines": 78,
+  "max_type_members": 15
+ },
+ "crates/vxl-phys-terrain/src/voxel.rs": {
+  "file_lines": 1033,
+  "max_fn_lines": 174,
+  "max_type_members": 23
+ },
+ "crates/vxl-phys-wheeled/src/lib.rs": {
+  "file_lines": 102,
+  "max_fn_lines": 26,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys/examples/arena_bench.rs": {
+  "file_lines": 1239,
+  "max_fn_lines": 223,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/dam_break.rs": {
+  "file_lines": 139,
+  "max_fn_lines": 120,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/determinism.rs": {
+  "file_lines": 79,
+  "max_fn_lines": 35,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/diag_col.rs": {
+  "file_lines": 145,
+  "max_fn_lines": 135,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/diag_eject.rs": {
+  "file_lines": 161,
+  "max_fn_lines": 149,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/diag_min.rs": {
+  "file_lines": 202,
+  "max_fn_lines": 188,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/diag_pile.rs": {
+  "file_lines": 89,
+  "max_fn_lines": 82,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/fluid_buoyancy.rs": {
+  "file_lines": 264,
+  "max_fn_lines": 245,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m0_bench.rs": {
+  "file_lines": 102,
+  "max_fn_lines": 91,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m0_gates.rs": {
+  "file_lines": 366,
+  "max_fn_lines": 174,
+  "max_type_members": 13
+ },
+ "crates/vxl-phys/examples/m0_pyramid.rs": {
+  "file_lines": 79,
+  "max_fn_lines": 71,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m1_collision_row.rs": {
+  "file_lines": 243,
+  "max_fn_lines": 132,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m1_islands.rs": {
+  "file_lines": 270,
+  "max_fn_lines": 178,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m1_pile.rs": {
+  "file_lines": 280,
+  "max_fn_lines": 205,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m1_profile.rs": {
+  "file_lines": 101,
+  "max_fn_lines": 66,
+  "max_type_members": 7
+ },
+ "crates/vxl-phys/examples/m1_scale.rs": {
+  "file_lines": 273,
+  "max_fn_lines": 263,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m3_impact.rs": {
+  "file_lines": 134,
+  "max_fn_lines": 119,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/m3_voronoi.rs": {
+  "file_lines": 71,
+  "max_fn_lines": 62,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/showcase.rs": {
+  "file_lines": 372,
+  "max_fn_lines": 342,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/splat_rest_probe.rs": {
+  "file_lines": 358,
+  "max_fn_lines": 246,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/trimesh_escape_probe.rs": {
+  "file_lines": 298,
+  "max_fn_lines": 181,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/trimesh_rest_probe.rs": {
+  "file_lines": 492,
+  "max_fn_lines": 352,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/trimesh_sphere_rest_probe.rs": {
+  "file_lines": 230,
+  "max_fn_lines": 109,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/voxel_rest_probe.rs": {
+  "file_lines": 159,
+  "max_fn_lines": 129,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/src/lib.rs": {
+  "file_lines": 2172,
+  "max_fn_lines": 116,
+  "max_type_members": 75
+ },
+ "crates/vxl-phys/tests/capsule_drop.rs": {
+  "file_lines": 76,
+  "max_fn_lines": 59,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/compound_mass.rs": {
+  "file_lines": 53,
+  "max_fn_lines": 44,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/compound_warm.rs": {
+  "file_lines": 90,
+  "max_fn_lines": 59,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/default_tier_stability.rs": {
+  "file_lines": 149,
+  "max_fn_lines": 49,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys/tests/float_quiet_probe.rs": {
+  "file_lines": 777,
+  "max_fn_lines": 144,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/fluid_boundary.rs": {
+  "file_lines": 260,
+  "max_fn_lines": 53,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/fluid_coupling.rs": {
+  "file_lines": 138,
+  "max_fn_lines": 37,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/rest_height_contract.rs": {
+  "file_lines": 236,
+  "max_fn_lines": 40,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/rolling_probe.rs": {
+  "file_lines": 80,
+  "max_fn_lines": 45,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/sleep_wake_contract.rs": {
+  "file_lines": 163,
+  "max_fn_lines": 60,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/tests/warm_counter_probe.rs": {
+  "file_lines": 82,
+  "max_fn_lines": 58,
+  "max_type_members": 0
+ },
+ "scripts/deps_lock.py": {
+  "file_lines": 253,
+  "max_fn_lines": 105,
+  "max_type_members": 0
+ },
+ "scripts/god_gate.py": {
+  "file_lines": 385,
+  "max_fn_lines": 68,
+  "max_type_members": 0
+ },
+ "scripts/local_gate.py": {
+  "file_lines": 23,
+  "max_fn_lines": 0,
+  "max_type_members": 0
+ },
+ "scripts/render_compare.py": {
+  "file_lines": 190,
+  "max_fn_lines": 35,
+  "max_type_members": 0
+ },
+ "scripts/render_demo.py": {
+  "file_lines": 435,
+  "max_fn_lines": 241,
+  "max_type_members": 2
+ }
+}

@@ -64,6 +64,9 @@ step vocab 0 bash scripts/vocab_scan.sh .
 # 纪律扫描（forbid 覆盖 / 零 unsafe / 零 f64 / 零 SIMD 内建 / 零 fast-math）——
 # 此前只在 CI 里跑，本地漏跑就会「本地绿、CI 红」（本地与 CI 不许漂移）。
 step discipline 0 bash scripts/discipline_scan.sh .
+# 上帝对象门（文件/函数/类型尺寸；**棘轮只准减**，基线在 god-baseline.json）——
+# 脚本可移植（`scripts/god_gate.py` + `god.gate.json`），`--list --top N` 看排行。
+step god 0 python scripts/god_gate.py --root .
 # 依赖红线（外部依赖/构建依赖只准减；构建脚本与补丁单独对账；理由登记在 spec 同目录的基线里）
 step deps_lock 0 python scripts/deps_lock.py
 # CI 形状锁：硬门、汇总门 needs、安全/成本基线、action 钉 SHA 不被悄悄退役
