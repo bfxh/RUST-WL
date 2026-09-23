@@ -357,3 +357,46 @@ fn run_yaw(w: &mut World, body: usize, settle: usize, win: usize) -> (f32, f32) 
     }
     (unwrapped, wpeak)
 }
+
+/// **冲击 vs 稳态**（仪表，只打印）：三格隔离实验里体都是**从 1.5 m 落下**（冲击 ≈4.4 m/s）⇒
+/// 那个符号确定的偏航**可能只是"一次性冲击的不对称残差"**（角动量守恒 ⇒ 转了就留着），
+/// 而不是稳态偏置。本测试把同一格改成**轻放**（起点就在平衡位附近，几乎无冲击）：
+/// - 若轻放偏航≈0 ⇒ 偏置是**冲击瞬态**（改法在接触求解/冲击那一侧）；
+/// - 若轻放仍有同量级偏航 ⇒ 是**稳态偏置**（改法在迭代/采样一侧）。
+#[test]
+#[ignore = "仪表（只打印）：偏置是冲击瞬态还是稳态；见上注"]
+fn spin_bias_impact_vs_steady() {
+    println!("冲击 vs 稳态（窗口 480 tick、盒半长 0.06、300 kg/m³）");
+    // 干槽：重落 vs 轻放（槽底顶面 y = 1.0，体半长 0.06 ⇒ 平衡位 1.06）
+    for (name, y0) in [("干槽·重落(1.50)", 1.50f32), ("干槽·轻放(1.07)", 1.07)] {
+        let mut w = World::new(PhysConfig::default());
+        let _v = tank(&mut w);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Vec3::new(0.0, y0, 0.0),
+            Quat::IDENTITY,
+            300.0,
+        );
+        let (yaw, wpp) = run_yaw(&mut w, b as usize, 60, 480);
+        println!("  {name}：累计偏航 {yaw:+.4} rad | |ω| 峰 {wpp:.3} rad/s");
+    }
+    // 流体：重落 vs 轻放（水面 ≈1.42 ⇒ 体浮着时体心 ≈1.46）
+    for (name, y0) in [("流体·重落(1.50)", 1.50f32), ("流体·轻放(1.47)", 1.47)] {
+        let mut w = World::new(PhysConfig::default());
+        let v = tank(&mut w);
+        let sys = water(2);
+        let _fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
+        let b = w.add_dynamic(
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+            Vec3::new(0.0, y0, 0.0),
+            Quat::IDENTITY,
+            300.0,
+        );
+        let (yaw, wpp) = run_yaw(&mut w, b as usize, 300, 480);
+        println!("  {name}：累计偏航 {yaw:+.4} rad | |ω| 峰 {wpp:.3} rad/s");
+    }
+}
