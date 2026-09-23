@@ -162,7 +162,11 @@ def _mask(src: str, js: bool = False) -> str:
             i += 1
             continue
         if c == "\\" and nxt:                 # 转义：整体吃掉
-            out.append("  ")
+            # ⚠️ 若转义的是**换行**（Rust 字符串行延续 `"…\<换行>…"`），必须保留那个换行：
+            # 老版一律写两个空格 ⇒ 掩码后**行数少一行** ⇒ 之后所有行号错位（实测：fluid/lib.rs
+            # 2072 → 2071 行，1888 行起"Δ 全错位"的假象，差点去改对的代码）。
+            # 映成 " \n"：**等长**（2 字符）且**换行数不变**，两条不变量同时成立。
+            out.append(" \n" if nxt == "\n" else "  ")
             i += 2
             continue
         if state == "str" and c == close:
@@ -342,6 +346,13 @@ def selftest() -> int:
         bad.append(f"字符串里的花括号没掩干净：{{={m1.count('{')},}}={m1.count('}')}，期望 (2,2)")
     if "static" not in m1:
         bad.append("生命周期被当成字符字面量吞掉了（&'static 里的后续代码会消失）")
+    # 掩码的两条不变量：**等长** + **换行数不变**（行延续 `"…\<换行>…"` 曾让行数少一行 ⇒
+    # 之后所有行号错位——量具错了会去改对的代码）。
+    s_cont = 'let a = "abc\\\ndef"; let b = 1;\n'
+    m_cont = _mask(s_cont)
+    if len(m_cont) != len(s_cont) or m_cont.count("\n") != s_cont.count("\n"):
+        bad.append(f"行延续（转义换行）破坏了掩码不变量："
+                   f"长度 {len(m_cont)} vs {len(s_cont)}，换行 {m_cont.count(chr(10))} vs {s_cont.count(chr(10))}")
 
     s2 = (
         "impl X {\n"
