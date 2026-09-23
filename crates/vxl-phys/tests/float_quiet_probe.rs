@@ -130,3 +130,124 @@ fn floating_body_quietness() {
         );
     }
 }
+
+/// **自旋诊断**（仪表，只打印）：漂浮体的 `|ω|` 峰 1.22 rad/s（≈70°/s）——**对称盒不该自转**。
+/// 判"是数值相位伪影还是流场真实驱动"：同场景换**体形/姿态**看自旋是否跟着变——
+/// - 若换姿态（盒绕 Y 转 45°）自旋即大改 ⇒ **面栅格相位伪影**（数值）；
+/// - 若换体形（球，表面无面栅格）自旋同量级 ⇒ **流场/力矩建模**（更接近物理）；
+/// - 另打印**力矩均值**（系统性偏置 = 真扭矩；零均值大方差 = 噪声）与**累计偏航**（真转了多少）。
+#[test]
+#[ignore = "仪表（只打印）：漂浮体自旋的来源；见上注"]
+fn float_spin_source_diagnosis() {
+    println!("漂浮体自旋诊断（窗口 180 tick；水槽 0.5 m 盆腔、轻体 300 kg/m³）");
+    println!(
+        "{:>10} {:>10} {:>10} {:>12} {:>12} {:>12}",
+        "体形/姿态", "y 峰峰/mm", "|v| 峰峰", "|ω| 峰峰", "|τ| 均值", "累计偏航/rad"
+    );
+    for (name, shape) in [
+        (
+            "盒 0°",
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+        ),
+        (
+            "盒 45°",
+            Shape::Box {
+                half: Vec3::splat(0.06),
+            },
+        ),
+    ] {
+        let rot = if name.ends_with("45°") {
+            Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_4)
+        } else {
+            Quat::IDENTITY
+        };
+        let (ypp, vpp, wpp, tsum, yaw) = quiet_shaped(true, shape, rot);
+        println!(
+            "{name:>10} {:>10.1} {:>10.3} {:>12.3} {:>12.4} {:>12.3}",
+            ypp * 1e3,
+            vpp,
+            wpp,
+            tsum,
+            yaw
+        );
+    }
+    let (ypp, vpp, wpp, tsum, yaw) =
+        quiet_shaped(true, Shape::Sphere { radius: 0.06 }, Quat::IDENTITY);
+    println!(
+        "{:>10} {:>10.1} {:>10.3} {:>12.3} {:>12.4} {:>12.3}",
+        "球",
+        ypp * 1e3,
+        vpp,
+        wpp,
+        tsum,
+        yaw
+    );
+}
+
+/// 同 `quiet`，但可传体形/姿态，并额外返回（|τ| 窗口均值、累计偏航）。
+fn quiet_shaped(couple: bool, shape: Shape, rot: Quat) -> (f32, f32, f32, f32, f32) {
+    let mut w = World::new(PhysConfig::default());
+    let v = tank(&mut w);
+    let sys = water(2);
+    if couple {
+        w.add_fluid_with_boundary_coupling(sys, &[v]);
+    } else {
+        w.add_fluid(sys, &[v]);
+    }
+    let b = w.add_dynamic(shape, Vec3::new(0.0, 1.50, 0.0), rot, 300.0);
+    for _ in 0..300 {
+        w.step(); // 落水 + 漂稳
+    }
+    let mut prev_yaw = 0.0f32;
+    let mut unwrapped = 0.0f32;
+    let (mut ylo, mut yhi) = (f32::MAX, f32::MIN);
+    let (mut vlo, mut vhi) = (f32::MAX, f32::MIN);
+    let (mut wlo, mut whi) = (f32::MAX, f32::MIN);
+    let mut tsum = 0.0f64;
+    for _ in 0..180 {
+        w.step();
+        let p = w.bodies.position[b as usize];
+        ylo = ylo.min(p.y);
+        yhi = yhi.max(p.y);
+        let lv = w.bodies.linvel[b as usize].length();
+        vlo = vlo.min(lv);
+        vhi = vhi.max(lv);
+        let av = w.bodies.angvel(b as usize).length();
+        wlo = wlo.min(av);
+        whi = whi.max(av);
+        if let Some(r) = w.fluids()[0]
+            .0
+            .boundary_reactions()
+            .iter()
+            .find(|r| r.0 == b)
+        {
+            tsum += r.2.length() as f64;
+        }
+        // 累计偏航（unwrap：把每步 Δyaw 折到 (-π, π] 再累加）
+        let yaw = yaw_of(w.bodies.rot(b as usize));
+        let mut d = yaw - prev_yaw;
+        while d > std::f32::consts::PI {
+            d -= 2.0 * std::f32::consts::PI;
+        }
+        while d < -std::f32::consts::PI {
+            d += 2.0 * std::f32::consts::PI;
+        }
+        unwrapped += d;
+        prev_yaw = yaw;
+    }
+    (
+        yhi - ylo,
+        vhi - vlo,
+        whi - wlo,
+        (tsum / 180.0) as f32,
+        unwrapped,
+    )
+}
+
+/// 姿态的偏航角（绕 Y；用旋转矩阵的 x 轴投影求）。
+fn yaw_of(q: Quat) -> f32 {
+    let x = q.rotate_vec3(Vec3::X);
+    x.z.atan2(x.x)
+}
