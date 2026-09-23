@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod grid;
+pub mod pipeline;
 pub mod probe;
 
 /// GPU 后端统一入口。
