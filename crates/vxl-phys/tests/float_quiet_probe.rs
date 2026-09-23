@@ -628,6 +628,29 @@ fn p10_single_box_spin_trace() {
 /// ① 体心附近的**流体平均/最大 |v|**（局部水动强度）；② 体 |v|/|ω|；
 /// ③ 窗口内**体心 y 起伏**与**局部水面高度起伏**（比振幅）；
 /// ④ **2a 单向**（`add_fluid`，无边界粒子反作用）对照 —— 若两档同量级 ⇒ 与 2b 无关。
+/// 零冲击就位：先建**同参数的空水槽**跑 300 tick，量中心区（±0.05 m）的水面最高点。
+/// `couple` 选 2b 双向（`add_fluid_with_boundary_coupling`）或 2a 单向（`add_fluid`）。
+fn surface_height(couple: bool) -> f32 {
+    let mut w0 = World::new(PhysConfig::default());
+    let v0 = tank(&mut w0);
+    let s0 = water(2);
+    let f0 = if couple {
+        w0.add_fluid_with_boundary_coupling(s0, &[v0])
+    } else {
+        w0.add_fluid(s0, &[v0])
+    };
+    for _ in 0..300 {
+        w0.step();
+    }
+    w0.fluids()[f0]
+        .0
+        .positions()
+        .iter()
+        .filter(|p| p.x.abs() < 0.05 && p.z.abs() < 0.05)
+        .map(|p| p.y)
+        .fold(0.0f32, f32::max)
+}
+
 #[test]
 #[ignore = "P10 续：漂浮体不静止的归因（随波 vs 数值）；见上注"]
 fn float_motion_vs_local_water_motion() {
@@ -636,22 +659,7 @@ fn float_motion_vs_local_water_motion() {
     let sys = water(2);
     let fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
     // 零冲击就位：先无体测水面
-    let surface = {
-        let mut w0 = World::new(PhysConfig::default());
-        let v0 = tank(&mut w0);
-        let s0 = water(2);
-        let f0 = w0.add_fluid_with_boundary_coupling(s0, &[v0]);
-        for _ in 0..300 {
-            w0.step();
-        }
-        w0.fluids()[f0]
-            .0
-            .positions()
-            .iter()
-            .filter(|p| p.x.abs() < 0.05 && p.z.abs() < 0.05)
-            .map(|p| p.y)
-            .fold(0.0f32, f32::max)
-    };
+    let surface = surface_height(true);
     let y0 = surface - 0.036 + 0.06;
     let b = w.add_dynamic(
         Shape::Box {
@@ -711,22 +719,7 @@ fn float_motion_vs_local_water_motion() {
     let v2 = tank(&mut w2);
     let s2 = water(2);
     let fid2 = w2.add_fluid(s2, &[v2]); // 2a：无边界粒子
-    let surface2 = {
-        let mut w3 = World::new(PhysConfig::default());
-        let v3 = tank(&mut w3);
-        let s3 = water(2);
-        let f3 = w3.add_fluid(s3, &[v3]);
-        for _ in 0..300 {
-            w3.step();
-        }
-        w3.fluids()[f3]
-            .0
-            .positions()
-            .iter()
-            .filter(|p| p.x.abs() < 0.05 && p.z.abs() < 0.05)
-            .map(|p| p.y)
-            .fold(0.0f32, f32::max)
-    };
+    let surface2 = surface_height(false);
     let b2 = w2.add_dynamic(
         Shape::Box {
             half: Vec3::splat(0.06),

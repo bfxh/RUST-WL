@@ -770,8 +770,8 @@
   "max_type_members": 4
  },
  "crates/vxl-phys/tests/float_quiet_probe.rs": {
-  "file_lines": 777,
-  "max_fn_lines": 144,
+  "file_lines": 770,
+  "max_fn_lines": 114,
   "max_type_members": 0
  },
  "crates/vxl-phys/tests/fluid_boundary.rs": {
