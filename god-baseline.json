@@ -530,8 +530,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-terrain/src/voxel/voxel_contacts.rs": {
-  "file_lines": 380,
-  "max_fn_lines": 174,
+  "file_lines": 375,
+  "max_fn_lines": 99,
   "max_type_members": 0
  },
  "crates/vxl-phys-terrain/src/voxel/voxel_provider.rs": {

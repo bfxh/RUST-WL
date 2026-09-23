@@ -1,6 +1,76 @@
 //! voxel_contacts：从 voxel.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
+/// 盒 AABB（±1 格）范围内的**占据格**表——采样点对这批格求最近距离。
+fn gather_cells(v: &VoxelVolume, half: Vec3, pos: Vec3, rot: Quat) -> Vec<(i32, i32, i32)> {
+    // **自适应查询范围（本轮修复）**：先收集「盒 AABB（±1 格）范围内的占据格」，
+    // 采样点对这批格求最近距离——而不是只扫点周围 ±1 格（后者会让大碎块的采样点
+    // 找不到最近的体素格、拿不到接触 ⇒ 自由落体穿地，实测 74/79 逃逸）。
+    let ah = box_aabb_half(half, rot);
+    let lo = v.grid_of(pos - ah - Vec3::splat(v.step));
+    let hi = v.grid_of(pos + ah + Vec3::splat(v.step));
+    let mut cells: Vec<(i32, i32, i32)> = Vec::new();
+    for iz in lo.2.max(0)..=hi.2.min(v.nz as i32 - 1) {
+        for iy in lo.1.max(0)..=hi.1.min(v.ny as i32 - 1) {
+            for ix in lo.0.max(0)..=hi.0.min(v.nx as i32 - 1) {
+                if v.get(ix as u32, iy as u32, iz as u32) {
+                    cells.push((ix, iy, iz));
+                }
+            }
+        }
+    }
+    cells
+}
+
+/// 到「这批格」的带符号距离（同 `sdf` 公式，但只遍历给定列表）。
+fn sd_over_cells(v: &VoxelVolume, cells: &[(i32, i32, i32)], p: Vec3) -> f32 {
+    let mut best = v.step * 2.0;
+    for &(ix, iy, iz) in cells {
+        let lo = v.grid_center(ix as u32, iy as u32, iz as u32) - Vec3::splat(v.step * 0.5);
+        let hi = lo + Vec3::splat(v.step);
+        let q = Vec3::new(
+            (lo.x - p.x).max(p.x - hi.x).max(0.0),
+            (lo.y - p.y).max(p.y - hi.y).max(0.0),
+            (lo.z - p.z).max(p.z - hi.z).max(0.0),
+        );
+        let outside = q.length();
+        let d = if outside > 0.0 {
+            outside
+        } else {
+            let inx = (p.x - lo.x).min(hi.x - p.x);
+            let iny = (p.y - lo.y).min(hi.y - p.y);
+            let inz = (p.z - lo.z).min(hi.z - p.z);
+            -inx.min(iny).min(inz)
+        };
+        if d < best {
+            best = d;
+        }
+    }
+    best
+}
+
+/// 面 `k` 的 5 个采样点（局部）：面中心 + 4 角，顺序 (-,-) (-,+) (+,-) (+,+)（与特征号一致）。
+fn face_samples(h: [f32; 3], d3: &[[f32; 6]; 3], k: usize) -> [(f32, f32, f32); 5] {
+    let (fcx, fcy, fcz) = (d3[0][k] * h[0], d3[1][k] * h[1], d3[2][k] * h[2]);
+    let axes = match k {
+        0 | 1 => [1usize, 2],
+        2 | 3 => [0, 2],
+        _ => [0, 1],
+    };
+    // 采样点（局部）：中心 + 4 角
+    let mut samples: [(f32, f32, f32); 5] = [(fcx, fcy, fcz); 5];
+    for (ci, (su, sv)) in [(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut l = [fcx, fcy, fcz];
+        l[axes[0]] = su * h[axes[0]];
+        l[axes[1]] = sv * h[axes[1]];
+        samples[ci + 1] = (l[0], l[1], l[2]);
+    }
+    samples
+}
+
 /// 盒的世界 AABB 半长：`|R|·half`（与宽相同式）。
 pub(crate) fn box_aabb_half(half: Vec3, rot: Quat) -> Vec3 {
     let m = vxl_phys_core::Mat3::from_quat(rot);
@@ -34,51 +104,12 @@ pub fn contacts_box_voxel(
     out: &mut Vec<vxl_phys_core::interop::InteropContact>,
 ) -> bool {
     let m = vxl_phys_core::Mat3::from_quat(rot);
-    // **自适应查询范围（本轮修复）**：先收集「盒 AABB（±1 格）范围内的占据格」，
-    // 采样点对这批格求最近距离——而不是只扫点周围 ±1 格（后者会让大碎块的采样点
-    // 找不到最近的体素格、拿不到接触 ⇒ 自由落体穿地，实测 74/79 逃逸）。
-    let ah = box_aabb_half(half, rot);
-    let lo = v.grid_of(pos - ah - Vec3::splat(v.step));
-    let hi = v.grid_of(pos + ah + Vec3::splat(v.step));
-    let mut cells: Vec<(i32, i32, i32)> = Vec::new();
-    for iz in lo.2.max(0)..=hi.2.min(v.nz as i32 - 1) {
-        for iy in lo.1.max(0)..=hi.1.min(v.ny as i32 - 1) {
-            for ix in lo.0.max(0)..=hi.0.min(v.nx as i32 - 1) {
-                if v.get(ix as u32, iy as u32, iz as u32) {
-                    cells.push((ix, iy, iz));
-                }
-            }
-        }
-    }
+    let cells = gather_cells(v, half, pos, rot);
     if cells.is_empty() {
         return false;
     }
     // 到「这批格」的带符号距离（同 `sdf` 公式，但遍历给定列表）
-    let sd = |p: Vec3| -> f32 {
-        let mut best = v.step * 2.0;
-        for &(ix, iy, iz) in &cells {
-            let lo = v.grid_center(ix as u32, iy as u32, iz as u32) - Vec3::splat(v.step * 0.5);
-            let hi = lo + Vec3::splat(v.step);
-            let q = Vec3::new(
-                (lo.x - p.x).max(p.x - hi.x).max(0.0),
-                (lo.y - p.y).max(p.y - hi.y).max(0.0),
-                (lo.z - p.z).max(p.z - hi.z).max(0.0),
-            );
-            let outside = q.length();
-            let d = if outside > 0.0 {
-                outside
-            } else {
-                let inx = (p.x - lo.x).min(hi.x - p.x);
-                let iny = (p.y - lo.y).min(hi.y - p.y);
-                let inz = (p.z - lo.z).min(hi.z - p.z);
-                -inx.min(iny).min(inz)
-            };
-            if d < best {
-                best = d;
-            }
-        }
-        best
-    };
+    let sd = |p: Vec3| sd_over_cells(v, &cells, p);
     // 6 个面（局部轴向外法线）：±X/±Y/±Z
     let dirs = [
         Vec3::new(-1.0, 0.0, 0.0),
@@ -105,23 +136,7 @@ pub fn contacts_box_voxel(
     let mut deepest = [f32::INFINITY; 6];
     // 逐面采样（面中心 + 4 角）
     for k in 0..6 {
-        let (fcx, fcy, fcz) = (d3[0][k] * h[0], d3[1][k] * h[1], d3[2][k] * h[2]);
-        let axes = match k {
-            0 | 1 => [1usize, 2],
-            2 | 3 => [0, 2],
-            _ => [0, 1],
-        };
-        // 采样点（局部）：中心 + 4 角
-        let mut samples: [(f32, f32, f32); 5] = [(fcx, fcy, fcz); 5];
-        for (ci, (su, sv)) in [(-1.0f32, -1.0f32), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)]
-            .into_iter()
-            .enumerate()
-        {
-            let mut l = [fcx, fcy, fcz];
-            l[axes[0]] = su * h[axes[0]];
-            l[axes[1]] = sv * h[axes[1]];
-            samples[ci + 1] = (l[0], l[1], l[2]);
-        }
+        let samples = face_samples(h, &d3, k);
         for s in &samples {
             let p = pos + m.mul_vec3(Vec3::new(s.0, s.1, s.2));
             let d = sd(p);
@@ -161,27 +176,7 @@ pub fn contacts_box_voxel(
             continue;
         }
         let n_world = m.mul_vec3(dirs[k] * -1.0);
-        let (fcx, fcy, fcz) = (d3[0][k] * h[0], d3[1][k] * h[1], d3[2][k] * h[2]);
-        let axes = match k {
-            0 | 1 => [1usize, 2],
-            2 | 3 => [0, 2],
-            _ => [0, 1],
-        };
-        for ci in 0..5usize {
-            let (lx, ly, lz) = if ci == 0 {
-                (fcx, fcy, fcz)
-            } else {
-                let (su, sv) = match ci {
-                    1 => (-1.0f32, -1.0f32),
-                    2 => (-1.0, 1.0),
-                    3 => (1.0, -1.0),
-                    _ => (1.0, 1.0),
-                };
-                let mut l = [fcx, fcy, fcz];
-                l[axes[0]] = su * h[axes[0]];
-                l[axes[1]] = sv * h[axes[1]];
-                (l[0], l[1], l[2])
-            };
+        for (ci, (lx, ly, lz)) in face_samples(h, &d3, k).into_iter().enumerate() {
             let p = pos + m.mul_vec3(Vec3::new(lx, ly, lz));
             let d = sd(p);
             if d >= skin {
