@@ -102,16 +102,14 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     v[i]
 }
 
-fn main() {
-    let bodies = WORLD_TILES + (CARRIERS * CARRIER_CELLS) as usize + PROBES as usize;
-    let mut w = build();
-    // **不预热**：验收口径对齐 8B 的「沉降期任一 tick」——量的是**最严**的沉降期，
-    // 而非静置后（静置帧零树操作，量出来只是管线空转）。
+/// 每 tick 的（宽相, 窄相, 合计）ms 采样 + 峰值 tick 与其宽相细分。
+type TickSamples = (Vec<f64>, Vec<f64>, Vec<f64>, usize, (u64, u64, u64, u64));
+
+/// 跑 `TICKS` 步并逐 tick 采样；峰值 tick 记下宽相细分（首帧全量重建是最大单点嫌疑）。
+fn run_ticks(w: &mut World) -> TickSamples {
     let (mut broad, mut narrow, mut total) = (Vec::new(), Vec::new(), Vec::new());
-    // 峰值 tick 的宽相细分（诊断：首帧全量重建是最大单点嫌疑）。
     let mut max_tick = 0usize;
     let mut max_bd = (0u64, 0u64, 0u64, 0u64);
-    let t_wall = Instant::now();
     for tick in 0..TICKS {
         // `PhaseTimings` 是**累计值**（见 M1-PLAN 读数陷阱）⇒ 每 tick 先清零，
         // 否则读到的是「从首帧起的累计」，会与墙钟自相矛盾。
@@ -129,6 +127,33 @@ fn main() {
         }
         total.push(sum);
     }
+    (broad, narrow, total, max_tick, max_bd)
+}
+
+/// 结论打印 + 退出码：只看管线口径（p95）；首帧载入只报告不阻断（加载期成本，非管线成本）。
+fn finish(pass_p95: bool, pass_any: bool, p95: f64, cmax: f64, max_tick: usize, load_tree: f64) {
+    if pass_p95 {
+        println!("✅ 8A 碰撞行 PASS（沉降期 p95 {p95:.3}ms ≤ {LIMIT_MS}ms，本机数字）");
+        if !pass_any {
+            println!(
+                "ℹ️ 首帧载入 tick #{max_tick} = {cmax:.3}ms 超预算 {:.1}×（其中建树 {load_tree:.3}ms）\
+                 ——一次性加载成本（8B 同项 ≈46.7ms），不属本行口径",
+                cmax / LIMIT_MS
+            );
+        }
+    } else {
+        eprintln!("❌ 8A 碰撞行 FAIL —— 沉降期 p95 {p95:.3}ms > {LIMIT_MS}ms");
+        std::process::exit(1);
+    }
+}
+
+fn main() {
+    let bodies = WORLD_TILES + (CARRIERS * CARRIER_CELLS) as usize + PROBES as usize;
+    let mut w = build();
+    // **不预热**：验收口径对齐 8B 的「沉降期任一 tick」——量的是**最严**的沉降期，
+    // 而非静置后（静置帧零树操作，量出来只是管线空转）。
+    let t_wall = Instant::now();
+    let (mut broad, mut narrow, total, max_tick, max_bd) = run_ticks(&mut w);
     let wall = t_wall.elapsed().as_secs_f64() * 1000.0 / TICKS as f64;
     let bd = w.broad.breakdown_us();
     let h = w.health();
@@ -226,17 +251,5 @@ fn main() {
         }
     }
     // 退出码只看管线口径（p95）；首帧载入只报告不阻断（加载期成本，非管线成本）。
-    if pass_p95 {
-        println!("✅ 8A 碰撞行 PASS（沉降期 p95 {p95:.3}ms ≤ {LIMIT_MS}ms，本机数字）");
-        if !pass_any {
-            println!(
-                "ℹ️ 首帧载入 tick #{max_tick} = {cmax:.3}ms 超预算 {:.1}×（其中建树 {load_tree:.3}ms）\
-                 ——一次性加载成本（8B 同项 ≈46.7ms），不属本行口径",
-                cmax / LIMIT_MS
-            );
-        }
-    } else {
-        eprintln!("❌ 8A 碰撞行 FAIL —— 沉降期 p95 {p95:.3}ms > {LIMIT_MS}ms");
-        std::process::exit(1);
-    }
+    finish(pass_p95, pass_any, p95, cmax, max_tick, load_tree);
 }

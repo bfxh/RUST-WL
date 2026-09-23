@@ -7,6 +7,48 @@
 
 use vxl_phys::{HeightField, PhysConfig, Quat, Shape, Vec3, World};
 
+/// 单体动能（平动 + 转动）：`½mv² + ½ω·(I⁻¹ω)`（对角惯量按体轴旋回）。
+fn ke_of(w: &World, i: usize) -> f32 {
+    let m = 1.0 / w.bodies.inv_mass[i];
+    let v = w.bodies.linvel[i];
+    let mut ke = 0.5 * m * v.length_squared();
+    let wv = w.bodies.angvel(i);
+    let inv_i = w.bodies.local_inv_inertia[i];
+    if inv_i.x > 0.0 {
+        let q = w.bodies.rot(i);
+        let wl = q.conjugate().rotate_vec3(wv);
+        let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
+        let lw = q.rotate_vec3(ll);
+        ke += 0.5 * wv.dot(lw);
+    }
+    ke
+}
+
+/// 顶盒（17）参与流形的几何明细（法线/点数/深度/接触点 xz）。
+fn print_top_manifolds(w: &World) {
+    for m in w.manifolds() {
+        if m.a as usize == 17 || m.b as usize == 17 {
+            let ds: Vec<String> = m.points.iter().map(|p| format!("{:.5}", p.depth)).collect();
+            let px: Vec<String> = m
+                .points
+                .iter()
+                .map(|p| format!("({:.4},{:.4})", p.point.x, p.point.z))
+                .collect();
+            println!(
+                "        mf ({},{}) n=({:.3},{:.3},{:.3}) pts={} depth=[{}] xz=[{}]",
+                m.a,
+                m.b,
+                m.normal.x,
+                m.normal.y,
+                m.normal.z,
+                m.points.len(),
+                ds.join(" "),
+                px.join(" ")
+            );
+        }
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mu: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0.5);
@@ -47,21 +89,6 @@ fn main() {
     let col_b = [2usize, 6, 10, 14, 18];
 
     // 逐体能量审计：ΔKE − 重力功 = 接触功（聚合在列上则可看柱体是否被接触泵能）。
-    let ke_of = |w: &World, i: usize| -> f32 {
-        let m = 1.0 / w.bodies.inv_mass[i];
-        let v = w.bodies.linvel[i];
-        let mut ke = 0.5 * m * v.length_squared();
-        let wv = w.bodies.angvel(i);
-        let inv_i = w.bodies.local_inv_inertia[i];
-        if inv_i.x > 0.0 {
-            let q = w.bodies.rot(i);
-            let wl = q.conjugate().rotate_vec3(wv);
-            let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
-            let lw = q.rotate_vec3(ll);
-            ke += 0.5 * wv.dot(lw);
-        }
-        ke
-    };
     let all: Vec<usize> = col_a.iter().chain(col_b.iter()).copied().collect();
     let mut prev_ke: Vec<f32> = all.iter().map(|&i| ke_of(&w, i)).collect();
     let mut cum_work = vec![0.0f32; all.len()];
@@ -119,26 +146,6 @@ fn main() {
             println!("{line}");
         }
         // 顶盒（17）参与流形的几何明细。
-        for m in w.manifolds() {
-            if m.a as usize == 17 || m.b as usize == 17 {
-                let ds: Vec<String> = m.points.iter().map(|p| format!("{:.5}", p.depth)).collect();
-                let px: Vec<String> = m
-                    .points
-                    .iter()
-                    .map(|p| format!("({:.4},{:.4})", p.point.x, p.point.z))
-                    .collect();
-                println!(
-                    "        mf ({},{}) n=({:.3},{:.3},{:.3}) pts={} depth=[{}] xz=[{}]",
-                    m.a,
-                    m.b,
-                    m.normal.x,
-                    m.normal.y,
-                    m.normal.z,
-                    m.points.len(),
-                    ds.join(" "),
-                    px.join(" ")
-                );
-            }
-        }
+        print_top_manifolds(&w);
     }
 }

@@ -580,8 +580,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/diag_col.rs": {
-  "file_lines": 145,
-  "max_fn_lines": 135,
+  "file_lines": 152,
+  "max_fn_lines": 100,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/diag_eject.rs": {
@@ -620,8 +620,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m1_collision_row.rs": {
-  "file_lines": 243,
-  "max_fn_lines": 138,
+  "file_lines": 256,
+  "max_fn_lines": 106,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m1_islands.rs": {
