@@ -94,6 +94,28 @@ pub struct PhasesOut {
     pub error: Option<String>,
 }
 
+/// 取第 `adapter_index` 个适配器并建设备（**两探针共用**的选卡路径）。
+/// 返回 `(适配器名字, device, queue)`；不可用时给中文错误串（调用方原样报出）。
+pub(crate) fn device_for(
+    adapter_index: usize,
+) -> Result<(String, wgpu::Device, wgpu::Queue), String> {
+    let instance = wgpu::Instance::default();
+    let list = instance.enumerate_adapters(wgpu::Backends::all());
+    let Some(adapter) = list.into_iter().nth(adapter_index) else {
+        return Err(format!(
+            "没有第 {adapter_index} 个适配器（本机无 GPU 或后端不可用）"
+        ));
+    };
+    let info = adapter.get_info();
+    let name = format!(
+        "{} | {:?} | {:?}",
+        info.name, info.backend, info.device_type
+    );
+    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+        .map_err(|e| format!("request_device 失败：{e:?}"))?;
+    Ok((name, device, queue))
+}
+
 /// 在**指定适配器序号**上跑「密度 + 力/黏度」两相位（缓冲/管线复用，`repeats` 轮）。
 pub fn phases_on_adapter(
     adapter_index: usize,
@@ -103,28 +125,20 @@ pub fn phases_on_adapter(
     repeats: usize,
 ) -> PhasesOut {
     let t0 = std::time::Instant::now();
-    let instance = wgpu::Instance::default();
-    let list = instance.enumerate_adapters(wgpu::Backends::all());
-    let Some(adapter) = list.into_iter().nth(adapter_index) else {
-        return PhasesOut {
-            dens: Vec::new(),
-            acc: Vec::new(),
-            xsph: Vec::new(),
-            setup_ms: 0.0,
-            per_dispatch_ms: 0.0,
-            adapter: String::new(),
-            error: Some(format!(
-                "没有第 {adapter_index} 个适配器（本机无 GPU 或后端不可用）"
-            )),
-        };
+    let (adapter_name, device, queue) = match device_for(adapter_index) {
+        Ok(v) => v,
+        Err(e) => {
+            return PhasesOut {
+                dens: Vec::new(),
+                acc: Vec::new(),
+                xsph: Vec::new(),
+                setup_ms: 0.0,
+                per_dispatch_ms: 0.0,
+                adapter: String::new(),
+                error: Some(e),
+            };
+        }
     };
-    let info = adapter.get_info();
-    let adapter_name = format!(
-        "{} | {:?} | {:?}",
-        info.name, info.backend, info.device_type
-    );
-    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-        .expect("request_device");
 
     let bytes_f32 = |v: &[f32]| -> Vec<u8> {
         let mut b = Vec::with_capacity(v.len() * 4);
