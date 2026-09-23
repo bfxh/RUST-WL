@@ -3,7 +3,7 @@
 > 一句话：**文件级已清零**；**函数级门面内剩 29 个**（>120 行；B8+B9 两批已清 6 个）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
-## 1. 已落地（分支 `feat/solver-limits`，15 个提交 `8c650bd` → `bfa33c8`，CI 全绿）
+## 1. 已落地（分支 `feat/solver-limits`，17 个提交 `8c650bd` → `bcf5cb5`，CI 全绿）
 
 | 提交 | 内容 |
 |---|---|
@@ -19,6 +19,8 @@
 | `d42d29f` | **B8 三个库内单块**：`mass_props` 121→**94**、`grid_on_adapter` 132→**89**、`make_phase_pipes` 125→**95**；新增 `GridPipes`；修 `grid.rs` 一处孤儿文档 |
 | `d6124a6` | **B9a**：`clip` 203→**41**（四步方法）、`epa_from_simplex` 132→**89**（三个纯函数）；加 `type BoxAxes` |
 | `bfa33c8` | **B9b**：`sat` 178→**74**（`build_axes` / `box_pair_scan` / `axis_extents`）+ `box_axes()` 访问器（`sat`/`clip` 里同一段 match 各抄一遍 ⇒ 合一） |
+| `81432f3` | **B10a**：`contacts_box_voxel` 174→**99**（`gather_cells` / `sd_over_cells` / `face_samples`）+ 采样循环与发射循环的采样点推导**去重** |
+| `bcf5cb5` | **B10b**：`solve_island_group` 210→**79**（按 `ISLAND_SEG_PROBE` 计时段拆五个 helper） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -37,7 +39,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 29 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 27 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -55,24 +57,24 @@ PY
 
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
-| 库内**大分发** | 6 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad）· `solve_joint` 214 · `solve_island_group` 210 | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }` |
-| 库内**单块** | 1 | `contacts_box_voxel` 174（terrain/voxel） | 见下 |
+| 库内**大分发** | 5 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad）· `solve_joint` 214 | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }` |
 | **示例 main** | 19 | `trimesh_rest_probe` 360 · `showcase` 344 · `gpu_density_probe` 272 · `gpu_tick_probe` 266 · `m1_scale` 263 · `splat_rest_probe` 249 · `fluid_buoyancy` 245 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m1_islands` 178 · `m0_gates` 174 · `diag_eject` 149 · `m1_collision_row` 138 · `diag_col` 135 · `voxel_rest_probe` 129 · `dam_break` 122 | `extract_block`：场景构造 / 推进 / 报表 三段 |
 | 测试 + 脚本 | 3 | `float_motion_vs_local_water_motion` 144 · `diag_query_cost_across_tree_shapes` 137 · `render_demo.py::main` 241 | 同上 |
 
 **建议切点（已侦察）**：
 
-1. `contacts_box_voxel`（174）：提格收集（L40-55）、`sd` 闭包（L57-81 → 顶层 `fn sd_over_cells`）、
-   逐面采样（L106-133 → `([usize; 6], [f32; 6])`）、逐面发射（L159-）。采样/发射段要的固定量多
-   （`v`/`cells`/`m`/`h`/`d3`/`pos`/`skin`）⇒ 先定义一个 `struct BoxQuery<'a>` 收拢（**别硬塞 8 个参数**，
-   clippy `too_many_arguments` 会拦）。
-   ⚠️ **顺带发现一处死代码**：L134-149 的"主导面选择"结果 `best` 已无人用（`let _ = best;`），
-   `deepest` 也只喂那条判据 ⇒ 整段可退化成 `if count.iter().all(|&c| c == 0) { return false; }`
-   （语义等价：全零时发射循环本来也什么都不发）。**单独一次改动做，别混进纯搬移批**。
-2. `solve_island_group`（210）：每段本来就有 `ISLAND_SEG_PROBE` 计时壳（t_build / t_warm / t_iter…）
-   ⇒ **按段提 helper 最自然**；参数表会很长，照抄现有 `#[allow(clippy::too_many_arguments)]`（热路径）。
-3. `solve_joint`（214）：未侦察，同段搬。
-4. 示例 `main` 19 个：形态相同（建场景 → 推进 → 报表）⇒ 可先做最大的 `trimesh_rest_probe` 定配方，
+1. `compute_pairs`（256，broad 的 trait 方法）：五相位 + 探针计时（`0)` AABB / `0.5)` 睡眠翻转检测 /
+   `1)` 代理更新 / `2)` 清醒动体查询 / `3)` 精确过滤 + 排序去重）⇒ 每个 `// N)` 段一个 helper；
+   缓冲都在 `self` 上 ⇒ 仍是方法（签名长，按热路径惯例 allow）。
+2. `solve_joint`（214，solver/joints/solve.rs）：横幅 `// ---- 线性行 / 角行 / 马达行 / 转动限位 /
+   棱柱行程限位 ----` 是天然切点，但要注意：① 段位**比横幅看起来更靠后**（前面还有 AABB/`rel_vel`
+   准备段）；② 各段都要 `bodies`/`ai`/`bi`/`ra`/`rb`/`qa`/`qb`/`sp`，且 `max_dv` 是**累加器**
+   ⇒ 提成 helper 时把累加改成返回值（`max_dv = max_dv.max(f(..))`）。
+3. **B10a 留下的死代码**：`contacts_box_voxel` 里"主导面选择"那一段的结果 `best` 已无人用
+   （`let _ = best;`），`deepest` 也只喂那条判据 ⇒ 整段可退化成
+   `if count.iter().all(|&c| c == 0) { return false; }`（语义等价：全零时发射循环本来也什么都不发）。
+   **单独一次改动做，别混进纯搬移批**。
+4. 示例 `main` 19 个：形态相同（建场景 → 推进 → 报表）⇒ 先做最大的 `trimesh_rest_probe` 定配方，
    其余照抄（每例一个提交或几例一批）。
 
 **类型级 6 个是"已登记例外"**（`PhysConfig` 31 / `FluidSystem` 26 / `DefaultNarrowPhase` 33 /
@@ -110,7 +112,7 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
 7. **门的棘轮**：`--write-baseline` **之后不许再动文件**（哪怕只加一行 `///`）——probe.rs 482→483 实栽，
    要么先改完再写基线、要么改完重写一遍（**净账通道**会放行并打印"合法交换"）。
 
-### `extract_block.py` 的五条边界（B8/B9 实测；改工具前先看这段）
+### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
 1. **插入点必须在搬运区间之前**：`--at-before-fn` / `before_fn` 指到区间**之后**的函数 ⇒
    `lines[at:cstart]` 成空切片，搬走的内容**既留在原地又进了 helper**（被"行数不自洽"抓回）。
@@ -127,6 +129,18 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
    `&x`/`&device` 成了多余借用（clippy `needless_borrow`，B8/B9 各栽）。
 5. **match 臂不要用本工具**：它把模式行 + 臂花括号一起搬走，helper 里只剩半截臂（mass.rs 实栽）
    ⇒ 臂走 `extract_fn_arms.py`，或把 `match` 外壳一起搬。
+6. **注释当锚点会撞上下一个花括号**（B10b 实栽）：`scope` 从锚点行起找"第一个含 `{` 的行"——
+   `// 收集 warm 更新…` 后面紧跟 `if let Some(t) = t_it {` ⇒ 只搬走 1 行、**自检还全过**
+   （它确实是合法块）⇒ 靠编译器抓回（`cannot find value t`）。**判据**：锚点要么本身是块首行，
+   要么它到目标块之间没有别的花括号。**遇到就 `git checkout -- <该文件>` 重做，别手工修那半截**。
+7. **`scope: inner` + `replace_outer` 会连循环变量一起搬走**：`for c in cbuf.iter() { … }` 的体用 `c`
+   ⇒ helper 里 `c` 不存在（E0425）。体要用循环变量时**保留循环、helper 收单条**
+   （B10b 改成 `collect_warm_update(c, …)` 逐条调用）。
+8. **插入点会带走"文档 + 属性"两样**：落在 `pub(crate) fn X(` 上时，X 的 `///` 文档**和**
+   `#[allow(...)]` 之类属性都会留在原地粘到新 helper 上（B10b 因此报"属性重复 + 22 参数超限"）
+   ⇒ 提完要**把文档与属性一起搬回原位**。
+9. **参数改名要连体内一起改**（B10b）：签名里把 `settled_hold`/`hold_max_vn` 写成 `rounds`/`max_vn`、
+   体内仍用旧名 ⇒ E0425 一串。**照抄原变量名最省事**（helper 形参名 = 体内用的名字）。
 
 **另外两条 clippy 拦路（都在纯搬移里冒出来）**：
 - `let` + 立即返回（`let (a, b) = match …; (a, b)`）⇒ `let_and_return`：直接把 `match` 当尾表达式。
