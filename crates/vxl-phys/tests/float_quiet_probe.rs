@@ -619,3 +619,158 @@ fn p10_single_box_spin_trace() {
         }
     }
 }
+
+/// **漂浮体"不静止"是缺陷还是随波？**（仪表，只打印）
+///
+/// 干槽单盒的不静止是**确定缺陷**（平地板上自旋，已由 P10 修好）。但浮在水面上的体
+/// **可能只是在真实地随波起伏** ⇒ 判据不能是"|v| < 阈值"，而要问：
+/// **体的运动 == 局部水的运动吗？** 本测试对同场景打印：
+/// ① 体心附近的**流体平均/最大 |v|**（局部水动强度）；② 体 |v|/|ω|；
+/// ③ 窗口内**体心 y 起伏**与**局部水面高度起伏**（比振幅）；
+/// ④ **2a 单向**（`add_fluid`，无边界粒子反作用）对照 —— 若两档同量级 ⇒ 与 2b 无关。
+#[test]
+#[ignore = "P10 续：漂浮体不静止的归因（随波 vs 数值）；见上注"]
+fn float_motion_vs_local_water_motion() {
+    let mut w = World::new(PhysConfig::default());
+    let v = tank(&mut w);
+    let sys = water(2);
+    let fid = w.add_fluid_with_boundary_coupling(sys, &[v]);
+    // 零冲击就位：先无体测水面
+    let surface = {
+        let mut w0 = World::new(PhysConfig::default());
+        let v0 = tank(&mut w0);
+        let s0 = water(2);
+        let f0 = w0.add_fluid_with_boundary_coupling(s0, &[v0]);
+        for _ in 0..300 {
+            w0.step();
+        }
+        w0.fluids()[f0]
+            .0
+            .positions()
+            .iter()
+            .filter(|p| p.x.abs() < 0.05 && p.z.abs() < 0.05)
+            .map(|p| p.y)
+            .fold(0.0f32, f32::max)
+    };
+    let y0 = surface - 0.036 + 0.06;
+    let b = w.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.06),
+        },
+        Vec3::new(0.0, y0, 0.0),
+        Quat::IDENTITY,
+        300.0,
+    ) as usize;
+    for _ in 0..900 {
+        w.step();
+    }
+    // 窗口统计：体动 vs 局部水动
+    let (mut ylo, mut yhi) = (f32::MAX, f32::MIN);
+    let (mut slo, mut shi) = (f32::MAX, f32::MIN);
+    let (mut vsum, mut vmax, mut n) = (0.0f64, 0.0f32, 0.0f64);
+    let (mut bvsum, mut bwsum) = (0.0f64, 0.0f64);
+    let win = 480usize;
+    for _ in 0..win {
+        w.step();
+        let p = w.bodies.position[b];
+        ylo = ylo.min(p.y);
+        yhi = yhi.max(p.y);
+        bvsum += w.bodies.linvel[b].length() as f64;
+        bwsum += w.bodies.angvel(b).length() as f64;
+        let f = &w.fluids()[fid].0;
+        let mut sh = 0.0f32;
+        for (q, vv) in f.positions().iter().zip(f.velocities().iter()) {
+            if (q.x - p.x).abs() < 0.08 && (q.z - p.z).abs() < 0.08 {
+                let sp = vv.length();
+                vsum += sp as f64;
+                vmax = vmax.max(sp);
+                n += 1.0;
+                sh = sh.max(q.y);
+            }
+        }
+        slo = slo.min(sh);
+        shi = shi.max(sh);
+    }
+    println!("漂浮体运动 vs 局部水动（窗口 {win} tick；盒 0°、300 kg/m³、2b 开）");
+    println!(
+        "  体：y 起伏 {:.1} mm | 平均 |v| {:.4} | 平均 |ω| {:.4}",
+        (yhi - ylo) * 1e3,
+        bvsum / win as f64,
+        bwsum / win as f64
+    );
+    println!(
+        "  邻近水（水平 ±0.08 m）：平均 |v| {:.4} | 峰 |v| {:.4} | 水面高度起伏 {:.1} mm",
+        vsum / n.max(1.0),
+        vmax,
+        (shi - slo) * 1e3
+    );
+    println!("  ⇒ 若『体平均 |v| ≈ 水平均 |v|』且『体 y 起伏 ≈ 水面起伏』⇒ **随波（非缺陷）**；");
+    println!("     若体 |v| 远大于水 |v| 或体起伏 ≫ 水面起伏 ⇒ **数值抖动（缺陷）**。");
+    // —— 对照：**2a 单向**（`add_fluid`，无边界粒子反作用）——判定"水为什么一直不静" ——
+    let mut w2 = World::new(PhysConfig::default());
+    let v2 = tank(&mut w2);
+    let s2 = water(2);
+    let fid2 = w2.add_fluid(s2, &[v2]); // 2a：无边界粒子
+    let surface2 = {
+        let mut w3 = World::new(PhysConfig::default());
+        let v3 = tank(&mut w3);
+        let s3 = water(2);
+        let f3 = w3.add_fluid(s3, &[v3]);
+        for _ in 0..300 {
+            w3.step();
+        }
+        w3.fluids()[f3]
+            .0
+            .positions()
+            .iter()
+            .filter(|p| p.x.abs() < 0.05 && p.z.abs() < 0.05)
+            .map(|p| p.y)
+            .fold(0.0f32, f32::max)
+    };
+    let b2 = w2.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.06),
+        },
+        Vec3::new(0.0, surface2 - 0.036 + 0.06, 0.0),
+        Quat::IDENTITY,
+        300.0,
+    ) as usize;
+    for _ in 0..900 {
+        w2.step();
+    }
+    let (mut vsum2, mut vmax2, mut n2) = (0.0f64, 0.0f32, 0.0f64);
+    let (mut bv2, mut bw2) = (0.0f64, 0.0f64);
+    let (mut ylo2, mut yhi2) = (f32::MAX, f32::MIN);
+    for _ in 0..win {
+        w2.step();
+        let p = w2.bodies.position[b2];
+        ylo2 = ylo2.min(p.y);
+        yhi2 = yhi2.max(p.y);
+        bv2 += w2.bodies.linvel[b2].length() as f64;
+        bw2 += w2.bodies.angvel(b2).length() as f64;
+        for (q, vv) in w2.fluids()[fid2]
+            .0
+            .positions()
+            .iter()
+            .zip(w2.fluids()[fid2].0.velocities().iter())
+        {
+            if (q.x - p.x).abs() < 0.08 && (q.z - p.z).abs() < 0.08 {
+                let sp = vv.length();
+                vsum2 += sp as f64;
+                vmax2 = vmax2.max(sp);
+                n2 += 1.0;
+            }
+        }
+    }
+    println!(
+        "  [对照 2a 单向（无边界粒子）] 体：y 起伏 {:.1} mm | 平均 |v| {:.4} | 平均 |ω| {:.4}",
+        (yhi2 - ylo2) * 1e3,
+        bv2 / win as f64,
+        bw2 / win as f64
+    );
+    println!(
+        "                             邻近水：平均 |v| {:.4} | 峰 |v| {:.4}",
+        vsum2 / n2.max(1.0),
+        vmax2
+    );
+}
