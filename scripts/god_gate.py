@@ -207,15 +207,30 @@ def brace_metrics(src: str, js: bool = False) -> list[tuple[str, int, str]]:
         if kind == "fn":
             out.append((name, end - i + 1, "fn"))
         else:
-            # 成员数：块内深度 1 的 fn / 字段行（启发式，量级正确即可）
+            # 成员数：块内深度 1 的 fn / 字段行（启发式，量级正确即可）。
+            # ⚠️ **多行函数签名的参数行不是字段**（实测踩到：`fn fill_hull_world(\n side: usize,\n …)`
+            # 的参数行被当字段 ⇒ support.rs 的 16 个方法报成 **38 成员**（虚高））。做法：见到
+            # 深度 1 的 `fn` 行就进入"签名态"，括号配平回 0 才退出，期间不数字段行。
             depth = 0
             members = 0
+            in_sig = False
+            paren = 0
             for j in range(i, end + 1):
                 d0 = depth
                 depth += lines[j].count("{") - lines[j].count("}")
                 if j == i:
                     continue
-                if d0 == 1 and (fn_line.match(lines[j]) or field_line.match(lines[j])):
+                if d0 == 1 and fn_line.match(lines[j]):
+                    members += 1
+                    paren = lines[j].count("(") - lines[j].count(")")
+                    in_sig = paren > 0
+                    continue
+                if in_sig:
+                    paren += lines[j].count("(") - lines[j].count(")")
+                    if paren <= 0:
+                        in_sig = False
+                    continue
+                if d0 == 1 and field_line.match(lines[j]):
                     members += 1
             out.append((name, members, "type"))
     return out
@@ -307,6 +322,59 @@ def evaluate(files: dict, base: dict, cfg: dict) -> tuple[list[str], list[str], 
     return bad, grew, shrank
 
 
+def selftest() -> int:
+    """**门自己的金丝雀**（`--selftest`）：判据必须双向验证过才算数（这是踩出来的规矩）。
+
+    三条钉住的坑：
+      ① 掩码：Rust 的 `&'static str` 不能被当成字符字面量吞掉中间整段（否则深度失真，
+         曾把真实 307 行的函数记成 63 行 ⇒ 假绿）；字符串里的花括号必须被掩掉。
+      ② 成员数：多行签名的参数行不是字段（曾把 16 方法报成 38 成员）。
+      ③ `included`：`**/x` 必须匹配**根级** `x`（fnmatch 的坑，曾静默漏掉根文件）。
+    """
+    bad = []
+    s1 = "fn f(x: &'static str) { let s = \"{ } {}\"; if x.is_empty() { return; } }\n"
+    m1 = _mask(s1)
+    if len(m1) != len(s1):
+        bad.append("掩码改了长度（掩码必须等长，否则行号错位）")
+    # 这条源码里：2 个字符串内花括号（`"{ } {}"`）+ 2 个真花括号（fn 体 / if 体）
+    # ⇒ 掩码后应剩 2 个 `{`（各 1 个 `}`）。
+    if (m1.count("{"), m1.count("}")) != (2, 2):
+        bad.append(f"字符串里的花括号没掩干净：{{={m1.count('{')},}}={m1.count('}')}，期望 (2,2)")
+    if "static" not in m1:
+        bad.append("生命周期被当成字符字面量吞掉了（&'static 里的后续代码会消失）")
+
+    s2 = (
+        "impl X {\n"
+        "    pub fn a(\n"
+        "        alpha: u32,\n"
+        "        beta: u32,\n"
+        "    ) -> u32 {\n"
+        "        alpha + beta\n"
+        "    }\n"
+        "    pub fn b(&self) {}\n"
+        "}\n"
+    )
+    got = [n for n, k, kind in brace_metrics(s2) if kind == "type" and n == "X" for _ in [0]]
+    mem = max((k for n, k, kind in brace_metrics(s2) if kind == "type" and n == "X"), default=0)
+    if mem != 2:
+        bad.append(f"成员数算错：多行签名的参数行被当字段（得 {mem}，期望 2）")
+    del got
+
+    cfg = dict(DEFAULT_CFG)
+    if not included("rootfile.rs", cfg):
+        bad.append("根级文件不在扫描面（fnmatch 的 `**/x` 坑）")
+    if included("target/x.rs", cfg):
+        bad.append("exclude 失效：target/ 下的文件进了扫描面")
+
+    if bad:
+        print("❌ GOD-GATE 自检失败：")
+        for b in bad:
+            print(f"   · {b}")
+        return 1
+    print("✅ GOD-GATE 自检通过（掩码双向 / 成员数 / 包含面三条金丝雀）")
+    return 0
+
+
 def load_baseline(path: pathlib.Path) -> dict:
     """读基线：不存在 ⇒ {}；**存在但解析不了 ⇒ 报明确错误并退出**。
 
@@ -330,8 +398,11 @@ def main() -> int:
     ap.add_argument("--baseline")
     ap.add_argument("--write-baseline", action="store_true")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--selftest", action="store_true", help="跑门自己的金丝雀（掩码/成员数/包含面）")
     ap.add_argument("--top", type=int, default=12)
     a = ap.parse_args()
+    if a.selftest:
+        return selftest()
 
     root = pathlib.Path(a.root).resolve()
     cfg = load_cfg(root, a.config)

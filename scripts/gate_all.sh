@@ -66,6 +66,8 @@ step vocab 0 bash scripts/vocab_scan.sh .
 step discipline 0 bash scripts/discipline_scan.sh .
 # 上帝对象门（文件/函数/类型尺寸；**棘轮只准减**，基线在 god-baseline.json）——
 # 脚本可移植（`scripts/god_gate.py` + `god.gate.json`），`--list --top N` 看排行。
+# 先跑**门自己的金丝雀**（掩码双向 / 成员数 / 包含面）——判据坏了门就是摆设。
+step god_selftest 0 python scripts/god_gate.py --selftest
 step god 0 python scripts/god_gate.py --root .
 # 依赖红线（外部依赖/构建依赖只准减；构建脚本与补丁单独对账；理由登记在 spec 同目录的基线里）
 step deps_lock 0 python scripts/deps_lock.py

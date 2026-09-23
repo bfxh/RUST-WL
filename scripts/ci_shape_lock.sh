@@ -32,6 +32,7 @@ need_text "纪律扫描不在 CI 里"            "bash scripts/discipline_scan.s
 need_text "词汇扫描不在 CI 里"            "bash scripts/vocab_scan.sh"
 need_text "依赖红线不在 CI 里"            "python3 scripts/deps_lock.py"
 need_text "上帝对象门不在 CI 里"          "python3 scripts/god_gate.py"
+need_text "上帝对象门的自检不在 CI 里"    "python3 scripts/god_gate.py --selftest"
 need_text "cargo-deny 不在 CI 里"         "cargo deny check"
 need_text "cargo-machete 不在 CI 里"      "cargo machete"
 need_text "rustdoc 不再 warnings 即错误"  "RUSTDOCFLAGS: -D warnings"

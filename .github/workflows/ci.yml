@@ -99,9 +99,12 @@ jobs:
       - name: 词汇禁令扫描（裁决 61）
         run: bash scripts/vocab_scan.sh .
       # 上帝对象门（文件/函数/类型尺寸；棘轮只准减，基线 god-baseline.json）。
-      # 脚本零依赖、可移植（scripts/god_gate.py + god.gate.json）⇒ CI 里直接 python3 跑。
-      - name: 上帝对象门（尺寸棘轮）
-        run: python3 scripts/god_gate.py --root .
+      # 脚本零依赖、可移植（scripts/god_gate.py + god.gate.json）⇒ CI 里直接 python3 跑；
+      # 先跑门自己的金丝雀（判据坏了门就是摆设）。
+      - name: 上帝对象门（尺寸棘轮 + 自检）
+        run: |
+          python3 scripts/god_gate.py --selftest
+          python3 scripts/god_gate.py --root .
 
   # ==================== 静态层 ②：依赖图 ====================
   static-deps:
