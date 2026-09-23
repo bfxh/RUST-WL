@@ -585,8 +585,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/diag_eject.rs": {
-  "file_lines": 161,
-  "max_fn_lines": 149,
+  "file_lines": 172,
+  "max_fn_lines": 97,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/diag_min.rs": {

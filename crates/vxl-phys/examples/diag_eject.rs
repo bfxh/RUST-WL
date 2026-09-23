@@ -9,6 +9,69 @@
 use vxl_phys::core::FrictionModel;
 use vxl_phys::{HeightField, PhysConfig, Quat, Shape, Vec3, World};
 
+/// 单体动能（平动 + 转动）：`½mv² + ½ω·(I⁻¹ω)`（对角惯量按体轴旋回）。
+fn ke_of(w: &World, i: usize) -> f32 {
+    let m = 1.0 / w.bodies.inv_mass[i];
+    let v = w.bodies.linvel[i];
+    let mut ke = 0.5 * m * v.length_squared();
+    let wv = w.bodies.angvel(i);
+    let inv_i = w.bodies.local_inv_inertia[i];
+    if inv_i.x > 0.0 {
+        let q = w.bodies.rot(i);
+        let wl = q.conjugate().rotate_vec3(wv);
+        let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
+        let lw = q.rotate_vec3(ll);
+        ke += 0.5 * wv.dot(lw);
+    }
+    ke
+}
+
+/// 倾倒某体参与的全部流形（法线 / 点数 / 深度）+ 双方的位姿与速度。
+fn dump_body_manifolds(w: &World, bi: usize) {
+    for m in w.manifolds() {
+        let (a, b) = (m.a as usize, m.b as usize);
+        if a == bi || b == bi {
+            let ds: Vec<String> = m.points.iter().map(|p| format!("{:.4}", p.depth)).collect();
+            println!(
+                "      mf ({a},{b}) n=({:.3},{:.3},{:.3}) pts={} d=[{}]",
+                m.normal.x,
+                m.normal.y,
+                m.normal.z,
+                m.points.len(),
+                ds.join(" ")
+            );
+            for &x in [a, b].iter() {
+                let p = w.bodies.position[x];
+                let q = w.bodies.rot(x);
+                let v = w.bodies.linvel[x];
+                let om = w.bodies.angvel(x);
+                println!(
+                    "        #{x} pos ({:.4},{:.4},{:.4}) q({:.5},{:.5},{:.5}) v({:+.4},{:+.4},{:+.4}) |w|{:.4}",
+                    p.x, p.y, p.z, q.x, q.y, q.z, v.x, v.y, v.z, om.length()
+                );
+            }
+        }
+    }
+}
+
+/// 末态累计接触功 top5（体号 / 累计功 / 速度 / 位置）。
+fn print_cum_top5(w: &World, dyn_ids: &[usize], cum: &[f32]) {
+    let mut idx: Vec<usize> = (0..dyn_ids.len()).collect();
+    idx.sort_by(|&a, &b| cum[b].total_cmp(&cum[a]));
+    println!("== 累计接触功 top5：");
+    for &k in idx.iter().take(5) {
+        let i = dyn_ids[k];
+        println!(
+            "  #{i} cum {:+.2}J |v| {:.3} pos ({:.3},{:.3},{:.3})",
+            cum[k],
+            w.bodies.linvel[i].length(),
+            w.bodies.position[i].x,
+            w.bodies.position[i].y,
+            w.bodies.position[i].z
+        );
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let side: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(3);
@@ -53,21 +116,6 @@ fn main() {
         dyn_ids.len()
     );
 
-    let ke_of = |w: &World, i: usize| -> f32 {
-        let m = 1.0 / w.bodies.inv_mass[i];
-        let v = w.bodies.linvel[i];
-        let mut ke = 0.5 * m * v.length_squared();
-        let wv = w.bodies.angvel(i);
-        let inv_i = w.bodies.local_inv_inertia[i];
-        if inv_i.x > 0.0 {
-            let q = w.bodies.rot(i);
-            let wl = q.conjugate().rotate_vec3(wv);
-            let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
-            let lw = q.rotate_vec3(ll);
-            ke += 0.5 * wv.dot(lw);
-        }
-        ke
-    };
     let mut prev_ke: Vec<f32> = dyn_ids.iter().map(|&i| ke_of(&w, i)).collect();
     let mut prev_vy: Vec<f32> = dyn_ids.iter().map(|&i| w.bodies.linvel[i].y).collect();
     let mut cum: Vec<f32> = vec![0.0; dyn_ids.len()];
@@ -114,47 +162,10 @@ fn main() {
         if let Some((bi, t0)) = dump_body {
             if t <= t0 + 7 {
                 println!("    pump #{bi} 本 tick {:+.1}mJ", works[0].1 * 1000.0);
-                for m in w.manifolds() {
-                    let (a, b) = (m.a as usize, m.b as usize);
-                    if a == bi || b == bi {
-                        let ds: Vec<String> =
-                            m.points.iter().map(|p| format!("{:.4}", p.depth)).collect();
-                        println!(
-                            "      mf ({a},{b}) n=({:.3},{:.3},{:.3}) pts={} d=[{}]",
-                            m.normal.x,
-                            m.normal.y,
-                            m.normal.z,
-                            m.points.len(),
-                            ds.join(" ")
-                        );
-                        for &x in [a, b].iter() {
-                            let p = w.bodies.position[x];
-                            let q = w.bodies.rot(x);
-                            let v = w.bodies.linvel[x];
-                            let om = w.bodies.angvel(x);
-                            println!(
-                                "        #{x} pos ({:.4},{:.4},{:.4}) q({:.5},{:.5},{:.5}) v({:+.4},{:+.4},{:+.4}) |w|{:.4}",
-                                p.x, p.y, p.z, q.x, q.y, q.z, v.x, v.y, v.z, om.length()
-                            );
-                        }
-                    }
-                }
+                dump_body_manifolds(&w, bi);
             }
         }
     }
     // 末态：累计功 top 5。
-    let mut idx: Vec<usize> = (0..dyn_ids.len()).collect();
-    idx.sort_by(|&a, &b| cum[b].total_cmp(&cum[a]));
-    println!("== 累计接触功 top5：");
-    for &k in idx.iter().take(5) {
-        let i = dyn_ids[k];
-        println!(
-            "  #{i} cum {:+.2}J |v| {:.3} pos ({:.3},{:.3},{:.3})",
-            cum[k],
-            w.bodies.linvel[i].length(),
-            w.bodies.position[i].x,
-            w.bodies.position[i].y,
-            w.bodies.position[i].z
-        );
-    }
+    print_cum_top5(&w, &dyn_ids, &cum);
 }
