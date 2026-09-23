@@ -455,8 +455,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-solver/src/island.rs": {
-  "file_lines": 358,
-  "max_fn_lines": 210,
+  "file_lines": 434,
+  "max_fn_lines": 85,
   "max_type_members": 0
  },
  "crates/vxl-phys-solver/src/joints.rs": {

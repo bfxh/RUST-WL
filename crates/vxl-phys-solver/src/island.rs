@@ -142,6 +142,213 @@ pub(crate) fn solve_constraint(
     resid
 }
 
+/// 每岛构建约束（岛内流形序 = 全局流形序，§4.14）。
+#[allow(clippy::too_many_arguments)]
+fn build_island_constraints(
+    cbuf: &mut Vec<ContactConstraint>,
+    manifolds: &[Manifold],
+    isl: &Island,
+    bodies: &BodySet,
+    warm_index: &HashMap<WarmKey, u32>,
+    warm_slots: &[(WarmKey, WarmManifold)],
+    match_dist: f32,
+    e_threshold: f32,
+    sp: &SolverParams,
+) {
+    cbuf.clear();
+    for &mi in &isl.manifs {
+        build_constraint(
+            cbuf,
+            &manifolds[mi],
+            bodies,
+            warm_index,
+            warm_slots,
+            match_dist,
+            e_threshold,
+            sp,
+        );
+    }
+}
+
+/// warm starting 预施加（每约束一次）。
+fn warm_start_apply(
+    cbuf: &[ContactConstraint],
+    lv: &mut [Vec3],
+    av: &mut [Vec3],
+    local_of: &[u32],
+    iw: &[Mat3],
+    im: &[f32],
+) {
+    for c in cbuf.iter() {
+        let (ai, bi) = (c.a as usize, c.b as usize);
+        for p in &c.points[..c.npts as usize] {
+            if let Some(w) = p.warm {
+                if w.pn == 0.0 && w.pt1 == 0.0 && w.pt2 == 0.0 {
+                    continue;
+                }
+                let impulse = c.normal * w.pn + p.t1 * w.pt1 + p.t2 * w.pt2;
+                group_apply(lv, av, local_of, iw, im, ai, p.ra, impulse, true);
+                group_apply(lv, av, local_of, iw, im, bi, p.rb, impulse, false);
+            }
+        }
+    }
+}
+
+/// 顺序冲量迭代（正/反交替对称扫掠 + 收敛早退 + 参与式降点）。
+#[allow(clippy::too_many_arguments)]
+fn iterate_island_constraints(
+    cbuf: &mut [ContactConstraint],
+    lv: &mut [Vec3],
+    av: &mut [Vec3],
+    local_of: &[u32],
+    iw: &[Mat3],
+    im: &[f32],
+    iters: u32,
+    normal_inner: u32,
+) {
+    let eps = early_exit_eps();
+    let min_iters = early_min_iters();
+    let reduce_after = point_reduce_after();
+    for it in 0..iters {
+        let mut resid = 0.0f32;
+        // **参与式降点**：从第 `reduce_after` 轮起，跳过"至今零冲量"的浅缝接触点
+        // （判据见 `point_reduce_after`）。前几轮全点参与 ⇒ 需要承载的点已经
+        // 载上，之后跳过它们只是省下空转。
+        let reduce = reduce_after > 0 && it + 1 >= reduce_after;
+        if it % 2 == 0 {
+            for c in cbuf.iter_mut() {
+                resid = resid.max(solve_constraint(
+                    c,
+                    lv,
+                    av,
+                    local_of,
+                    iw,
+                    im,
+                    false,
+                    normal_inner,
+                    reduce,
+                ));
+            }
+        } else {
+            for c in cbuf.iter_mut().rev() {
+                resid = resid.max(solve_constraint(
+                    c,
+                    lv,
+                    av,
+                    local_of,
+                    iw,
+                    im,
+                    true,
+                    normal_inner,
+                    reduce,
+                ));
+            }
+        }
+        if it + 1 >= min_iters && resid < eps {
+            break;
+        }
+    }
+}
+
+/// 准静态「安座」趟：把浅接触（`|vn| < max_vn` 且 `depth0 ≤ 0.05`）的法向相对速度归零。
+#[allow(clippy::too_many_arguments)]
+fn settled_hold_pass(
+    cbuf: &[ContactConstraint],
+    local_of: &[u32],
+    iw: &[Mat3],
+    im: &[f32],
+    lv: &mut [Vec3],
+    av: &mut [Vec3],
+    settled_hold: u32,
+    hold_max_vn: f32,
+) {
+    // —— 准静态"安座"趟（`settled_hold`）——
+    // 把准静态接触（|vn| < hold_max_vn）的**法向**相对速度精确归零：逐点求有效质量
+    // （与主迭代同一套组内缓存），施加 λ = −vn·m_eff（钳 pn+λ ≥ 0：只推不拉）。
+    // 只动法向 ⇒ 不改变摩擦/滑动语义；大 vn（真撞击、真分离）一概不碰。
+    // ⚠️ 两条纪律（第一版栽过）：
+    // ① **不动 `p.pn`**：warm 缓存必须只装"求解器自己的冲量"，掺进外来量会污染
+    //    下一子步的暖启动 ⇒ 实测爆掉（6152 快体、|v|max 81、深穿透 347 tick）；
+    // ② **欠松弛**：流形 ≤4 点是**冗余**约束，逐点各自"精确归零"会叠加（×点数×2 趟
+    //    ×子步数）⇒ 过冲。取 ω = 0.25（残差 0.16 → 一遍 0.12 → 四遍 ≈0.05）。
+    const HOLD_OMEGA: f32 = 0.25;
+    for _ in 0..settled_hold {
+        for c in cbuf.iter() {
+            let (ai, bi) = (c.a as usize, c.b as usize);
+            let normal = c.normal;
+            for p in c.points.iter().take(c.npts as usize) {
+                let ka = local_of[ai];
+                let kb = local_of[bi];
+                let im_a = if ka == u32::MAX { 0.0 } else { im[ka as usize] };
+                let im_b = if kb == u32::MAX { 0.0 } else { im[kb as usize] };
+                let mut k = im_a + im_b;
+                if im_a > 0.0 {
+                    let w = iw[ka as usize].mul_vec3(p.ra.cross(normal));
+                    k += w.cross(p.ra).dot(normal);
+                }
+                if im_b > 0.0 {
+                    let w = iw[kb as usize].mul_vec3(p.rb.cross(normal));
+                    k += w.cross(p.rb).dot(normal);
+                }
+                if k <= 1e-12 {
+                    continue;
+                }
+                let m_eff = 1.0 / k;
+                let va = group_vel(lv, av, local_of, ai, p.ra);
+                let vb = group_vel(lv, av, local_of, bi, p.rb);
+                let vn = (vb - va).dot(normal);
+                if vn.abs() >= hold_max_vn {
+                    continue; // 真撞击/真分离：不碰
+                }
+                // ⚠️ 目标 = **0**（不是 `rhs`）：投到 `rhs` 等于把"去穿透分离速度"加回去
+                // ⇒ 实测比不开还差（默认路径 awake 7491 → 9756）。
+                // 深穿透由**下面的深度守卫**处理：只在**浅接触**（`depth0 ≤ 0.05`）上安座，
+                // 深穿透接触一概不碰、照常让求解器把它们推出来（首版无守卫 ⇒ 实测
+                // 默认路径深穿透 5 tick / 0.295 m：把恢复速度一起冻掉了）。
+                if p.depth0 > 0.05 {
+                    continue;
+                }
+                let dl = -vn * m_eff * HOLD_OMEGA;
+                if dl != 0.0 {
+                    let imp = normal * dl;
+                    group_apply(lv, av, local_of, iw, im, ai, p.ra, imp, true);
+                    group_apply(lv, av, local_of, iw, im, bi, p.rb, imp, false);
+                }
+            }
+        }
+    }
+}
+
+/// 收集一条约束的 warm 更新（接触点锚点回推；位置在解算中不变）+ 零开销诊断计数。
+fn collect_warm_update(
+    c: &ContactConstraint,
+    warm_out: &mut Vec<WarmOutEntry>,
+    detail: &mut [u64; 5],
+) {
+    // 诊断（零开销）：被解算的点数 / 其中法向冲量≈0 的点数（padding 槽
+    // 不算——只数 `npts` 内的有效点，否则补零槽会被当成"零冲量点"）。
+    detail[3] += c.npts as u64;
+    detail[4] += c.points[..c.npts as usize]
+        .iter()
+        .filter(|p| p.pn <= 1e-6)
+        .count() as u64;
+    let mut wm = WarmManifold::EMPTY;
+    wm.normal = c.normal;
+    wm.n = c.npts;
+    for (k, p) in c.points.iter().enumerate().take(4) {
+        wm.points[k] = WarmPoint {
+            pn: p.pn,
+            pt1: p.pt1,
+            pt2: p.pt2,
+            feature: p.feature,
+            la: p.la,
+            lb: p.lb,
+            depth0: p.depth0,
+        };
+    }
+    warm_out.push((c.warm_slot, (c.a, c.b, c.warm_space), wm));
+}
+
 /// 解算一组清醒岛（组内岛串行；岛间体集合不相交）。速度读写走组内 scratch
 /// （gather 已填充），warm 更新收集到 `warm_out`（调用方按组序合并）。
 #[allow(clippy::too_many_arguments)]
@@ -173,37 +380,23 @@ pub(crate) fn solve_island_group(
         let isl = &islands[ii];
         // 每岛构建约束（岛内流形序 = 全局流形序，§4.14）。
         let t_build = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
-        cbuf.clear();
-        for &mi in &isl.manifs {
-            build_constraint(
-                cbuf,
-                &manifolds[mi],
-                bodies,
-                warm_index,
-                warm_slots,
-                match_dist,
-                e_threshold,
-                sp,
-            );
-        }
+        build_island_constraints(
+            cbuf,
+            manifolds,
+            isl,
+            bodies,
+            warm_index,
+            warm_slots,
+            match_dist,
+            e_threshold,
+            sp,
+        );
         if let Some(t) = t_build {
             detail[0] += vxl_phys_core::probe::us(t);
         }
         // warm starting 预施加（每约束一次）。
         let t_warm = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
-        for c in cbuf.iter() {
-            let (ai, bi) = (c.a as usize, c.b as usize);
-            for p in &c.points[..c.npts as usize] {
-                if let Some(w) = p.warm {
-                    if w.pn == 0.0 && w.pt1 == 0.0 && w.pt2 == 0.0 {
-                        continue;
-                    }
-                    let impulse = c.normal * w.pn + p.t1 * w.pt1 + p.t2 * w.pt2;
-                    group_apply(lv, av, local_of, iw, im, ai, p.ra, impulse, true);
-                    group_apply(lv, av, local_of, iw, im, bi, p.rb, impulse, false);
-                }
-            }
-        }
+        warm_start_apply(cbuf, lv, av, local_of, iw, im);
         if let Some(t) = t_warm {
             detail[1] += vxl_phys_core::probe::us(t);
         }
@@ -218,48 +411,7 @@ pub(crate) fn solve_island_group(
         // 堆叠期（金字塔/砖墙的稳态段）12 次外层纯属浪费；判据只依赖状态，
         // 同状态必在同一迭代退出 ⇒ 确定性不受影响。
         let t_it = ISLAND_SEG_PROBE.then(vxl_phys_core::probe::start);
-        let eps = early_exit_eps();
-        let min_iters = early_min_iters();
-        let reduce_after = point_reduce_after();
-        for it in 0..iters {
-            let mut resid = 0.0f32;
-            // **参与式降点**：从第 `reduce_after` 轮起，跳过"至今零冲量"的浅缝接触点
-            // （判据见 `point_reduce_after`）。前几轮全点参与 ⇒ 需要承载的点已经
-            // 载上，之后跳过它们只是省下空转。
-            let reduce = reduce_after > 0 && it + 1 >= reduce_after;
-            if it % 2 == 0 {
-                for c in cbuf.iter_mut() {
-                    resid = resid.max(solve_constraint(
-                        c,
-                        lv,
-                        av,
-                        local_of,
-                        iw,
-                        im,
-                        false,
-                        normal_inner,
-                        reduce,
-                    ));
-                }
-            } else {
-                for c in cbuf.iter_mut().rev() {
-                    resid = resid.max(solve_constraint(
-                        c,
-                        lv,
-                        av,
-                        local_of,
-                        iw,
-                        im,
-                        true,
-                        normal_inner,
-                        reduce,
-                    ));
-                }
-            }
-            if it + 1 >= min_iters && resid < eps {
-                break;
-            }
-        }
+        iterate_island_constraints(cbuf, lv, av, local_of, iw, im, iters, normal_inner);
         // 堆叠 shock 附加迭代（M1 稳定性；Jolt shock propagation 同思路）：
         // 反序再过一遍约束，使「底层承载」的载荷沿约束图反向传播一次——
         // 深层堆叠的正向迭代需 ≈ 2×层数 次才能收敛，反序一遍等效多收敛若干层。
@@ -269,89 +421,13 @@ pub(crate) fn solve_island_group(
                 let _ = solve_constraint(c, lv, av, local_of, iw, im, true, normal_inner, false);
             }
         }
-        // —— 准静态"安座"趟（`settled_hold`）——
-        // 把准静态接触（|vn| < hold_max_vn）的**法向**相对速度精确归零：逐点求有效质量
-        // （与主迭代同一套组内缓存），施加 λ = −vn·m_eff（钳 pn+λ ≥ 0：只推不拉）。
-        // 只动法向 ⇒ 不改变摩擦/滑动语义；大 vn（真撞击、真分离）一概不碰。
-        // ⚠️ 两条纪律（第一版栽过）：
-        // ① **不动 `p.pn`**：warm 缓存必须只装"求解器自己的冲量"，掺进外来量会污染
-        //    下一子步的暖启动 ⇒ 实测爆掉（6152 快体、|v|max 81、深穿透 347 tick）；
-        // ② **欠松弛**：流形 ≤4 点是**冗余**约束，逐点各自"精确归零"会叠加（×点数×2 趟
-        //    ×子步数）⇒ 过冲。取 ω = 0.25（残差 0.16 → 一遍 0.12 → 四遍 ≈0.05）。
-        const HOLD_OMEGA: f32 = 0.25;
-        for _ in 0..settled_hold {
-            for c in cbuf.iter() {
-                let (ai, bi) = (c.a as usize, c.b as usize);
-                let normal = c.normal;
-                for p in c.points.iter().take(c.npts as usize) {
-                    let ka = local_of[ai];
-                    let kb = local_of[bi];
-                    let im_a = if ka == u32::MAX { 0.0 } else { im[ka as usize] };
-                    let im_b = if kb == u32::MAX { 0.0 } else { im[kb as usize] };
-                    let mut k = im_a + im_b;
-                    if im_a > 0.0 {
-                        let w = iw[ka as usize].mul_vec3(p.ra.cross(normal));
-                        k += w.cross(p.ra).dot(normal);
-                    }
-                    if im_b > 0.0 {
-                        let w = iw[kb as usize].mul_vec3(p.rb.cross(normal));
-                        k += w.cross(p.rb).dot(normal);
-                    }
-                    if k <= 1e-12 {
-                        continue;
-                    }
-                    let m_eff = 1.0 / k;
-                    let va = group_vel(lv, av, local_of, ai, p.ra);
-                    let vb = group_vel(lv, av, local_of, bi, p.rb);
-                    let vn = (vb - va).dot(normal);
-                    if vn.abs() >= hold_max_vn {
-                        continue; // 真撞击/真分离：不碰
-                    }
-                    // ⚠️ 目标 = **0**（不是 `rhs`）：投到 `rhs` 等于把"去穿透分离速度"加回去
-                    // ⇒ 实测比不开还差（默认路径 awake 7491 → 9756）。
-                    // 深穿透由**下面的深度守卫**处理：只在**浅接触**（`depth0 ≤ 0.05`）上安座，
-                    // 深穿透接触一概不碰、照常让求解器把它们推出来（首版无守卫 ⇒ 实测
-                    // 默认路径深穿透 5 tick / 0.295 m：把恢复速度一起冻掉了）。
-                    if p.depth0 > 0.05 {
-                        continue;
-                    }
-                    let dl = -vn * m_eff * HOLD_OMEGA;
-                    if dl != 0.0 {
-                        let imp = normal * dl;
-                        group_apply(lv, av, local_of, iw, im, ai, p.ra, imp, true);
-                        group_apply(lv, av, local_of, iw, im, bi, p.rb, imp, false);
-                    }
-                }
-            }
-        }
-
+        settled_hold_pass(cbuf, local_of, iw, im, lv, av, settled_hold, hold_max_vn);
         // 收集 warm 更新（接触点锚点回推；位置在解算中不变）。
         if let Some(t) = t_it {
             detail[2] += vxl_phys_core::probe::us(t);
         }
         for c in cbuf.iter() {
-            // 诊断（零开销）：被解算的点数 / 其中法向冲量≈0 的点数（padding 槽
-            // 不算——只数 `npts` 内的有效点，否则补零槽会被当成"零冲量点"）。
-            detail[3] += c.npts as u64;
-            detail[4] += c.points[..c.npts as usize]
-                .iter()
-                .filter(|p| p.pn <= 1e-6)
-                .count() as u64;
-            let mut wm = WarmManifold::EMPTY;
-            wm.normal = c.normal;
-            wm.n = c.npts;
-            for (k, p) in c.points.iter().enumerate().take(4) {
-                wm.points[k] = WarmPoint {
-                    pn: p.pn,
-                    pt1: p.pt1,
-                    pt2: p.pt2,
-                    feature: p.feature,
-                    la: p.la,
-                    lb: p.lb,
-                    depth0: p.depth0,
-                };
-            }
-            warm_out.push((c.warm_slot, (c.a, c.b, c.warm_space), wm));
+            collect_warm_update(c, warm_out, detail);
         }
     }
 }
