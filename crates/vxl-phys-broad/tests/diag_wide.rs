@@ -11,6 +11,82 @@ use vxl_phys_broad::wide::{WideBvh, WideNode};
 use vxl_phys_broad::Aabb;
 use vxl_phys_core::Vec3;
 
+fn measure<F: FnMut(&Aabb, &mut Vec<u32>)>(name: &str, probes: &[Aabb], mut q: F) -> (f64, usize) {
+    let mut buf: Vec<u32> = Vec::new();
+    for p in probes {
+        q(p, &mut buf);
+        buf.clear();
+    }
+    let mut cand = 0usize;
+    let t0 = Instant::now();
+    for p in probes {
+        q(p, &mut buf);
+        cand += buf.len();
+        buf.clear();
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let per = probes.len() as f64;
+    println!(
+        "  {name:8} 总 {ms:7.2}ms | {:.0}ns/查询 | 候选 {:.2}/查询",
+        ms * 1e6 / per,
+        cand as f64 / per
+    );
+    (ms, cand)
+}
+
+fn visits<F: Fn(&Aabb) -> (u64, u64)>(name: &str, probes: &[Aabb], f: F) {
+    let (mut nn, mut lf) = (0u64, 0u64);
+    for p in probes {
+        let (a, b) = f(p);
+        nn += a;
+        lf += b;
+    }
+    let per = probes.len() as f64;
+    println!(
+        "  {name:8} 访问 节点 {:.1}/查询 + 叶 {:.1}/查询",
+        nn as f64 / per,
+        lf as f64 / per
+    );
+}
+
+/// **生产同形**：查询(fat) + 候选精确过滤（`aabbs[j]` 与 exact 相交）——宽相
+/// 每帧对每个「重查体」做的完整工作。返回 (ms, 候选数, 配对数)。
+fn measure_full<F: FnMut(&Aabb, &mut Vec<u32>)>(
+    name: &str,
+    src: &[(u32, Aabb)],
+    probes: &[Aabb],
+    mut q: F,
+) -> (f64, usize, usize) {
+    let mut buf: Vec<u32> = Vec::new();
+    for p in probes {
+        q(p, &mut buf);
+        buf.clear();
+    }
+    let mut cand = 0usize;
+    let mut pairs = 0usize;
+    let t0 = Instant::now();
+    for (k, p) in probes.iter().enumerate() {
+        let exact = src[k * 10].1; // 探针源体（step_by(10) 与下方一致）
+        q(p, &mut buf);
+        cand += buf.len();
+        for &j in buf.iter() {
+            if src[j as usize].1.overlaps(&exact) {
+                pairs += 1;
+            }
+        }
+        buf.clear();
+    }
+    let ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let per = probes.len() as f64;
+    println!(
+        "  {name:8} 全相位 {ms:7.2}ms | {:.0}ns/查询 | 候选 {:.2} | 配对 {:.2}",
+        ms * 1e6 / per,
+        cand as f64 / per,
+        pairs as f64 / per
+    );
+    (ms, cand, pairs)
+}
+
 fn items(n: u32) -> Vec<(u32, Aabb)> {
     (0..n)
         .map(|k| {
@@ -82,86 +158,6 @@ fn diag_wide_scale_accounting() {
 #[test]
 fn diag_query_cost_across_tree_shapes() {
     use vxl_phys_broad::{Bvh8, DynamicBvh, WideBvh};
-
-    fn measure<F: FnMut(&Aabb, &mut Vec<u32>)>(
-        name: &str,
-        probes: &[Aabb],
-        mut q: F,
-    ) -> (f64, usize) {
-        let mut buf: Vec<u32> = Vec::new();
-        for p in probes {
-            q(p, &mut buf);
-            buf.clear();
-        }
-        let mut cand = 0usize;
-        let t0 = Instant::now();
-        for p in probes {
-            q(p, &mut buf);
-            cand += buf.len();
-            buf.clear();
-        }
-        let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let per = probes.len() as f64;
-        println!(
-            "  {name:8} 总 {ms:7.2}ms | {:.0}ns/查询 | 候选 {:.2}/查询",
-            ms * 1e6 / per,
-            cand as f64 / per
-        );
-        (ms, cand)
-    }
-
-    fn visits<F: Fn(&Aabb) -> (u64, u64)>(name: &str, probes: &[Aabb], f: F) {
-        let (mut nn, mut lf) = (0u64, 0u64);
-        for p in probes {
-            let (a, b) = f(p);
-            nn += a;
-            lf += b;
-        }
-        let per = probes.len() as f64;
-        println!(
-            "  {name:8} 访问 节点 {:.1}/查询 + 叶 {:.1}/查询",
-            nn as f64 / per,
-            lf as f64 / per
-        );
-    }
-
-    /// **生产同形**：查询(fat) + 候选精确过滤（`aabbs[j]` 与 exact 相交）——宽相
-    /// 每帧对每个「重查体」做的完整工作。返回 (ms, 候选数, 配对数)。
-    fn measure_full<F: FnMut(&Aabb, &mut Vec<u32>)>(
-        name: &str,
-        src: &[(u32, Aabb)],
-        probes: &[Aabb],
-        mut q: F,
-    ) -> (f64, usize, usize) {
-        let mut buf: Vec<u32> = Vec::new();
-        for p in probes {
-            q(p, &mut buf);
-            buf.clear();
-        }
-        let mut cand = 0usize;
-        let mut pairs = 0usize;
-        let t0 = Instant::now();
-        for (k, p) in probes.iter().enumerate() {
-            let exact = src[k * 10].1; // 探针源体（step_by(10) 与下方一致）
-            q(p, &mut buf);
-            cand += buf.len();
-            for &j in buf.iter() {
-                if src[j as usize].1.overlaps(&exact) {
-                    pairs += 1;
-                }
-            }
-            buf.clear();
-        }
-        let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        let per = probes.len() as f64;
-        println!(
-            "  {name:8} 全相位 {ms:7.2}ms | {:.0}ns/查询 | 候选 {:.2} | 配对 {:.2}",
-            ms * 1e6 / per,
-            cand as f64 / per,
-            pairs as f64 / per
-        );
-        (ms, cand, pairs)
-    }
 
     let n = 200_000u32;
     let src = items(n);

@@ -85,8 +85,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-broad/tests/diag_wide.rs": {
-  "file_lines": 220,
-  "max_fn_lines": 137,
+  "file_lines": 216,
+  "max_fn_lines": 57,
   "max_type_members": 0
  },
  "crates/vxl-phys-core/src/aabb.rs": {
