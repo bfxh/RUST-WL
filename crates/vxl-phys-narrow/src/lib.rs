@@ -1965,9 +1965,20 @@ impl DefaultNarrowPhase {
                 None => return,
             };
             let normal = best_normal;
-            let pts: Vec<ContactPoint> = buf
+            // **选点：四角优先，面心补位**（2026-09-22，P10 修复）。
+            // 提供者每面发 5 点：`feature % 16 == 0` = **面心**，1..4 = **四角**；而流形只有
+            // 4 槽。旧的 `take(4)` 按**生成序**取 ⇒ 恰好丢掉**第 4 个角** ⇒ 接触力偶不对称
+            // ⇒ 每 tick 注入净力矩 ⇒ **静置单盒持续自旋**（实测 `|ω| ≈ 1.6 rad/s`、永不如入睡；
+            // 见 `OPEN-PROBLEMS.md` P10 的逐 tick 轨迹：补丁恰为「中心 + 三角」、缺 (+x,+z)）。
+            // ⇒ 角点定义力偶、面心只是冗余：**先把角点取满**，面心仅在角点不足时补位。
+            // 稳定性：`sort_by_key` 是稳定排序 ⇒ 同类内保持生成序（确定性不变）。
+            let mut group_pts: Vec<&vxl_phys_core::interop::InteropContact> =
+                buf.iter().filter(|c| quant(c.normal) == best_key).collect();
+            if group_pts.len() > 4 {
+                group_pts.sort_by_key(|c| u32::from(c.feature % 16 == 0));
+            }
+            let pts: Vec<ContactPoint> = group_pts
                 .iter()
-                .filter(|c| quant(c.normal) == best_key)
                 .take(4)
                 .map(|c| ContactPoint {
                     point: c.point,
