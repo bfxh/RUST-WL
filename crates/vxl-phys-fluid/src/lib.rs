@@ -1996,20 +1996,20 @@ fn micro_probe_gather_vs_compute() {
     let nf = f.n_fluid;
     // ① 收集版
     let t0 = Instant::now();
-    let mut sink = 0.0f64;
+    let mut sink = 0.0f32;
     for i in 0..nf {
         let vi = f.vel[i];
         let rho_i = f.dens[i];
         f.for_neighbors(i, |j, d, r2| {
-            sink += (f.pos[j].x + f.vel[j].y + f.dens[j] + f.press[j] + f.pmass[j]) as f64;
-            sink += (d.x + r2) as f64;
-            sink += (vi.y + rho_i) as f64;
+            sink += f.pos[j].x + f.vel[j].y + f.dens[j] + f.press[j] + f.pmass[j];
+            sink += d.x + r2;
+            sink += vi.y + rho_i;
         });
     }
     let gather = t0.elapsed().as_secs_f64() * 1e3;
     // ② 算术版（真实力相位的算式，但结果丢弃）
     let t0 = Instant::now();
-    let mut sink2 = 0.0f64;
+    let mut sink2 = 0.0f32;
     for i in 0..nf {
         let vi = f.vel[i];
         let rho_i = f.dens[i];
@@ -2036,7 +2036,7 @@ fn micro_probe_gather_vs_compute() {
             let w = k6 * tt * tt * tt;
             xs += (f.vel[j] - vi) * (mj * 2.0 / (rho_i + rho_j) * w);
         });
-        sink2 += (a.x + xs.y) as f64;
+        sink2 += a.x + xs.y;
     }
     let compute = t0.elapsed().as_secs_f64() * 1e3;
     println!(
