@@ -11,6 +11,23 @@ pub struct MassProps {
     pub local_inv_inertia: Vec3,
 }
 
+/// AABB 盒惯量近似（复合体 / 凸体外壳共用；点云实惯量待 M1 复合体）。**仅供兜底**——精确并集
+/// （按子形状求和 + 平行轴）由上层 `spawn_compound_body` 算（那里能看到子形状表，本层看不到）。
+fn aabb_box_props(density: f32, half: Vec3) -> MassProps {
+    let ex = 2.0 * half.x.max(1e-4);
+    let ey = 2.0 * half.y.max(1e-4);
+    let ez = 2.0 * half.z.max(1e-4);
+    let m = density * ex * ey * ez;
+    let ix = m / 12.0 * (ey * ey + ez * ez);
+    let iy = m / 12.0 * (ex * ex + ez * ez);
+    let iz = m / 12.0 * (ex * ex + ey * ey);
+    MassProps {
+        mass: m,
+        inv_mass: 1.0 / m,
+        local_inv_inertia: Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / iz),
+    }
+}
+
 /// 按形状 + 密度计算质量属性。`density <= 0` 视为非法，回退 1.0。
 pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
     let density = if density > 0.0 { density } else { 1.0 };
@@ -94,36 +111,9 @@ pub fn mass_props(shape: &Shape, density: f32) -> MassProps {
                 local_inv_inertia: Vec3::new(1.0 / ixz, 1.0 / iy, 1.0 / ixz),
             }
         }
-        // 凸体外壳：按局部 AABB 盒惯量近似（点云实惯量待 M1 复合体）。
-        // 复合体：按局部 AABB 并集近似（与外壳同款）。**仅供兜底**——精确并集（按子形状求和 +
-        // 平行轴）由上层在 `spawn_compound_body` 里算（那里能看到子形状表），本层看不到。
-        Shape::Compound { half, .. } => {
-            let ex = 2.0 * half.x.max(1e-4);
-            let ey = 2.0 * half.y.max(1e-4);
-            let ez = 2.0 * half.z.max(1e-4);
-            let m = density * ex * ey * ez;
-            let ix = m / 12.0 * (ey * ey + ez * ez);
-            let iy = m / 12.0 * (ex * ex + ez * ez);
-            let iz = m / 12.0 * (ex * ex + ey * ey);
-            MassProps {
-                mass: m,
-                inv_mass: 1.0 / m,
-                local_inv_inertia: Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / iz),
-            }
-        }
-        Shape::ConvexHull { half, .. } => {
-            let ex = 2.0 * half.x.max(1e-4);
-            let ey = 2.0 * half.y.max(1e-4);
-            let ez = 2.0 * half.z.max(1e-4);
-            let m = density * ex * ey * ez;
-            let ix = m / 12.0 * (ey * ey + ez * ez);
-            let iy = m / 12.0 * (ex * ex + ez * ez);
-            let iz = m / 12.0 * (ex * ex + ey * ey);
-            MassProps {
-                mass: m,
-                inv_mass: 1.0 / m,
-                local_inv_inertia: Vec3::new(1.0 / ix, 1.0 / iy, 1.0 / iz),
-            }
+        // 复合体 / 凸体外壳：按局部 AABB 盒惯量近似（本层看不到子形状表，见 `aabb_box_props`）。
+        Shape::Compound { half, .. } | Shape::ConvexHull { half, .. } => {
+            aabb_box_props(density, half)
         }
         // 高度场 / 外部 provider 只作为静态地形存在，不参与质量属性。
         Shape::HeightField(_) | Shape::Provider(_) => MassProps {

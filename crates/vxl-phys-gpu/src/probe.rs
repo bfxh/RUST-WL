@@ -227,6 +227,51 @@ pub(crate) fn make_phase_buffs(
     }
 }
 
+/// 两个 bind group（密度核写 `dens` / 力核只读 `dens` ⇒ 布局权限不同，见 `make_phase_pipes`）。
+pub(crate) fn make_phase_bind_groups(
+    device: &wgpu::Device,
+    bufs: &PhaseBuffs,
+    dens_bgl: &wgpu::BindGroupLayout,
+    force_bgl: &wgpu::BindGroupLayout,
+) -> (wgpu::BindGroup, wgpu::BindGroup) {
+    // 嵌套 fn 而非闭包：`BindGroupEntry` 借了缓冲 ⇒ 返回类型里的生命周期必须显式写出
+    // （闭包无法标注入参生命周期，会撞 "lifetime may not live long enough"）。
+    fn ent(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+        wgpu::BindGroupEntry {
+            binding,
+            resource: b.as_entire_binding(),
+        }
+    }
+    let dens_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("density.bg"),
+        layout: dens_bgl,
+        entries: &[
+            ent(0, &bufs.params_b),
+            ent(1, &bufs.pos_b),
+            ent(3, &bufs.pmass_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
+        ],
+    });
+    let force_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("force.bg"),
+        layout: force_bgl,
+        entries: &[
+            ent(0, &bufs.params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.vel_b),
+            ent(3, &bufs.pmass_b),
+            ent(4, &bufs.press_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
+            ent(8, &bufs.out_b),
+        ],
+    });
+    (dens_bg, force_bg)
+}
+
 pub(crate) fn make_phase_pipes(
     device: &wgpu::Device,
     bufs: &PhaseBuffs,
@@ -315,41 +360,7 @@ pub(crate) fn make_phase_pipes(
         };
     let p_dens = mk("density", &dens_shader, "density", &dens_bgl);
     let p_force = mk("force", &force_shader, "force", &force_bgl);
-    // 嵌套 fn 而非闭包：`BindGroupEntry` 借了缓冲 ⇒ 返回类型里的生命周期必须显式写出
-    // （闭包无法标注入参生命周期，会撞 "lifetime may not live long enough"）。
-    fn ent(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-        wgpu::BindGroupEntry {
-            binding,
-            resource: b.as_entire_binding(),
-        }
-    }
-    let dens_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("density.bg"),
-        layout: &dens_bgl,
-        entries: &[
-            ent(0, &bufs.params_b),
-            ent(1, &bufs.pos_b),
-            ent(3, &bufs.pmass_b),
-            ent(5, &bufs.start_b),
-            ent(6, &bufs.items_b),
-            ent(7, &bufs.dens_b),
-        ],
-    });
-    let force_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("force.bg"),
-        layout: &force_bgl,
-        entries: &[
-            ent(0, &bufs.params_b),
-            ent(1, &bufs.pos_b),
-            ent(2, &bufs.vel_b),
-            ent(3, &bufs.pmass_b),
-            ent(4, &bufs.press_b),
-            ent(5, &bufs.start_b),
-            ent(6, &bufs.items_b),
-            ent(7, &bufs.dens_b),
-            ent(8, &bufs.out_b),
-        ],
-    });
+    let (dens_bg, force_bg) = make_phase_bind_groups(device, bufs, &dens_bgl, &force_bgl);
     (p_dens, p_force, dens_bg, force_bg)
 }
 

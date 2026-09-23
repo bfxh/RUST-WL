@@ -63,7 +63,6 @@ impl GridOut {
     }
 }
 
-/// 在**指定适配器序号**上跑「网格重建」（四个入口一条命令链，缓冲/管线复用，`repeats` 轮）。
 /// 网格探针的缓冲 + 回读偏移（`grid_on_adapter` 第一段）。
 pub(crate) struct GridBuffs {
     pub pos_b: wgpu::Buffer,
@@ -169,16 +168,16 @@ pub(crate) fn make_grid_buffs(
     }
 }
 
-pub(crate) fn make_grid_pipes(
-    device: &wgpu::Device,
-    bufs: &GridBuffs,
-) -> (
-    wgpu::ComputePipeline,
-    wgpu::ComputePipeline,
-    wgpu::ComputePipeline,
-    wgpu::ComputePipeline,
-    wgpu::BindGroup,
-) {
+/// 网格四相位管线 + 绑定组（一次性 setup 的产物；`submit_grid_pass` 里只读引用）。
+pub(crate) struct GridPipes {
+    bin: wgpu::ComputePipeline,
+    scan: wgpu::ComputePipeline,
+    place: wgpu::ComputePipeline,
+    canon: wgpu::ComputePipeline,
+    bg: wgpu::BindGroup,
+}
+
+pub(crate) fn make_grid_pipes(device: &wgpu::Device, bufs: &GridBuffs) -> GridPipes {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("grid.wgsl"),
         source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
@@ -246,7 +245,13 @@ pub(crate) fn make_grid_pipes(
         ],
     });
 
-    (p_bin, p_scan, p_place, p_canon, bg)
+    GridPipes {
+        bin: p_bin,
+        scan: p_scan,
+        place: p_place,
+        canon: p_canon,
+        bg,
+    }
 }
 
 pub(crate) fn parse_grid(
@@ -270,6 +275,68 @@ pub(crate) fn parse_grid(
     (start, items, bins, overflow)
 }
 
+fn submit_grid_pass(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bufs: &GridBuffs,
+    pipes: &GridPipes,
+    groups_n: u32,
+    groups_total: u32,
+    total: usize,
+) {
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("grid.enc"),
+    });
+    // ① 清零（counts / overflow）：`clear_buffer` 是**确定**的（不是"未定义内容"）
+    enc.clear_buffer(&bufs.counts_b, 0, None);
+    enc.clear_buffer(&bufs.overflow_b, 0, None);
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("grid.bin_count"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&pipes.bin);
+        cp.set_bind_group(0, &pipes.bg, &[]);
+        cp.dispatch_workgroups(groups_n, 1, 1);
+    }
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("grid.scan"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&pipes.scan);
+        cp.set_bind_group(0, &pipes.bg, &[]);
+        cp.dispatch_workgroups(1, 1, 1);
+    }
+    enc.copy_buffer_to_buffer(
+        &bufs.start_b,
+        0,
+        &bufs.cursor_b,
+        0,
+        ((total + 1) * 4) as u64,
+    );
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("grid.place"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&pipes.place);
+        cp.set_bind_group(0, &pipes.bg, &[]);
+        cp.dispatch_workgroups(groups_n, 1, 1);
+    }
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("grid.canon"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&pipes.canon);
+        cp.set_bind_group(0, &pipes.bg, &[]);
+        cp.dispatch_workgroups(groups_total, 1, 1);
+    }
+    queue.submit(Some(enc.finish()));
+}
+
+/// 在**指定适配器序号**上跑「网格重建」（四个入口一条命令链，缓冲/管线复用，`repeats` 轮）。
 pub fn grid_on_adapter(
     adapter_index: usize,
     inputs: &GridInputs<'_>,
@@ -285,65 +352,22 @@ pub fn grid_on_adapter(
     let total = params.total as usize;
 
     let bufs = make_grid_buffs(&device, n, total, params, inputs);
-    let (p_bin, p_scan, p_place, p_canon, bg) = make_grid_pipes(&device, &bufs);
+    let pipes = make_grid_pipes(&device, &bufs);
     let setup_ms = (t0.elapsed().as_secs_f64() * 1e3) as f32;
     let reps = repeats.max(1);
     let wg = 64u32;
     let groups_n = (n as u32).div_ceil(wg);
     let groups_total = (total as u32).div_ceil(wg);
     let t_run = std::time::Instant::now();
-    for _ in 0..reps {
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("grid.enc"),
-        });
-        // ① 清零（counts / overflow）：`clear_buffer` 是**确定**的（不是"未定义内容"）
-        enc.clear_buffer(&bufs.counts_b, 0, None);
-        enc.clear_buffer(&bufs.overflow_b, 0, None);
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("grid.bin_count"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_bin);
-            cp.set_bind_group(0, &bg, &[]);
-            cp.dispatch_workgroups(groups_n, 1, 1);
-        }
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("grid.scan"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_scan);
-            cp.set_bind_group(0, &bg, &[]);
-            cp.dispatch_workgroups(1, 1, 1);
-        }
-        enc.copy_buffer_to_buffer(
-            &bufs.start_b,
-            0,
-            &bufs.cursor_b,
-            0,
-            ((total + 1) * 4) as u64,
-        );
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("grid.place"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_place);
-            cp.set_bind_group(0, &bg, &[]);
-            cp.dispatch_workgroups(groups_n, 1, 1);
-        }
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("grid.canon"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_canon);
-            cp.set_bind_group(0, &bg, &[]);
-            cp.dispatch_workgroups(groups_total, 1, 1);
-        }
-        queue.submit(Some(enc.finish()));
-    }
+    submit_grid_pass(
+        &device,
+        &queue,
+        &bufs,
+        &pipes,
+        groups_n,
+        groups_total,
+        total,
+    );
     {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("grid.bufs.readback"),
