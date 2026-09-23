@@ -117,29 +117,26 @@ pub(crate) fn device_for(
 }
 
 /// 在**指定适配器序号**上跑「密度 + 力/黏度」两相位（缓冲/管线复用，`repeats` 轮）。
-pub fn phases_on_adapter(
-    adapter_index: usize,
+/// 两相位探针的缓冲（`phases_on_adapter` 第一段：字节化 + 建 + 上传）。
+pub(crate) struct PhaseBuffs {
+    pub pos_b: wgpu::Buffer,
+    pub vel_b: wgpu::Buffer,
+    pub pmass_b: wgpu::Buffer,
+    pub press_b: wgpu::Buffer,
+    pub start_b: wgpu::Buffer,
+    pub items_b: wgpu::Buffer,
+    pub dens_b: wgpu::Buffer,
+    pub out_b: wgpu::Buffer,
+    pub params_b: wgpu::Buffer,
+    pub readback: wgpu::Buffer,
+}
+
+pub(crate) fn make_phase_buffs(
+    device: &wgpu::Device,
     inputs: &PhaseInputs<'_>,
     params: PhaseParams,
     n: usize,
-    repeats: usize,
-) -> PhasesOut {
-    let t0 = std::time::Instant::now();
-    let (adapter_name, device, queue) = match device_for(adapter_index) {
-        Ok(v) => v,
-        Err(e) => {
-            return PhasesOut {
-                dens: Vec::new(),
-                acc: Vec::new(),
-                xsph: Vec::new(),
-                setup_ms: 0.0,
-                per_dispatch_ms: 0.0,
-                adapter: String::new(),
-                error: Some(e),
-            };
-        }
-    };
-
+) -> PhaseBuffs {
     let bytes_f32 = |v: &[f32]| -> Vec<u8> {
         let mut b = Vec::with_capacity(v.len() * 4);
         for x in v {
@@ -216,6 +213,29 @@ pub fn phases_on_adapter(
         mapped_at_creation: false,
     });
 
+    PhaseBuffs {
+        pos_b,
+        vel_b,
+        pmass_b,
+        press_b,
+        start_b,
+        items_b,
+        dens_b,
+        out_b,
+        params_b,
+        readback,
+    }
+}
+
+pub(crate) fn make_phase_pipes(
+    device: &wgpu::Device,
+    bufs: &PhaseBuffs,
+) -> (
+    wgpu::ComputePipeline,
+    wgpu::ComputePipeline,
+    wgpu::BindGroup,
+    wgpu::BindGroup,
+) {
     let dens_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("density.wgsl"),
         source: wgpu::ShaderSource::Wgsl(include_str!("density.wgsl").into()),
@@ -307,29 +327,79 @@ pub fn phases_on_adapter(
         label: Some("density.bg"),
         layout: &dens_bgl,
         entries: &[
-            ent(0, &params_b),
-            ent(1, &pos_b),
-            ent(3, &pmass_b),
-            ent(5, &start_b),
-            ent(6, &items_b),
-            ent(7, &dens_b),
+            ent(0, &bufs.params_b),
+            ent(1, &bufs.pos_b),
+            ent(3, &bufs.pmass_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
         ],
     });
     let force_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("force.bg"),
         layout: &force_bgl,
         entries: &[
-            ent(0, &params_b),
-            ent(1, &pos_b),
-            ent(2, &vel_b),
-            ent(3, &pmass_b),
-            ent(4, &press_b),
-            ent(5, &start_b),
-            ent(6, &items_b),
-            ent(7, &dens_b),
-            ent(8, &out_b),
+            ent(0, &bufs.params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.vel_b),
+            ent(3, &bufs.pmass_b),
+            ent(4, &bufs.press_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
+            ent(8, &bufs.out_b),
         ],
     });
+    (p_dens, p_force, dens_bg, force_bg)
+}
+
+pub(crate) fn parse_phases(n: usize, data: &[u8]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    let mut dens = Vec::with_capacity(n);
+    for i in 0..n {
+        let c = &data[i * 4..i * 4 + 4];
+        dens.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+    }
+    let out_base = n;
+    let mut acc = Vec::with_capacity(n * 3);
+    let mut xsph = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        for k in 0..3 {
+            let c = &data[(out_base + i * 6 + k) * 4..(out_base + i * 6 + k) * 4 + 4];
+            acc.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+        }
+        for k in 3..6 {
+            let c = &data[(out_base + i * 6 + k) * 4..(out_base + i * 6 + k) * 4 + 4];
+            xsph.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
+        }
+    }
+    (dens, acc, xsph)
+}
+
+pub fn phases_on_adapter(
+    adapter_index: usize,
+    inputs: &PhaseInputs<'_>,
+    params: PhaseParams,
+    n: usize,
+    repeats: usize,
+) -> PhasesOut {
+    let t0 = std::time::Instant::now();
+    let (adapter_name, device, queue) = match device_for(adapter_index) {
+        Ok(v) => v,
+        Err(e) => {
+            return PhasesOut {
+                dens: Vec::new(),
+                acc: Vec::new(),
+                xsph: Vec::new(),
+                setup_ms: 0.0,
+                per_dispatch_ms: 0.0,
+                adapter: String::new(),
+                error: Some(e),
+            };
+        }
+    };
+
+    let bufs = make_phase_buffs(&device, inputs, params, n);
+    let (p_dens, p_force, dens_bg, force_bg) = make_phase_pipes(&device, &bufs);
     // 稳态：两核各分派一次 × reps 轮；计时含最后一次**同步回读**（见文件头"两个测量坑"）。
     let setup_ms = (t0.elapsed().as_secs_f64() * 1e3) as f32;
     let reps = repeats.max(1);
@@ -362,11 +432,17 @@ pub fn phases_on_adapter(
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("phases.readback"),
     });
-    enc.copy_buffer_to_buffer(&dens_b, 0, &readback, 0, (n * 4) as u64);
-    enc.copy_buffer_to_buffer(&out_b, 0, &readback, (n * 4) as u64, (n * 24) as u64);
+    enc.copy_buffer_to_buffer(&bufs.dens_b, 0, &bufs.readback, 0, (n * 4) as u64);
+    enc.copy_buffer_to_buffer(
+        &bufs.out_b,
+        0,
+        &bufs.readback,
+        (n * 4) as u64,
+        (n * 24) as u64,
+    );
     queue.submit(Some(enc.finish()));
 
-    let slice = readback.slice(..);
+    let slice = bufs.readback.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
         tx.send(r).ok();
@@ -380,26 +456,9 @@ pub fn phases_on_adapter(
     rx.recv().ok();
     let per_dispatch_ms = (t_disp.elapsed().as_secs_f64() * 1e3) as f32 / reps as f32;
     let data = slice.get_mapped_range();
-    let mut dens = Vec::with_capacity(n);
-    for i in 0..n {
-        let c = &data[i * 4..i * 4 + 4];
-        dens.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-    }
-    let out_base = n;
-    let mut acc = Vec::with_capacity(n * 3);
-    let mut xsph = Vec::with_capacity(n * 3);
-    for i in 0..n {
-        for k in 0..3 {
-            let c = &data[(out_base + i * 6 + k) * 4..(out_base + i * 6 + k) * 4 + 4];
-            acc.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-        }
-        for k in 3..6 {
-            let c = &data[(out_base + i * 6 + k) * 4..(out_base + i * 6 + k) * 4 + 4];
-            xsph.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
-        }
-    }
+    let (dens, acc, xsph) = parse_phases(n, &data);
     drop(data);
-    readback.unmap();
+    bufs.readback.unmap();
     PhasesOut {
         dens,
         acc,

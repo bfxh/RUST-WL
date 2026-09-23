@@ -260,8 +260,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/src/grid.rs": {
-  "file_lines": 314,
-  "max_fn_lines": 247,
+  "file_lines": 405,
+  "max_fn_lines": 132,
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/src/lib.rs": {
@@ -270,8 +270,8 @@
   "max_type_members": 3
  },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 559,
-  "max_fn_lines": 310,
+  "file_lines": 687,
+  "max_fn_lines": 99,
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/src/pipeline/gpu_setup.rs": {
@@ -285,8 +285,8 @@
   "max_type_members": 27
  },
  "crates/vxl-phys-gpu/src/probe.rs": {
-  "file_lines": 413,
-  "max_fn_lines": 293,
+  "file_lines": 472,
+  "max_fn_lines": 125,
   "max_type_members": 16
  },
  "crates/vxl-phys-integrate/src/lib.rs": {

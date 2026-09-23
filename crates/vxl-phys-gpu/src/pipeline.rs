@@ -28,6 +28,398 @@ pub(crate) use self::gpu_setup::*;
 pub use self::gpu_types::*;
 // ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
+/// `Packet` 的**缓冲清单**（`new` 的第一段：建 + 上传初值）。
+pub(crate) struct Bufs {
+    pub pos_b: wgpu::Buffer,
+    pub vel_b: wgpu::Buffer,
+    pub pmass_b: wgpu::Buffer,
+    pub press_b: wgpu::Buffer,
+    pub dens_b: wgpu::Buffer,
+    pub out_b: wgpu::Buffer,
+    pub bins_b: wgpu::Buffer,
+    pub counts_b: wgpu::Buffer,
+    pub start_b: wgpu::Buffer,
+    pub items_b: wgpu::Buffer,
+    pub cursor_b: wgpu::Buffer,
+    pub overflow_b: wgpu::Buffer,
+    pub readback_b: wgpu::Buffer,
+}
+
+pub(crate) fn make_buffers(
+    device: &wgpu::Device,
+    n: u32,
+    total: u32,
+    pos_flat: &[f32],
+    vel_flat: &[f32],
+    pmass: &[f32],
+) -> Bufs {
+    let storage = |label: &str, size: u64, extra: wgpu::BufferUsages| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST
+                | extra,
+            mapped_at_creation: false,
+        })
+    };
+    let pos_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("p.pos"),
+        contents: &f32_bytes(pos_flat),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+    });
+    let vel_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("p.vel"),
+        contents: &f32_bytes(vel_flat),
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+    });
+    let pmass_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("p.pmass"),
+        contents: &f32_bytes(pmass),
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let press_b = storage("p.press", (n as u64) * 4, wgpu::BufferUsages::empty());
+    let dens_b = storage("p.dens", (n as u64) * 4, wgpu::BufferUsages::empty());
+    let out_b = storage("p.out", (n as u64) * 24, wgpu::BufferUsages::empty());
+    let bins_b = storage("p.bins", (n as u64) * 4, wgpu::BufferUsages::empty());
+    let counts_b = storage(
+        "p.counts",
+        ((total + 1) as u64) * 4,
+        wgpu::BufferUsages::empty(),
+    );
+    let start_b = storage(
+        "p.start",
+        ((total + 1) as u64) * 4,
+        wgpu::BufferUsages::empty(),
+    );
+    let items_b = storage("p.items", (n as u64) * 4, wgpu::BufferUsages::empty());
+    let cursor_b = storage(
+        "p.cursor",
+        ((total + 1) as u64) * 4,
+        wgpu::BufferUsages::empty(),
+    );
+    let overflow_b = storage("p.overflow", 4, wgpu::BufferUsages::empty());
+    let readback_b = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("p.readback"),
+        size: (n as u64) * 24,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    Bufs {
+        pos_b,
+        vel_b,
+        pmass_b,
+        press_b,
+        dens_b,
+        out_b,
+        bins_b,
+        counts_b,
+        start_b,
+        items_b,
+        cursor_b,
+        overflow_b,
+        readback_b,
+    }
+}
+
+/// `Packet` 的四组 uniform（`new` 的第二段：字节布局 + 建缓冲）。
+pub(crate) struct Params {
+    pub grid_params_b: wgpu::Buffer,
+    pub phase_params_b: wgpu::Buffer,
+    pub eos_params_b: wgpu::Buffer,
+    pub int_params_b: wgpu::Buffer,
+}
+
+pub(crate) fn make_params(device: &wgpu::Device, cfg: &PacketCfg, n: u32, total: u32) -> Params {
+    // —— 四组 uniform ——
+    let grid_params = {
+        let mut b = Vec::with_capacity(48);
+        for x in cfg.gmin {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&cfg.inv.to_le_bytes());
+        for x in [
+            cfg.dims[0],
+            cfg.dims[1],
+            cfg.dims[2],
+            n,
+            total,
+            cfg.cap,
+            0,
+            0,
+        ] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b
+    };
+    let phase_params = {
+        let mut b = Vec::with_capacity(80);
+        for x in cfg.gmin {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [
+            cfg.inv,
+            cfg.h2,
+            cfg.k6,
+            cfg.w0,
+            cfg.mass,
+            cfg.ks,
+            cfg.h,
+            cfg.alpha_c,
+            0.0,
+        ] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in cfg.gravity {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        for x in [n, cfg.dims[0], cfg.dims[1], cfg.dims[2], 0] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b
+    };
+    let eos_params = {
+        let mut b = Vec::with_capacity(32);
+        for x in [cfg.b_tait, cfg.rho0, cfg.gamma] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b.extend_from_slice(&u32::from(cfg.clamp_neg).to_le_bytes());
+        for x in [n, 0, 0, 0] {
+            b.extend_from_slice(&x.to_le_bytes());
+        }
+        b
+    };
+    let uniform = |label: &str, bytes: &[u8]| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytes,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        })
+    };
+    let grid_params_b = uniform("p.grid_params", &grid_params);
+    let phase_params_b = uniform("p.phase_params", &phase_params);
+    let eos_params_b = uniform("p.eos_params", &eos_params);
+    let int_params_b = uniform(
+        "p.int_params",
+        &[0u8; 32], // 每子步 `write_buffer` 更新
+    );
+
+    Params {
+        grid_params_b,
+        phase_params_b,
+        eos_params_b,
+        int_params_b,
+    }
+}
+
+/// `Packet` 的绑定布局 + 计算管线（`new` 的第三段）。
+pub(crate) struct Pipes {
+    pub bl_grid: wgpu::BindGroupLayout,
+    pub bl_dens: wgpu::BindGroupLayout,
+    pub bl_force: wgpu::BindGroupLayout,
+    pub bl_eos: wgpu::BindGroupLayout,
+    pub bl_int: wgpu::BindGroupLayout,
+    pub p_bin: wgpu::ComputePipeline,
+    pub p_scan: wgpu::ComputePipeline,
+    pub p_place: wgpu::ComputePipeline,
+    pub p_canon: wgpu::ComputePipeline,
+    pub p_dens: wgpu::ComputePipeline,
+    pub p_eos: wgpu::ComputePipeline,
+    pub p_force: wgpu::ComputePipeline,
+    pub p_int: wgpu::ComputePipeline,
+}
+
+pub(crate) fn make_pipelines(device: &wgpu::Device) -> Pipes {
+    // —— 五个着色器模块 + 八条管线 ——
+    let sh = |label: &str, src: &str| {
+        device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(src.into()),
+        })
+    };
+    let m_grid = sh("grid.wgsl", include_str!("grid.wgsl"));
+    let m_dens = sh("density.wgsl", include_str!("density.wgsl"));
+    let m_force = sh("force.wgsl", include_str!("force.wgsl"));
+    let m_eos = sh("eos.wgsl", include_str!("eos.wgsl"));
+    let m_int = sh("integrate.wgsl", include_str!("integrate.wgsl"));
+
+    // 网格：0 uniform + 1(pos,只读) + 2..=7(读写)
+    let bl_grid = mk_layout(
+        device,
+        "p.bl_grid",
+        &[
+            (0, Kind::Uniform),
+            (1, Kind::Ro),
+            (2, Kind::Rw),
+            (3, Kind::Rw),
+            (4, Kind::Rw),
+            (5, Kind::Rw),
+            (6, Kind::Rw),
+            (7, Kind::Rw),
+        ],
+    );
+    // 密度：0 uniform | 1 pos(只读) | 3 pmass(只读) | 5/6 格表(只读) | 7 dens(读写)
+    let bl_dens = mk_layout(
+        device,
+        "p.bl_dens",
+        &[
+            (0, Kind::Uniform),
+            (1, Kind::Ro),
+            (3, Kind::Ro),
+            (5, Kind::Ro),
+            (6, Kind::Ro),
+            (7, Kind::Rw),
+        ],
+    );
+    // 力：0 uniform | 1..=7 只读（含 dens）| 8 out(读写)
+    let bl_force = mk_layout(
+        device,
+        "p.bl_force",
+        &[
+            (0, Kind::Uniform),
+            (1, Kind::Ro),
+            (2, Kind::Ro),
+            (3, Kind::Ro),
+            (4, Kind::Ro),
+            (5, Kind::Ro),
+            (6, Kind::Ro),
+            (7, Kind::Ro),
+            (8, Kind::Rw),
+        ],
+    );
+    let bl_eos = mk_layout(
+        device,
+        "p.bl_eos",
+        &[(0, Kind::Uniform), (1, Kind::Ro), (2, Kind::Rw)],
+    );
+    let bl_int = mk_layout(
+        device,
+        "p.bl_int",
+        &[
+            (0, Kind::Uniform),
+            (1, Kind::Rw),
+            (2, Kind::Rw),
+            (3, Kind::Ro),
+        ],
+    );
+
+    let p_bin = mk_pipe(device, &bl_grid, &m_grid, "p.bin_count", "bin_count");
+    let p_scan = mk_pipe(device, &bl_grid, &m_grid, "p.scan", "scan");
+    let p_place = mk_pipe(device, &bl_grid, &m_grid, "p.place", "place");
+    let p_canon = mk_pipe(device, &bl_grid, &m_grid, "p.canon", "canon");
+    let p_dens = mk_pipe(device, &bl_dens, &m_dens, "p.density", "density");
+    let p_force = mk_pipe(device, &bl_force, &m_force, "p.force", "force");
+    let p_eos = mk_pipe(device, &bl_eos, &m_eos, "p.eos", "eos");
+    let p_int = mk_pipe(device, &bl_int, &m_int, "p.integrate", "integrate");
+
+    Pipes {
+        bl_grid,
+        bl_dens,
+        bl_force,
+        bl_eos,
+        bl_int,
+        p_bin,
+        p_scan,
+        p_place,
+        p_canon,
+        p_dens,
+        p_eos,
+        p_force,
+        p_int,
+    }
+}
+
+/// `Packet` 的五张 bind group（`new` 的第四段：把缓冲/参数/管线绑起来）。
+pub(crate) struct Binds {
+    pub bg_grid: wgpu::BindGroup,
+    pub bg_dens: wgpu::BindGroup,
+    pub bg_force: wgpu::BindGroup,
+    pub bg_eos: wgpu::BindGroup,
+    pub bg_int: wgpu::BindGroup,
+}
+
+pub(crate) fn make_bind_groups(
+    device: &wgpu::Device,
+    bufs: &Bufs,
+    prm: &Params,
+    pipes: &Pipes,
+) -> Binds {
+    let bg_grid = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("p.bg_grid"),
+        layout: &pipes.bl_grid,
+        entries: &[
+            ent(0, &prm.grid_params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.bins_b),
+            ent(3, &bufs.counts_b),
+            ent(4, &bufs.start_b),
+            ent(5, &bufs.items_b),
+            ent(6, &bufs.cursor_b),
+            ent(7, &bufs.overflow_b),
+        ],
+    });
+    let bg_dens = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("p.bg_dens"),
+        layout: &pipes.bl_dens,
+        entries: &[
+            ent(0, &prm.phase_params_b),
+            ent(1, &bufs.pos_b),
+            ent(3, &bufs.pmass_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
+        ],
+    });
+    let bg_force = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("p.bg_force"),
+        layout: &pipes.bl_force,
+        entries: &[
+            ent(0, &prm.phase_params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.vel_b),
+            ent(3, &bufs.pmass_b),
+            ent(4, &bufs.press_b),
+            ent(5, &bufs.start_b),
+            ent(6, &bufs.items_b),
+            ent(7, &bufs.dens_b),
+            ent(8, &bufs.out_b),
+        ],
+    });
+    let bg_eos = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("p.bg_eos"),
+        layout: &pipes.bl_eos,
+        entries: &[
+            ent(0, &prm.eos_params_b),
+            ent(1, &bufs.dens_b),
+            ent(2, &bufs.press_b),
+        ],
+    });
+    let bg_int = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("p.bg_int"),
+        layout: &pipes.bl_int,
+        entries: &[
+            ent(0, &prm.int_params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.vel_b),
+            ent(3, &bufs.out_b),
+        ],
+    });
+
+    Binds {
+        bg_grid,
+        bg_dens,
+        bg_force,
+        bg_eos,
+        bg_int,
+    }
+}
+
 impl Packet {
     /// 建全部缓冲/管线（**一次性**），并上传初始 `pos` / `vel` / `pmass`。
     pub fn new(
@@ -40,276 +432,12 @@ impl Packet {
         let (_, device, queue) = crate::probe::device_for(adapter_index)?;
         let n = cfg.n;
         let total = cfg.total;
-        let storage = |label: &str, size: u64, extra: wgpu::BufferUsages| {
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size,
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_SRC
-                    | wgpu::BufferUsages::COPY_DST
-                    | extra,
-                mapped_at_creation: false,
-            })
-        };
-        let pos_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("p.pos"),
-            contents: &f32_bytes(pos_flat),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
-        let vel_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("p.vel"),
-            contents: &f32_bytes(vel_flat),
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::COPY_DST,
-        });
-        let pmass_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("p.pmass"),
-            contents: &f32_bytes(pmass),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let press_b = storage("p.press", (n as u64) * 4, wgpu::BufferUsages::empty());
-        let dens_b = storage("p.dens", (n as u64) * 4, wgpu::BufferUsages::empty());
-        let out_b = storage("p.out", (n as u64) * 24, wgpu::BufferUsages::empty());
-        let bins_b = storage("p.bins", (n as u64) * 4, wgpu::BufferUsages::empty());
-        let counts_b = storage(
-            "p.counts",
-            ((total + 1) as u64) * 4,
-            wgpu::BufferUsages::empty(),
-        );
-        let start_b = storage(
-            "p.start",
-            ((total + 1) as u64) * 4,
-            wgpu::BufferUsages::empty(),
-        );
-        let items_b = storage("p.items", (n as u64) * 4, wgpu::BufferUsages::empty());
-        let cursor_b = storage(
-            "p.cursor",
-            ((total + 1) as u64) * 4,
-            wgpu::BufferUsages::empty(),
-        );
-        let overflow_b = storage("p.overflow", 4, wgpu::BufferUsages::empty());
-        let readback_b = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("p.readback"),
-            size: (n as u64) * 24,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        // —— 四组 uniform ——
-        let grid_params = {
-            let mut b = Vec::with_capacity(48);
-            for x in cfg.gmin {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            b.extend_from_slice(&cfg.inv.to_le_bytes());
-            for x in [
-                cfg.dims[0],
-                cfg.dims[1],
-                cfg.dims[2],
-                n,
-                total,
-                cfg.cap,
-                0,
-                0,
-            ] {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            b
-        };
-        let phase_params = {
-            let mut b = Vec::with_capacity(80);
-            for x in cfg.gmin {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            for x in [
-                cfg.inv,
-                cfg.h2,
-                cfg.k6,
-                cfg.w0,
-                cfg.mass,
-                cfg.ks,
-                cfg.h,
-                cfg.alpha_c,
-                0.0,
-            ] {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            for x in cfg.gravity {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            for x in [n, cfg.dims[0], cfg.dims[1], cfg.dims[2], 0] {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            b
-        };
-        let eos_params = {
-            let mut b = Vec::with_capacity(32);
-            for x in [cfg.b_tait, cfg.rho0, cfg.gamma] {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            b.extend_from_slice(&u32::from(cfg.clamp_neg).to_le_bytes());
-            for x in [n, 0, 0, 0] {
-                b.extend_from_slice(&x.to_le_bytes());
-            }
-            b
-        };
-        let uniform = |label: &str, bytes: &[u8]| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytes,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            })
-        };
-        let grid_params_b = uniform("p.grid_params", &grid_params);
-        let phase_params_b = uniform("p.phase_params", &phase_params);
-        let eos_params_b = uniform("p.eos_params", &eos_params);
-        let int_params_b = uniform(
-            "p.int_params",
-            &[0u8; 32], // 每子步 `write_buffer` 更新
-        );
-
-        // —— 五个着色器模块 + 八条管线 ——
-        let sh = |label: &str, src: &str| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
-            })
-        };
-        let m_grid = sh("grid.wgsl", include_str!("grid.wgsl"));
-        let m_dens = sh("density.wgsl", include_str!("density.wgsl"));
-        let m_force = sh("force.wgsl", include_str!("force.wgsl"));
-        let m_eos = sh("eos.wgsl", include_str!("eos.wgsl"));
-        let m_int = sh("integrate.wgsl", include_str!("integrate.wgsl"));
-
-        // 网格：0 uniform + 1(pos,只读) + 2..=7(读写)
-        let bl_grid = mk_layout(
-            &device,
-            "p.bl_grid",
-            &[
-                (0, Kind::Uniform),
-                (1, Kind::Ro),
-                (2, Kind::Rw),
-                (3, Kind::Rw),
-                (4, Kind::Rw),
-                (5, Kind::Rw),
-                (6, Kind::Rw),
-                (7, Kind::Rw),
-            ],
-        );
-        // 密度：0 uniform | 1 pos(只读) | 3 pmass(只读) | 5/6 格表(只读) | 7 dens(读写)
-        let bl_dens = mk_layout(
-            &device,
-            "p.bl_dens",
-            &[
-                (0, Kind::Uniform),
-                (1, Kind::Ro),
-                (3, Kind::Ro),
-                (5, Kind::Ro),
-                (6, Kind::Ro),
-                (7, Kind::Rw),
-            ],
-        );
-        // 力：0 uniform | 1..=7 只读（含 dens）| 8 out(读写)
-        let bl_force = mk_layout(
-            &device,
-            "p.bl_force",
-            &[
-                (0, Kind::Uniform),
-                (1, Kind::Ro),
-                (2, Kind::Ro),
-                (3, Kind::Ro),
-                (4, Kind::Ro),
-                (5, Kind::Ro),
-                (6, Kind::Ro),
-                (7, Kind::Ro),
-                (8, Kind::Rw),
-            ],
-        );
-        let bl_eos = mk_layout(
-            &device,
-            "p.bl_eos",
-            &[(0, Kind::Uniform), (1, Kind::Ro), (2, Kind::Rw)],
-        );
-        let bl_int = mk_layout(
-            &device,
-            "p.bl_int",
-            &[
-                (0, Kind::Uniform),
-                (1, Kind::Rw),
-                (2, Kind::Rw),
-                (3, Kind::Ro),
-            ],
-        );
-
-        let p_bin = mk_pipe(&device, &bl_grid, &m_grid, "p.bin_count", "bin_count");
-        let p_scan = mk_pipe(&device, &bl_grid, &m_grid, "p.scan", "scan");
-        let p_place = mk_pipe(&device, &bl_grid, &m_grid, "p.place", "place");
-        let p_canon = mk_pipe(&device, &bl_grid, &m_grid, "p.canon", "canon");
-        let p_dens = mk_pipe(&device, &bl_dens, &m_dens, "p.density", "density");
-        let p_force = mk_pipe(&device, &bl_force, &m_force, "p.force", "force");
-        let p_eos = mk_pipe(&device, &bl_eos, &m_eos, "p.eos", "eos");
-        let p_int = mk_pipe(&device, &bl_int, &m_int, "p.integrate", "integrate");
-
-        let bg_grid = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("p.bg_grid"),
-            layout: &bl_grid,
-            entries: &[
-                ent(0, &grid_params_b),
-                ent(1, &pos_b),
-                ent(2, &bins_b),
-                ent(3, &counts_b),
-                ent(4, &start_b),
-                ent(5, &items_b),
-                ent(6, &cursor_b),
-                ent(7, &overflow_b),
-            ],
-        });
-        let bg_dens = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("p.bg_dens"),
-            layout: &bl_dens,
-            entries: &[
-                ent(0, &phase_params_b),
-                ent(1, &pos_b),
-                ent(3, &pmass_b),
-                ent(5, &start_b),
-                ent(6, &items_b),
-                ent(7, &dens_b),
-            ],
-        });
-        let bg_force = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("p.bg_force"),
-            layout: &bl_force,
-            entries: &[
-                ent(0, &phase_params_b),
-                ent(1, &pos_b),
-                ent(2, &vel_b),
-                ent(3, &pmass_b),
-                ent(4, &press_b),
-                ent(5, &start_b),
-                ent(6, &items_b),
-                ent(7, &dens_b),
-                ent(8, &out_b),
-            ],
-        });
-        let bg_eos = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("p.bg_eos"),
-            layout: &bl_eos,
-            entries: &[ent(0, &eos_params_b), ent(1, &dens_b), ent(2, &press_b)],
-        });
-        let bg_int = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("p.bg_int"),
-            layout: &bl_int,
-            entries: &[
-                ent(0, &int_params_b),
-                ent(1, &pos_b),
-                ent(2, &vel_b),
-                ent(3, &out_b),
-            ],
-        });
-
+        // 四段各进一个 helper（`new` 由 310 行降到 ~90）：**持有结构体而不是就地解构**——
+        // 后一段（bind group）要借前几段（`&bufs`/`&prm`/`&pipes`），解构会把它们移走。
+        let bufs = make_buffers(&device, n, total, pos_flat, vel_flat, pmass);
+        let prm = make_params(&device, &cfg, n, total);
+        let pipes = make_pipelines(&device);
+        let binds = make_bind_groups(&device, &bufs, &prm, &pipes);
         Ok(Self {
             device,
             queue,
@@ -317,27 +445,27 @@ impl Packet {
             total,
             groups_n: n.div_ceil(64),
             groups_total: total.div_ceil(64),
-            pos_b,
-            vel_b,
-            counts_b,
-            start_b,
-            cursor_b,
-            overflow_b,
-            int_params_b,
-            p_bin,
-            p_scan,
-            p_place,
-            p_canon,
-            p_dens,
-            p_eos,
-            p_force,
-            p_int,
-            bg_grid,
-            bg_dens,
-            bg_force,
-            bg_eos,
-            bg_int,
-            readback_b,
+            pos_b: bufs.pos_b,
+            vel_b: bufs.vel_b,
+            counts_b: bufs.counts_b,
+            start_b: bufs.start_b,
+            cursor_b: bufs.cursor_b,
+            overflow_b: bufs.overflow_b,
+            int_params_b: prm.int_params_b,
+            p_bin: pipes.p_bin,
+            p_scan: pipes.p_scan,
+            p_place: pipes.p_place,
+            p_canon: pipes.p_canon,
+            p_dens: pipes.p_dens,
+            p_eos: pipes.p_eos,
+            p_force: pipes.p_force,
+            p_int: pipes.p_int,
+            bg_grid: binds.bg_grid,
+            bg_dens: binds.bg_dens,
+            bg_force: binds.bg_force,
+            bg_eos: binds.bg_eos,
+            bg_int: binds.bg_int,
+            readback_b: bufs.readback_b,
         })
     }
 

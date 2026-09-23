@@ -64,20 +64,30 @@ impl GridOut {
 }
 
 /// 在**指定适配器序号**上跑「网格重建」（四个入口一条命令链，缓冲/管线复用，`repeats` 轮）。
-pub fn grid_on_adapter(
-    adapter_index: usize,
-    inputs: &GridInputs<'_>,
-    params: GridParams,
-    repeats: usize,
-) -> GridOut {
-    let t0 = std::time::Instant::now();
-    let (adapter_name, device, queue) = match crate::probe::device_for(adapter_index) {
-        Ok(v) => v,
-        Err(e) => return GridOut::err(e),
-    };
-    let n = params.n as usize;
-    let total = params.total as usize;
+/// 网格探针的缓冲 + 回读偏移（`grid_on_adapter` 第一段）。
+pub(crate) struct GridBuffs {
+    pub pos_b: wgpu::Buffer,
+    pub params_b: wgpu::Buffer,
+    pub bins_b: wgpu::Buffer,
+    pub counts_b: wgpu::Buffer,
+    pub start_b: wgpu::Buffer,
+    pub items_b: wgpu::Buffer,
+    pub cursor_b: wgpu::Buffer,
+    pub overflow_b: wgpu::Buffer,
+    pub readback: wgpu::Buffer,
+    pub start_off: u64,
+    pub items_off: u64,
+    pub bins_off: u64,
+    pub of_off: u64,
+}
 
+pub(crate) fn make_grid_buffs(
+    device: &wgpu::Device,
+    n: usize,
+    total: usize,
+    params: GridParams,
+    inputs: &GridInputs<'_>,
+) -> GridBuffs {
     let params_bytes = {
         let mut b = Vec::with_capacity(48);
         for x in params.gmin {
@@ -142,6 +152,33 @@ pub fn grid_on_adapter(
         mapped_at_creation: false,
     });
 
+    GridBuffs {
+        pos_b,
+        params_b,
+        bins_b,
+        counts_b,
+        start_b,
+        items_b,
+        cursor_b,
+        overflow_b,
+        readback,
+        start_off,
+        items_off,
+        bins_off,
+        of_off,
+    }
+}
+
+pub(crate) fn make_grid_pipes(
+    device: &wgpu::Device,
+    bufs: &GridBuffs,
+) -> (
+    wgpu::ComputePipeline,
+    wgpu::ComputePipeline,
+    wgpu::ComputePipeline,
+    wgpu::ComputePipeline,
+    wgpu::BindGroup,
+) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("grid.wgsl"),
         source: wgpu::ShaderSource::Wgsl(include_str!("grid.wgsl").into()),
@@ -198,17 +235,57 @@ pub fn grid_on_adapter(
         label: Some("grid.bg"),
         layout: &bgl,
         entries: &[
-            ent(0, &params_b),
-            ent(1, &pos_b),
-            ent(2, &bins_b),
-            ent(3, &counts_b),
-            ent(4, &start_b),
-            ent(5, &items_b),
-            ent(6, &cursor_b),
-            ent(7, &overflow_b),
+            ent(0, &bufs.params_b),
+            ent(1, &bufs.pos_b),
+            ent(2, &bufs.bins_b),
+            ent(3, &bufs.counts_b),
+            ent(4, &bufs.start_b),
+            ent(5, &bufs.items_b),
+            ent(6, &bufs.cursor_b),
+            ent(7, &bufs.overflow_b),
         ],
     });
 
+    (p_bin, p_scan, p_place, p_canon, bg)
+}
+
+pub(crate) fn parse_grid(
+    n: usize,
+    total: usize,
+    bufs: &GridBuffs,
+    data: &[u8],
+) -> (Vec<u32>, Vec<u32>, Vec<u32>, u32) {
+    let u32_at = |i: usize| -> u32 {
+        let c = &data[i * 4..i * 4 + 4];
+        u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+    };
+    let s_base = (bufs.start_off / 4) as usize;
+    let i_base = (bufs.items_off / 4) as usize;
+    let b_base = (bufs.bins_off / 4) as usize;
+    let start: Vec<u32> = (0..total + 1).map(|k| u32_at(s_base + k)).collect();
+    let items: Vec<u32> = (0..n).map(|k| u32_at(i_base + k)).collect();
+    let bins: Vec<u32> = (0..n).map(|k| u32_at(b_base + k)).collect();
+    let overflow = u32_at(bufs.of_off as usize / 4);
+
+    (start, items, bins, overflow)
+}
+
+pub fn grid_on_adapter(
+    adapter_index: usize,
+    inputs: &GridInputs<'_>,
+    params: GridParams,
+    repeats: usize,
+) -> GridOut {
+    let t0 = std::time::Instant::now();
+    let (adapter_name, device, queue) = match crate::probe::device_for(adapter_index) {
+        Ok(v) => v,
+        Err(e) => return GridOut::err(e),
+    };
+    let n = params.n as usize;
+    let total = params.total as usize;
+
+    let bufs = make_grid_buffs(&device, n, total, params, inputs);
+    let (p_bin, p_scan, p_place, p_canon, bg) = make_grid_pipes(&device, &bufs);
     let setup_ms = (t0.elapsed().as_secs_f64() * 1e3) as f32;
     let reps = repeats.max(1);
     let wg = 64u32;
@@ -220,8 +297,8 @@ pub fn grid_on_adapter(
             label: Some("grid.enc"),
         });
         // ① 清零（counts / overflow）：`clear_buffer` 是**确定**的（不是"未定义内容"）
-        enc.clear_buffer(&counts_b, 0, None);
-        enc.clear_buffer(&overflow_b, 0, None);
+        enc.clear_buffer(&bufs.counts_b, 0, None);
+        enc.clear_buffer(&bufs.overflow_b, 0, None);
         {
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("grid.bin_count"),
@@ -240,7 +317,13 @@ pub fn grid_on_adapter(
             cp.set_bind_group(0, &bg, &[]);
             cp.dispatch_workgroups(1, 1, 1);
         }
-        enc.copy_buffer_to_buffer(&start_b, 0, &cursor_b, 0, ((total + 1) * 4) as u64);
+        enc.copy_buffer_to_buffer(
+            &bufs.start_b,
+            0,
+            &bufs.cursor_b,
+            0,
+            ((total + 1) * 4) as u64,
+        );
         {
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("grid.place"),
@@ -263,15 +346,33 @@ pub fn grid_on_adapter(
     }
     {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("grid.readback"),
+            label: Some("grid.bufs.readback"),
         });
-        enc.copy_buffer_to_buffer(&start_b, 0, &readback, start_off, ((total + 1) * 4) as u64);
-        enc.copy_buffer_to_buffer(&items_b, 0, &readback, items_off, (n * 4) as u64);
-        enc.copy_buffer_to_buffer(&bins_b, 0, &readback, bins_off, (n * 4) as u64);
-        enc.copy_buffer_to_buffer(&overflow_b, 0, &readback, of_off, 4);
+        enc.copy_buffer_to_buffer(
+            &bufs.start_b,
+            0,
+            &bufs.readback,
+            bufs.start_off,
+            ((total + 1) * 4) as u64,
+        );
+        enc.copy_buffer_to_buffer(
+            &bufs.items_b,
+            0,
+            &bufs.readback,
+            bufs.items_off,
+            (n * 4) as u64,
+        );
+        enc.copy_buffer_to_buffer(
+            &bufs.bins_b,
+            0,
+            &bufs.readback,
+            bufs.bins_off,
+            (n * 4) as u64,
+        );
+        enc.copy_buffer_to_buffer(&bufs.overflow_b, 0, &bufs.readback, bufs.of_off, 4);
         queue.submit(Some(enc.finish()));
     }
-    let slice = readback.slice(..);
+    let slice = bufs.readback.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
         tx.send(r).ok();
@@ -286,20 +387,10 @@ pub fn grid_on_adapter(
     let per_run_ms = (t_run.elapsed().as_secs_f64() * 1e3) as f32 / reps as f32;
 
     let data = slice.get_mapped_range();
-    let u32_at = |i: usize| -> u32 {
-        let c = &data[i * 4..i * 4 + 4];
-        u32::from_le_bytes([c[0], c[1], c[2], c[3]])
-    };
-    let s_base = (start_off / 4) as usize;
-    let i_base = (items_off / 4) as usize;
-    let b_base = (bins_off / 4) as usize;
-    let start: Vec<u32> = (0..total + 1).map(|k| u32_at(s_base + k)).collect();
-    let items: Vec<u32> = (0..n).map(|k| u32_at(i_base + k)).collect();
-    let bins: Vec<u32> = (0..n).map(|k| u32_at(b_base + k)).collect();
-    let overflow = u32_at(of_off as usize / 4);
+    let (start, items, bins, overflow) = parse_grid(n, total, &bufs, &data);
+    // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
     drop(data);
-    readback.unmap();
-
+    bufs.readback.unmap();
     GridOut {
         start,
         items,
