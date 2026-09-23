@@ -4,6 +4,11 @@
   "max_fn_lines": 8,
   "max_type_members": 4
  },
+ "crates/vxl-phys-broad/src/aabb_util.rs": {
+  "file_lines": 71,
+  "max_fn_lines": 10,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-broad/src/bvh.rs": {
   "file_lines": 256,
   "max_fn_lines": 39,
@@ -30,7 +35,7 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-broad/src/bvh8/bvh8_impl.rs": {
-  "file_lines": 708,
+  "file_lines": 638,
   "max_fn_lines": 58,
   "max_type_members": 31
  },
@@ -45,7 +50,7 @@
   "max_type_members": 6
  },
  "crates/vxl-phys-broad/src/lib.rs": {
-  "file_lines": 274,
+  "file_lines": 277,
   "max_fn_lines": 66,
   "max_type_members": 0
  },
@@ -70,7 +75,7 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-broad/src/wide/wide_impl.rs": {
-  "file_lines": 794,
+  "file_lines": 721,
   "max_fn_lines": 91,
   "max_type_members": 29
  },

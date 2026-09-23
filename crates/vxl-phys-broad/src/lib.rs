@@ -31,6 +31,9 @@ pub use wide::WideBvh;
 /// 轴对齐包围盒（定义已下移至 `vxl-phys-core::Aabb`，此处再导出保持既有路径）。
 pub use vxl_phys_core::Aabb;
 
+// 共享 AABB 助手（bvh8/wide 逐字重复的那批，去重成一份）。**不再导出**：那两个文件
+// 直接 `use crate::aabb_util::*;`（根再导出会对它们变成 unused import）。
+mod aabb_util;
 // ── 按域拆出的子模块（子目录 src/）
 mod bvh_phase;
 mod grid_phase;
