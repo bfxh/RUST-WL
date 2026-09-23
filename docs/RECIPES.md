@@ -539,6 +539,10 @@ cargo run --release -p vxl-phys --example fluid_buoyancy
 # 默认关（`add_fluid`）⇒ 既有场景四哈希逐位不变。测试半边：`cargo test -p vxl-phys --test fluid_boundary`。
 # ⚠️ 开局**别把体直接放在已有水格上**（重合 ⇒ ρ 爆 ⇒ CFL 尖峰）；用"从水面上方落入"或铸装挖空。
 cargo run --release -p vxl-phys --example fluid_buoyancy -- 180 2b
+# SPH **规模档**（成本探针）：n³ 晶格水块、打印 ms/tick 与等效 FPS。
+# 首测（2026-09-22，本机）：64k→135.7 / 125k→273.3 / 300k→**673.7 ms/tick**（SPEC §3 目标 30 万@30FPS
+# = 33.3 ms ⇒ **≈20× 缺口**）；成因：流体步进**完全串行** + 标量核（见 PLAN-0.3 §6）。
+cargo run --release -p vxl-phys-fluid --example sph_scale -- 67 4 20
 # 2b 精度**探针**（仪表，只打印不断言；两轴 = 体尺寸/h × 分辨率 h；约 2–3 分钟）：
 # 给出 f.y/ρVg（含**窗口均值**与波动）、侧向、边界粒子占比、ms/tick。
 # ⚠️ 必须用 release（h=0.04 那格 debug 要跑很久），且**只信窗口均值**——
