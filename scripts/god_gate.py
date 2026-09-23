@@ -48,7 +48,13 @@ def load_cfg(root: pathlib.Path, cfg_path: str | None) -> dict:
     cfg = dict(DEFAULT_CFG)
     p = pathlib.Path(cfg_path) if cfg_path else root / "god.gate.json"
     if p.is_file():
-        cfg.update(json.loads(p.read_text(encoding="utf-8")))
+        try:
+            cfg.update(json.loads(p.read_text(encoding="utf-8")))
+        except ValueError as e:
+            # 与坏基线同款处理：**给明确报错**，别抛裸 JSONDecodeError（配置里一个漏转义的引号
+            # 就能让门以 traceback 退出——本轮实栽）。
+            print(f"错误：配置 {p.name} 不是合法 JSON（{e}）——检查最后改的那条字符串里的引号转义")
+            sys.exit(2)
     return cfg
 
 

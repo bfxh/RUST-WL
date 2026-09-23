@@ -21,161 +21,12 @@
 
 use wgpu::util::DeviceExt;
 
-/// 建管线所需的静态参数（一次给全；运行时只有 `dt` 会变）。
-#[derive(Clone, Copy, Debug)]
-pub struct PacketCfg {
-    pub n: u32,
-    pub total: u32,
-    pub gmin: [f32; 3],
-    pub inv: f32,
-    pub dims: [u32; 3],
-    /// 逐格规范化段长上限（`grid.wgsl` 的护栏）。
-    pub cap: u32,
-    // —— 密度/力相位的常量（与 `probe::PhaseParams` 同义）——
-    pub h: f32,
-    pub h2: f32,
-    pub k6: f32,
-    pub w0: f32,
-    pub ks: f32,
-    pub mass: f32,
-    pub alpha_c: f32,
-    pub gravity: [f32; 3],
-    // —— EOS ——
-    pub b_tait: f32,
-    pub rho0: f32,
-    pub gamma: f32,
-    pub clamp_neg: bool,
-    // —— 积分 ——
-    pub xsph_eps: f32,
-    pub max_speed_frac: f32,
-}
-
-/// 一轮（一个 tick）跑完的耗时（毫秒）。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TickMs {
-    /// `ticks` 个 tick 的**总**耗时（无逐 tick 回读，末尾一次同步）。
-    pub total: f32,
-    /// 每 tick 均值。
-    pub per_tick: f32,
-    /// 单独量的"一次状态回读 + 同步"成本（毫秒）——耦合接口的代价。
-    pub readback_ms: f32,
-}
-
-pub struct Packet {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    n: u32,
-    total: u32,
-    groups_n: u32,
-    groups_total: u32,
-    pos_b: wgpu::Buffer,
-    vel_b: wgpu::Buffer,
-    counts_b: wgpu::Buffer,
-    start_b: wgpu::Buffer,
-    cursor_b: wgpu::Buffer,
-    overflow_b: wgpu::Buffer,
-    int_params_b: wgpu::Buffer,
-    p_bin: wgpu::ComputePipeline,
-    p_scan: wgpu::ComputePipeline,
-    p_place: wgpu::ComputePipeline,
-    p_canon: wgpu::ComputePipeline,
-    p_dens: wgpu::ComputePipeline,
-    p_eos: wgpu::ComputePipeline,
-    p_force: wgpu::ComputePipeline,
-    p_int: wgpu::ComputePipeline,
-    bg_grid: wgpu::BindGroup,
-    bg_dens: wgpu::BindGroup,
-    bg_force: wgpu::BindGroup,
-    bg_eos: wgpu::BindGroup,
-    bg_int: wgpu::BindGroup,
-    readback_b: wgpu::Buffer,
-}
-
-/// 绑定类型（写布局用）。
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Uniform,
-    Ro,
-    Rw,
-}
-
-fn mk_layout(device: &wgpu::Device, label: &str, list: &[(u32, Kind)]) -> wgpu::BindGroupLayout {
-    let entries: Vec<wgpu::BindGroupLayoutEntry> = list
-        .iter()
-        .map(|&(binding, kind)| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: match kind {
-                    Kind::Uniform => wgpu::BufferBindingType::Uniform,
-                    Kind::Ro | Kind::Rw => wgpu::BufferBindingType::Storage {
-                        read_only: kind == Kind::Ro,
-                    },
-                },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        })
-        .collect();
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some(label),
-        entries: &entries,
-    })
-}
-
-fn mk_pipe(
-    device: &wgpu::Device,
-    bgl: &wgpu::BindGroupLayout,
-    shader: &wgpu::ShaderModule,
-    label: &str,
-    entry: &str,
-) -> wgpu::ComputePipeline {
-    let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(label),
-        bind_group_layouts: &[bgl],
-        push_constant_ranges: &[],
-    });
-    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&pl),
-        module: shader,
-        entry_point: Some(entry),
-        compilation_options: Default::default(),
-        cache: None,
-    })
-}
-
-/// 一个 compute pass + 一次分派（**自由函数**：闭包会独占借用 `enc`，后续就没法再编码拷贝）。
-fn dispatch(
-    enc: &mut wgpu::CommandEncoder,
-    pipe: &wgpu::ComputePipeline,
-    bg: &wgpu::BindGroup,
-    groups: u32,
-) {
-    let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-        label: None,
-        timestamp_writes: None,
-    });
-    cp.set_pipeline(pipe);
-    cp.set_bind_group(0, bg, &[]);
-    cp.dispatch_workgroups(groups.max(1), 1, 1);
-}
-
-fn ent(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
-    wgpu::BindGroupEntry {
-        binding,
-        resource: b.as_entire_binding(),
-    }
-}
-
-fn f32_bytes(v: &[f32]) -> Vec<u8> {
-    let mut b = Vec::with_capacity(v.len() * 4);
-    for x in v {
-        b.extend_from_slice(&x.to_le_bytes());
-    }
-    b
-}
+// ── 按域拆出的子模块（子目录 pipeline/）
+mod gpu_setup;
+mod gpu_types;
+pub(crate) use self::gpu_setup::*;
+pub use self::gpu_types::*;
+// ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 impl Packet {
     /// 建全部缓冲/管线（**一次性**），并上传初始 `pos` / `vel` / `pmass`。
@@ -493,7 +344,7 @@ impl Packet {
     /// 一个子步（**一条命令链**）：网格四入口 + 密度 + EOS + 力 + 积分。
     /// `stages` 位掩码（诊断用，`run` 传全 1）：
     /// 0 `bin_count` / 1 `scan`+拷贝+`place` / 2 `canon` / 3 密度 / 4 EOS / 5 力 / 6 积分。
-    fn encode_substep(
+    pub(crate) fn encode_substep(
         &self,
         enc: &mut wgpu::CommandEncoder,
         cfg: &PacketCfg,
@@ -599,7 +450,7 @@ impl Packet {
         out
     }
 
-    fn poll_wait(&self) -> Result<wgpu::PollStatus, wgpu::PollError> {
+    pub(crate) fn poll_wait(&self) -> Result<wgpu::PollStatus, wgpu::PollError> {
         self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: None,

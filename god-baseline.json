@@ -5,22 +5,72 @@
   "max_type_members": 4
  },
  "crates/vxl-phys-broad/src/bvh.rs": {
-  "file_lines": 806,
+  "file_lines": 256,
+  "max_fn_lines": 39,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/bvh/bvh_impl.rs": {
+  "file_lines": 487,
   "max_fn_lines": 70,
   "max_type_members": 22
  },
+ "crates/vxl-phys-broad/src/bvh/bvh_types.rs": {
+  "file_lines": 75,
+  "max_fn_lines": 8,
+  "max_type_members": 4
+ },
  "crates/vxl-phys-broad/src/bvh8.rs": {
-  "file_lines": 1022,
+  "file_lines": 303,
+  "max_fn_lines": 34,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/bvh8/bvh8_bits.rs": {
+  "file_lines": 22,
+  "max_fn_lines": 3,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/bvh8/bvh8_impl.rs": {
+  "file_lines": 708,
   "max_fn_lines": 58,
   "max_type_members": 31
+ },
+ "crates/vxl-phys-broad/src/bvh_phase.rs": {
+  "file_lines": 374,
+  "max_fn_lines": 256,
+  "max_type_members": 13
+ },
+ "crates/vxl-phys-broad/src/grid_phase.rs": {
+  "file_lines": 186,
+  "max_fn_lines": 106,
+  "max_type_members": 6
  },
  "crates/vxl-phys-broad/src/lib.rs": {
   "file_lines": 963,
   "max_fn_lines": 256,
   "max_type_members": 13
  },
+ "crates/vxl-phys-broad/src/shape.rs": {
+  "file_lines": 111,
+  "max_fn_lines": 105,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/trait_phase.rs": {
+  "file_lines": 38,
+  "max_fn_lines": 11,
+  "max_type_members": 6
+ },
  "crates/vxl-phys-broad/src/wide.rs": {
-  "file_lines": 1116,
+  "file_lines": 326,
+  "max_fn_lines": 33,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/wide/wide_bits.rs": {
+  "file_lines": 7,
+  "max_fn_lines": 0,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-broad/src/wide/wide_impl.rs": {
+  "file_lines": 794,
   "max_fn_lines": 91,
   "max_type_members": 29
  },
@@ -215,8 +265,18 @@
   "max_type_members": 3
  },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 708,
+  "file_lines": 559,
   "max_fn_lines": 310,
+  "max_type_members": 10
+ },
+ "crates/vxl-phys-gpu/src/pipeline/gpu_setup.rs": {
+  "file_lines": 92,
+  "max_fn_lines": 28,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/src/pipeline/gpu_types.rs": {
+  "file_lines": 72,
+  "max_fn_lines": 0,
   "max_type_members": 27
  },
  "crates/vxl-phys-gpu/src/probe.rs": {
@@ -255,9 +315,39 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-narrow/src/gjk.rs": {
-  "file_lines": 981,
+  "file_lines": 243,
+  "max_fn_lines": 52,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_clip.rs": {
+  "file_lines": 106,
+  "max_fn_lines": 51,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_core.rs": {
+  "file_lines": 183,
+  "max_fn_lines": 91,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_epa.rs": {
+  "file_lines": 223,
   "max_fn_lines": 132,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_hull.rs": {
+  "file_lines": 40,
+  "max_fn_lines": 12,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_shapes.rs": {
+  "file_lines": 151,
+  "max_fn_lines": 35,
   "max_type_members": 6
+ },
+ "crates/vxl-phys-narrow/src/gjk/gjk_support.rs": {
+  "file_lines": 63,
+  "max_fn_lines": 21,
+  "max_type_members": 3
  },
  "crates/vxl-phys-narrow/src/heightfield.rs": {
   "file_lines": 218,
@@ -430,8 +520,23 @@
   "max_type_members": 8
  },
  "crates/vxl-phys-terrain/src/voxel.rs": {
-  "file_lines": 1033,
+  "file_lines": 222,
+  "max_fn_lines": 48,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-terrain/src/voxel/voxel_contacts.rs": {
+  "file_lines": 380,
   "max_fn_lines": 174,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-terrain/src/voxel/voxel_provider.rs": {
+  "file_lines": 37,
+  "max_fn_lines": 21,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys-terrain/src/voxel/voxel_volume.rs": {
+  "file_lines": 410,
+  "max_fn_lines": 74,
   "max_type_members": 20
  },
  "crates/vxl-phys-wheeled/src/lib.rs": {
@@ -440,8 +545,23 @@
   "max_type_members": 6
  },
  "crates/vxl-phys/examples/arena_bench.rs": {
-  "file_lines": 1239,
+  "file_lines": 132,
+  "max_fn_lines": 109,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/arena_bench/probes_a.rs": {
+  "file_lines": 406,
   "max_fn_lines": 224,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/arena_bench/probes_b.rs": {
+  "file_lines": 649,
+  "max_fn_lines": 131,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys/examples/arena_bench/probes_c.rs": {
+  "file_lines": 80,
+  "max_fn_lines": 71,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/dam_break.rs": {
@@ -685,7 +805,7 @@
   "max_type_members": 0
  },
  "scripts/god_gate.py": {
-  "file_lines": 467,
+  "file_lines": 473,
   "max_fn_lines": 72,
   "max_type_members": 0
  },

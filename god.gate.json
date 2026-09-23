@@ -4,6 +4,17 @@
   "max_fn_lines": 120,
   "max_type_members": 24,
   "_file_growth_doc": "拆函数会让文件行数变大：若 max_fn_lines 严格下降且涨幅 ≤ 该百分比，判合法交换（逐条打印）；否则仍红",
+  "_type_exempt_doc": [
+    "类型级（max_type_members > 24）的**已登记例外**：它们都是**纯数据记录**（字段清单），",
+    "拆子结构体只加一层间接、不改复杂度，却会波及数百处字段访问 ⇒ 收益为负。逐个理由：",
+    "  · vxl-phys-core/config.rs  PhysConfig —— 独立可调旋钮的配置记录（31 字段）",
+    "  · vxl-phys-fluid/system.rs FluidSystem —— SoA 数组集合（pos/vel/dens/press/pmass/bforce…）",
+    "  · vxl-phys-narrow/phase.rs DefaultNarrowPhase —— 工作缓冲 + 诊断计数（33）",
+    "  · vxl-phys-gpu/pipeline/gpu_types.rs  Packet —— 常驻缓冲清单（32）",
+    "  · vxl-phys-broad/bvh8|wide —— 宽节点/叶数组 + 计数器",
+    "判据：**只有方法数才是复杂度**；字段数超阈只登记不拆（若将来出现「字段 + 大量方法」混在一起，",
+    "那才是真上帝对象——那时按方法切 impl 即可，本门已按文件切）。"
+  ],
   "file_growth_with_fn_shrink_pct": 10,
   "include": ["**/*.py", "**/*.rs", "**/*.js", "**/*.ts", "**/*.mjs"],
   "exclude": [
