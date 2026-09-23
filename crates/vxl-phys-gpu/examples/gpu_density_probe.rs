@@ -114,6 +114,11 @@ fn main() {
                             continue;
                         }
                         let d = pi - pos[j];
+                        // 口径 A 的**判定性诊断**（2026-09-23 做过，勿重跑）：把这一行换成
+                        // `d.y.mul_add(d.y, d.x*d.x) + d.z*d.z`（模拟 GPU 的 FMA 收缩）⇒ >2ulp 的粒
+                        // 2465→1437（-42%）但**最大 ulp 仍是 6** ⇒ 残差是**收缩噪声**、非结构性：
+                        // 一个邻居项约 3e5 ulp，若邻域集/遍历序有差，ulp 差会是 6 位数。结论：
+                        // naga 27 无 `precise`（前端没有该关键字）+ 驱动自由收缩 ⇒ **口径 A 到此为止**。
                         let r2 = d.x * d.x + d.y * d.y + d.z * d.z;
                         if r2 > h2 {
                             continue;
@@ -189,10 +194,23 @@ fn main() {
         return;
     }
 
-    let cmp3 = |a: &[Vec3], b: &[f32]| -> (f32, f32, usize) {
+    // **ulp 形态诊断**：残差若是 1–2 ulp 量级 ⇒ 只是"逐步舍入/FMA 收缩"噪声；若成片多 ulp
+    // ⇒ 结构性差异（得回头查式子/遍历序）。判据用 ulp 而不是相对差：相对差在近零处会爆掉。
+    let ukey = |x: f32| -> i32 {
+        let b = x.to_bits() as i32;
+        if b < 0 {
+            i32::MIN.wrapping_sub(b)
+        } else {
+            b
+        }
+    };
+    let ulp = |a: f32, b: f32| ukey(a).abs_diff(ukey(b));
+    let cmp3 = |a: &[Vec3], b: &[f32]| -> (f32, f32, usize, u32, usize) {
         let mut maxd = 0.0f32;
         let mut maxr = 0.0f32;
         let mut bit = 0usize;
+        let mut maxu = 0u32;
+        let mut gt2 = 0usize;
         for (i, v) in a.iter().enumerate() {
             for (k, x) in [v.x, v.y, v.z].into_iter().enumerate() {
                 let y = b[i * 3 + k];
@@ -207,13 +225,22 @@ fn main() {
                 if x.to_bits() == y.to_bits() {
                     bit += 1;
                 }
+                let u = ulp(x, y);
+                if u > maxu {
+                    maxu = u;
+                }
+                if u > 2 {
+                    gt2 += 1;
+                }
             }
         }
-        (maxd, maxr, bit)
+        (maxd, maxr, bit, maxu, gt2)
     };
-    // 密度：逐粒比
+    // 密度：逐粒比（含 ulp 形态）
     let mut dmx = 0.0f32;
     let mut dbt = 0usize;
+    let mut dmaxu = 0u32;
+    let mut dgt2 = 0usize;
     for (a, b) in ref_dens.iter().zip(out.dens.iter()) {
         let dd = (a - b).abs();
         if dd > dmx {
@@ -222,23 +249,30 @@ fn main() {
         if a.to_bits() == b.to_bits() {
             dbt += 1;
         }
+        let u = ulp(*a, *b);
+        if u > dmaxu {
+            dmaxu = u;
+        }
+        if u > 2 {
+            dgt2 += 1;
+        }
     }
-    let (amax, arel, abit) = cmp3(&ref_acc, &out.acc);
-    let (xmax, xrel, xbit) = cmp3(&ref_xsph, &out.xsph);
+    let (amax, arel, abit, amaxu, agt2) = cmp3(&ref_acc, &out.acc);
+    let (xmax, xrel, xbit, xmaxu, xgt2) = cmp3(&ref_xsph, &out.xsph);
 
     println!("== 对拍（两相位 {np} 粒；CPU 参考 = 示例内实现，与 GPU **同输入/同式/同遍历序**）==");
     println!("  适配器：{}", out.adapter);
     println!(
-        "  密度：最大绝对差 {dmx:.3e} kg/m³ | 逐位相同 {dbt}/{np}（{:.2}%）",
+        "  密度：最大绝对差 {dmx:.3e} kg/m³ | 逐位相同 {dbt}/{np}（{:.2}%）| 最大 ulp 差 {dmaxu} | >2ulp 的粒 {dgt2}",
         100.0 * dbt as f64 / np as f64
     );
     println!(
-        "  acc ：最大绝对差 {amax:.3e} m/s² | 最大相对差 {arel:.2e} | 逐位相同 {abit}/{}（{:.2}%）",
+        "  acc ：最大绝对差 {amax:.3e} m/s² | 最大相对差 {arel:.2e} | 逐位相同 {abit}/{}（{:.2}%）| 最大 ulp 差 {amaxu} | >2ulp {agt2}",
         np * 3,
         100.0 * abit as f64 / (np * 3) as f64
     );
     println!(
-        "  xsph：最大绝对差 {xmax:.3e} m/s | 最大相对差 {xrel:.2e} | 逐位相同 {xbit}/{}（{:.2}%）",
+        "  xsph：最大绝对差 {xmax:.3e} m/s | 最大相对差 {xrel:.2e} | 逐位相同 {xbit}/{}（{:.2}%）| 最大 ulp 差 {xmaxu} | >2ulp {xgt2}",
         np * 3,
         100.0 * xbit as f64 / (np * 3) as f64
     );

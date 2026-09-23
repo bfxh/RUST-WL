@@ -78,6 +78,9 @@ fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let d = pi - p3(j);
                     // ⚠️ 不用 `dot(d,d)`：WGSL 的 dot 归约序未规定，而 CPU 侧 `length_squared`
                     // 是 `x*x + y*y + z*z` **左结合** ⇒ 写成同序才有机会逐位一致（口径 A）。
+                    // 口径 A 已试尽（2026-09-23，见 PLAN §9.4 ④）：naga 27 **不支持 `precise`**
+                    // （前端无此关键字，实测 "expected assignment"）；bitcast 屏障被优化器折掉
+                    // （逐位率一字不变）；显式 fma 对照实验证明残差=**收缩噪声**（最大 6 ulp）。
                     let r2 = d.x * d.x + d.y * d.y + d.z * d.z;
                     if (r2 <= P.h2) {
                         let t = P.h2 - r2;
