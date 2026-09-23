@@ -1,6 +1,68 @@
 //! gjk_epa：从 gjk.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
+/// EPA 最近面（外法向 ⇒ `n·p ≥ 0`）；`None` = 无可用面（主循环应停）。
+fn nearest_face(verts: &[Vec3], faces: &[[usize; 3]]) -> Option<(usize, Vec3, f32)> {
+    let mut bi = usize::MAX;
+    let mut bd = f32::INFINITY;
+    let mut bn = Vec3::X;
+    for (i, fc) in faces.iter().enumerate() {
+        let n = face_n(verts, fc);
+        if n.length_squared() < 1e-18 {
+            continue;
+        }
+        let n = n.normalize();
+        let d = n.dot(verts[fc[0]]);
+        if d < bd {
+            bd = d;
+            bi = i;
+            bn = n;
+        }
+    }
+    if bi == usize::MAX {
+        None
+    } else {
+        Some((bi, bn, bd))
+    }
+}
+
+/// EPA 可见面：法线退化（`< 1e-18`）、或面朝向新支撑点 `w` 的一侧。
+fn visible_faces(verts: &[Vec3], faces: &[[usize; 3]], w: Vec3) -> Vec<usize> {
+    let mut visible: Vec<usize> = Vec::new();
+    for (i, fc) in faces.iter().enumerate() {
+        let n = face_n(verts, fc);
+        if n.length_squared() < 1e-18 {
+            visible.push(i);
+            continue;
+        }
+        if n.normalize().dot(w - verts[fc[0]]) > 1e-9 {
+            visible.push(i);
+        }
+    }
+    visible
+}
+
+/// 可见面的边界边 = 地平线（同一条边出现两次即抵消，只留一次）。
+fn build_horizon(faces: &[[usize; 3]], visible: &[usize]) -> Vec<(usize, usize)> {
+    let mut horizon: Vec<(usize, usize)> = Vec::new();
+    for &i in visible {
+        let fc = faces[i];
+        for e in [(fc[0], fc[1]), (fc[1], fc[2]), (fc[2], fc[0])] {
+            let k = (e.0.min(e.1), e.0.max(e.1));
+            match horizon
+                .iter()
+                .position(|&(x, y)| x.min(y) == k.0 && x.max(y) == k.1)
+            {
+                Some(pos) => {
+                    horizon.remove(pos);
+                }
+                None => horizon.push(k),
+            }
+        }
+    }
+    horizon
+}
+
 /// EPA：穿透深度与法线（**仅在 GJK 判定相交时调用**）。
 /// 返回 `(法线, 深度, 见证点)`：法线由 b 指向 a（沿它平移 a 可分离）。
 pub fn epa(a: &dyn Support, b: &dyn Support, iters: usize) -> Option<(Vec3, f32, Vec3)> {
@@ -55,26 +117,9 @@ pub fn epa_from_simplex(
     let mut best_d = 0.0f32;
     let mut best_p = wit[0].0;
     for _ in 0..iters {
-        // 最近面（外法向 ⇒ n·p ≥ 0）
-        let mut bi = usize::MAX;
-        let mut bd = f32::INFINITY;
-        let mut bn = Vec3::X;
-        for (i, fc) in faces.iter().enumerate() {
-            let n = face_n(&verts, fc);
-            if n.length_squared() < 1e-18 {
-                continue;
-            }
-            let n = n.normalize();
-            let d = n.dot(verts[fc[0]]);
-            if d < bd {
-                bd = d;
-                bi = i;
-                bn = n;
-            }
-        }
-        if bi == usize::MAX {
+        let Some((bi, bn, bd)) = nearest_face(&verts, &faces) else {
             break;
-        }
+        };
         best_n = bn;
         best_d = bd.max(0.0);
         let f = faces[bi];
@@ -95,37 +140,11 @@ pub fn epa_from_simplex(
         if w.dot(bn) - bd < 1e-4 {
             break;
         }
-        // 剔除可见面 → 重建地平线
-        let mut visible: Vec<usize> = Vec::new();
-        for (i, fc) in faces.iter().enumerate() {
-            let n = face_n(&verts, fc);
-            if n.length_squared() < 1e-18 {
-                visible.push(i);
-                continue;
-            }
-            if n.normalize().dot(w - verts[fc[0]]) > 1e-9 {
-                visible.push(i);
-            }
-        }
+        let visible = visible_faces(&verts, &faces, w);
         if visible.is_empty() {
             break;
         }
-        let mut horizon: Vec<(usize, usize)> = Vec::new();
-        for &i in &visible {
-            let fc = faces[i];
-            for e in [(fc[0], fc[1]), (fc[1], fc[2]), (fc[2], fc[0])] {
-                let k = (e.0.min(e.1), e.0.max(e.1));
-                match horizon
-                    .iter()
-                    .position(|&(x, y)| x.min(y) == k.0 && x.max(y) == k.1)
-                {
-                    Some(pos) => {
-                        horizon.remove(pos);
-                    }
-                    None => horizon.push(k),
-                }
-            }
-        }
+        let horizon = build_horizon(&faces, &visible);
         if horizon.is_empty() {
             break;
         }

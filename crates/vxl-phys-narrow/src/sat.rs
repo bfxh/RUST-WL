@@ -1,7 +1,196 @@
 //! sat：从 lib.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
+/// 盒对体轴 `(a, b)`：盒×盒专用路径给 `Some`；其余组合（盒×柱/锥…）走通用多面体路径给 `None`。
+type BoxAxes = Option<([Vec3; 3], [Vec3; 3])>;
+
 impl DefaultNarrowPhase {
+    /// 参考面：与「ref → incident」方向最对齐的面（盒对读体轴、通用读多面体）。
+    fn select_ref_face(
+        &self,
+        ref_is_a: bool,
+        dir_to_incident: Vec3,
+        box_axes: BoxAxes,
+    ) -> (usize, Vec3) {
+        match box_axes {
+            Some((aa, ab)) => {
+                let axes = if ref_is_a { aa } else { ab };
+                let mut bi = 0;
+                let mut bd = f32::MIN;
+                for (i, f) in BOX_FACES.iter().enumerate() {
+                    let d = face_normal_of(&axes, f.0).dot(dir_to_incident);
+                    if d > bd {
+                        bd = d;
+                        bi = i;
+                    }
+                }
+                (bi, face_normal_of(&axes, BOX_FACES[bi].0))
+            }
+            None => {
+                let p = if ref_is_a { &self.poly_a } else { &self.poly_b };
+                let mut bi = 0;
+                let mut bd = f32::MIN;
+                for (i, &n) in p.face_normal.iter().enumerate() {
+                    let d = n.dot(dir_to_incident);
+                    if d > bd {
+                        bd = d;
+                        bi = i;
+                    }
+                }
+                (bi, p.face_normal[bi])
+            }
+        }
+    }
+
+    /// 参考面的世界顶点入 scratch，返回**全局基准号**（供侧平面特征号复用）。
+    fn collect_ref_verts(&mut self, box_axes: BoxAxes, ref_is_a: bool, ref_face_idx: usize) -> u32 {
+        self.ref_v.clear();
+        match box_axes {
+            Some((aa, ab)) => {
+                let (axes, half, pos) = if ref_is_a {
+                    let (h, p) = self.box_a.expect("盒对专用路径必置 box_a");
+                    (aa, h, p)
+                } else {
+                    let (h, p) = self.box_b.expect("盒对专用路径必置 box_b");
+                    (ab, h, p)
+                };
+                for &sg in BOX_FACES[ref_face_idx].1.iter() {
+                    self.ref_v.push(face_vertex(pos, &axes, half, sg));
+                }
+                ref_face_idx as u32 * 4
+            }
+            None => {
+                let (s, e) = if ref_is_a {
+                    let p = &self.poly_a;
+                    (
+                        p.face_start[ref_face_idx] as usize,
+                        p.face_start[ref_face_idx + 1] as usize,
+                    )
+                } else {
+                    let p = &self.poly_b;
+                    (
+                        p.face_start[ref_face_idx] as usize,
+                        p.face_start[ref_face_idx + 1] as usize,
+                    )
+                };
+                if ref_is_a {
+                    self.ref_v.extend_from_slice(&self.poly_a.verts[s..e]);
+                } else {
+                    self.ref_v.extend_from_slice(&self.poly_b.verts[s..e]);
+                }
+                s as u32
+            }
+        }
+    }
+
+    /// 入射面：与 n_ref 最逆平行的面；顶点带特征号入裁剪多边形。
+    fn collect_incident(&mut self, box_axes: BoxAxes, ref_is_a: bool, n_ref: Vec3) {
+        self.clip_in.clear();
+        let side_bit = if ref_is_a { FEAT_SIDE_B } else { 0 };
+        match box_axes {
+            Some((aa, ab)) => {
+                let (axes, half, pos) = if ref_is_a {
+                    let (h, p) = self.box_b.expect("盒对专用路径必置 box_b");
+                    (ab, h, p)
+                } else {
+                    let (h, p) = self.box_a.expect("盒对专用路径必置 box_a");
+                    (aa, h, p)
+                };
+                let mut inc_face = 0;
+                let mut inc_dot = f32::MAX;
+                for (i, f) in BOX_FACES.iter().enumerate() {
+                    let d = face_normal_of(&axes, f.0).dot(n_ref);
+                    if d < inc_dot {
+                        inc_dot = d;
+                        inc_face = i;
+                    }
+                }
+                let base = inc_face as u32 * 4;
+                for (i, &sg) in BOX_FACES[inc_face].1.iter().enumerate() {
+                    let v = face_vertex(pos, &axes, half, sg);
+                    self.clip_in.push((v, side_bit | (base + i as u32)));
+                }
+            }
+            None => {
+                let inc_poly = if ref_is_a { &self.poly_b } else { &self.poly_a };
+                let mut inc_face = 0;
+                let mut inc_dot = f32::MAX;
+                for (i, &n) in inc_poly.face_normal.iter().enumerate() {
+                    let d = n.dot(n_ref);
+                    if d < inc_dot {
+                        inc_dot = d;
+                        inc_face = i;
+                    }
+                }
+                let (is_, ie) = {
+                    let p = inc_poly;
+                    (
+                        p.face_start[inc_face] as usize,
+                        p.face_start[inc_face + 1] as usize,
+                    )
+                };
+                for k in is_..ie {
+                    let v = inc_poly.verts[k];
+                    self.clip_in.push((v, side_bit | (k as u32)));
+                }
+            }
+        }
+    }
+
+    /// 逐侧平面裁剪入射多边形（侧平面向量**不归一化**）；`false` = 已裁空。
+    fn clip_by_side_planes(&mut self, n_ref: Vec3, ref_base: u32) -> bool {
+        let mut centroid = Vec3::ZERO;
+        for &v in &self.ref_v {
+            centroid += v;
+        }
+        centroid *= 1.0 / self.ref_v.len() as f32;
+
+        // 逐侧平面裁剪入射多边形。侧平面向量**不归一化**：保留判定
+        // （`da <= 0`）、穿越判定（`da*db < 0`）与插值参数
+        // （`t = da/(da−db)`）全部与平面向量尺度无关，故省掉每面一次
+        // sqrt + 除法（旧实现每 clip 4 次）。
+        let nref_v = self.ref_v.len();
+        for k in 0..nref_v {
+            let w0 = self.ref_v[k];
+            let w1 = self.ref_v[if k + 1 == nref_v { 0 } else { k + 1 }];
+            let e = w1 - w0;
+            let mut s = e.cross(n_ref);
+            if s.length_squared() < 1e-16 {
+                continue;
+            }
+            if s.dot(centroid - w0) > 0.0 {
+                s = -s;
+            }
+            // keep: dot(v - w0, s) <= 0
+            self.clip_out.clear();
+            let m = self.clip_in.len();
+            self.probe_clip_iters += m as u64;
+            self.probe_clip_max = self.probe_clip_max.max(m as u64);
+            for i in 0..m {
+                let (va, fa) = self.clip_in[i];
+                let (vb, fb) = self.clip_in[(i + 1) % m];
+                let da = (va - w0).dot(s);
+                let db = (vb - w0).dot(s);
+                if da <= 0.0 {
+                    self.clip_out.push((va, fa));
+                }
+                if da * db < 0.0 {
+                    let t = da / (da - db);
+                    self.probe_clip_xings += 1;
+                    self.clip_out.push((
+                        va + (vb - va) * t,
+                        feat_intersect(fa, fb, ref_base as usize + k),
+                    ));
+                }
+            }
+            core::mem::swap(&mut self.clip_in, &mut self.clip_out);
+            if self.clip_in.is_empty() {
+                return false;
+            }
+        }
+        true
+    }
+
     /// SAT：双侧分离判定，返回 (分离距离 ≤ skin, 轴 a→b, 来源)。
     ///
     /// 对每根轴同时测两个方向（A 在负侧 / B 在负侧），取较大分离度；
@@ -197,177 +386,15 @@ impl DefaultNarrowPhase {
             (Some(aa), Some(ab)) => Some((aa, ab)),
             _ => None,
         };
-        let (ref_face_idx, n_ref) = match box_axes {
-            Some((aa, ab)) => {
-                let axes = if ref_is_a { aa } else { ab };
-                let mut bi = 0;
-                let mut bd = f32::MIN;
-                for (i, f) in BOX_FACES.iter().enumerate() {
-                    let d = face_normal_of(&axes, f.0).dot(dir_to_incident);
-                    if d > bd {
-                        bd = d;
-                        bi = i;
-                    }
-                }
-                (bi, face_normal_of(&axes, BOX_FACES[bi].0))
-            }
-            None => {
-                let p = if ref_is_a { &self.poly_a } else { &self.poly_b };
-                let mut bi = 0;
-                let mut bd = f32::MIN;
-                for (i, &n) in p.face_normal.iter().enumerate() {
-                    let d = n.dot(dir_to_incident);
-                    if d > bd {
-                        bd = d;
-                        bi = i;
-                    }
-                }
-                (bi, p.face_normal[bi])
-            }
-        };
-
+        let (ref_face_idx, n_ref) = self.select_ref_face(ref_is_a, dir_to_incident, box_axes);
         // 参考面世界顶点入 scratch（含全局基准号，供侧平面特征号复用）。
-        self.ref_v.clear();
-        let ref_base: u32 = match box_axes {
-            Some((aa, ab)) => {
-                let (axes, half, pos) = if ref_is_a {
-                    let (h, p) = self.box_a.expect("盒对专用路径必置 box_a");
-                    (aa, h, p)
-                } else {
-                    let (h, p) = self.box_b.expect("盒对专用路径必置 box_b");
-                    (ab, h, p)
-                };
-                for &sg in BOX_FACES[ref_face_idx].1.iter() {
-                    self.ref_v.push(face_vertex(pos, &axes, half, sg));
-                }
-                ref_face_idx as u32 * 4
-            }
-            None => {
-                let (s, e) = if ref_is_a {
-                    let p = &self.poly_a;
-                    (
-                        p.face_start[ref_face_idx] as usize,
-                        p.face_start[ref_face_idx + 1] as usize,
-                    )
-                } else {
-                    let p = &self.poly_b;
-                    (
-                        p.face_start[ref_face_idx] as usize,
-                        p.face_start[ref_face_idx + 1] as usize,
-                    )
-                };
-                if ref_is_a {
-                    self.ref_v.extend_from_slice(&self.poly_a.verts[s..e]);
-                } else {
-                    self.ref_v.extend_from_slice(&self.poly_b.verts[s..e]);
-                }
-                s as u32
-            }
-        };
-
+        let ref_base = self.collect_ref_verts(box_axes, ref_is_a, ref_face_idx);
         // 入射面：与 n_ref 最逆平行的面；顶点直接入裁剪多边形（带特征号）。
-        self.clip_in.clear();
-        let side_bit = if ref_is_a { FEAT_SIDE_B } else { 0 };
-        match box_axes {
-            Some((aa, ab)) => {
-                let (axes, half, pos) = if ref_is_a {
-                    let (h, p) = self.box_b.expect("盒对专用路径必置 box_b");
-                    (ab, h, p)
-                } else {
-                    let (h, p) = self.box_a.expect("盒对专用路径必置 box_a");
-                    (aa, h, p)
-                };
-                let mut inc_face = 0;
-                let mut inc_dot = f32::MAX;
-                for (i, f) in BOX_FACES.iter().enumerate() {
-                    let d = face_normal_of(&axes, f.0).dot(n_ref);
-                    if d < inc_dot {
-                        inc_dot = d;
-                        inc_face = i;
-                    }
-                }
-                let base = inc_face as u32 * 4;
-                for (i, &sg) in BOX_FACES[inc_face].1.iter().enumerate() {
-                    let v = face_vertex(pos, &axes, half, sg);
-                    self.clip_in.push((v, side_bit | (base + i as u32)));
-                }
-            }
-            None => {
-                let inc_poly = if ref_is_a { &self.poly_b } else { &self.poly_a };
-                let mut inc_face = 0;
-                let mut inc_dot = f32::MAX;
-                for (i, &n) in inc_poly.face_normal.iter().enumerate() {
-                    let d = n.dot(n_ref);
-                    if d < inc_dot {
-                        inc_dot = d;
-                        inc_face = i;
-                    }
-                }
-                let (is_, ie) = {
-                    let p = inc_poly;
-                    (
-                        p.face_start[inc_face] as usize,
-                        p.face_start[inc_face + 1] as usize,
-                    )
-                };
-                for k in is_..ie {
-                    let v = inc_poly.verts[k];
-                    self.clip_in.push((v, side_bit | (k as u32)));
-                }
-            }
-        }
-
+        self.collect_incident(box_axes, ref_is_a, n_ref);
         // 参考面质心（侧面朝向判定）。
-        let mut centroid = Vec3::ZERO;
-        for &v in &self.ref_v {
-            centroid += v;
+        if !self.clip_by_side_planes(n_ref, ref_base) {
+            return false;
         }
-        centroid *= 1.0 / self.ref_v.len() as f32;
-
-        // 逐侧平面裁剪入射多边形。侧平面向量**不归一化**：保留判定
-        // （`da <= 0`）、穿越判定（`da*db < 0`）与插值参数
-        // （`t = da/(da−db)`）全部与平面向量尺度无关，故省掉每面一次
-        // sqrt + 除法（旧实现每 clip 4 次）。
-        let nref_v = self.ref_v.len();
-        for k in 0..nref_v {
-            let w0 = self.ref_v[k];
-            let w1 = self.ref_v[if k + 1 == nref_v { 0 } else { k + 1 }];
-            let e = w1 - w0;
-            let mut s = e.cross(n_ref);
-            if s.length_squared() < 1e-16 {
-                continue;
-            }
-            if s.dot(centroid - w0) > 0.0 {
-                s = -s;
-            }
-            // keep: dot(v - w0, s) <= 0
-            self.clip_out.clear();
-            let m = self.clip_in.len();
-            self.probe_clip_iters += m as u64;
-            self.probe_clip_max = self.probe_clip_max.max(m as u64);
-            for i in 0..m {
-                let (va, fa) = self.clip_in[i];
-                let (vb, fb) = self.clip_in[(i + 1) % m];
-                let da = (va - w0).dot(s);
-                let db = (vb - w0).dot(s);
-                if da <= 0.0 {
-                    self.clip_out.push((va, fa));
-                }
-                if da * db < 0.0 {
-                    let t = da / (da - db);
-                    self.probe_clip_xings += 1;
-                    self.clip_out.push((
-                        va + (vb - va) * t,
-                        feat_intersect(fa, fb, ref_base as usize + k),
-                    ));
-                }
-            }
-            core::mem::swap(&mut self.clip_in, &mut self.clip_out);
-            if self.clip_in.is_empty() {
-                return false;
-            }
-        }
-
         // 主平面过滤：保留 n_ref 方向距离 ≤ skin（+本对充气量）的点（depth = -dist）。
         let p0 = self.ref_v[0];
         self.cand.clear();

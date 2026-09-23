@@ -335,8 +335,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-narrow/src/gjk/gjk_epa.rs": {
-  "file_lines": 223,
-  "max_fn_lines": 132,
+  "file_lines": 242,
+  "max_fn_lines": 89,
   "max_type_members": 0
  },
  "crates/vxl-phys-narrow/src/gjk/gjk_hull.rs": {
@@ -395,9 +395,9 @@
   "max_type_members": 4
  },
  "crates/vxl-phys-narrow/src/sat.rs": {
-  "file_lines": 394,
-  "max_fn_lines": 203,
-  "max_type_members": 2
+  "file_lines": 421,
+  "max_fn_lines": 178,
+  "max_type_members": 6
  },
  "crates/vxl-phys-narrow/src/simd.rs": {
   "file_lines": 388,
