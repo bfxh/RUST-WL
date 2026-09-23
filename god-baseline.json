@@ -625,8 +625,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m1_islands.rs": {
-  "file_lines": 270,
-  "max_fn_lines": 178,
+  "file_lines": 274,
+  "max_fn_lines": 99,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m1_pile.rs": {

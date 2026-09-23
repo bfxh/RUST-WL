@@ -89,6 +89,108 @@ fn run_phases(clusters: usize, ticks: usize, threads: usize) -> (u64, u64, u64, 
     )
 }
 
+/// 岛级并行的内部拆分读数（T4 饱和真因）：窗口均值的规范指标 + 夹具细分 + 解算三段细分。
+/// 单独一个函数是因为它自带一整套探针读数与判读注释（~100 行），与验收主线无关。
+fn report_island_breakdown(clusters: usize, ticks: usize, hi: usize) {
+    let mut w = build(clusters, hi);
+    // **窗口累计**（本仓纪律：决定量必须窗口均值，不能用单点）：碎片雨有三个阶段
+    // —— 下落（几乎无流形）→ 落定峰值 → **睡眠塌缩**（子岛睡眠生效后流形数骤降，
+    // 实测 60 tick 末帧 11836 → 400 tick 末帧 707）⇒ 末帧单点与"全程累计均值"**都不代表场景成本**。
+    // 这里取**后半程**窗口（tick ≥ 半程）求均值，并报出窗口端点与流形区间供判读。
+    let (mut wf, mut wm, mut wp, mut wn) = (0u64, 0u64, 0u64, 0u64);
+    let (mut mf_min, mut mf_max) = (u32::MAX, 0u32);
+    let (mut it_sum, mut wm_sum) = (0u64, 0u64);
+    for t in 0..(10 + ticks) {
+        w.step();
+        if t >= (10 + ticks) / 2 {
+            let dd = &w.solver.island_diag;
+            wf += dd.build_us;
+            wm += dd.manifolds as u64;
+            wp += dd.points as u64;
+            it_sum += dd.iter_us;
+            wm_sum += dd.warm_us;
+            mf_min = mf_min.min(dd.manifolds);
+            mf_max = mf_max.max(dd.manifolds);
+            wn += 1;
+        }
+    }
+    let d = w.solver.island_diag.clone();
+    let gmax = d.group_us.iter().copied().max().unwrap_or(0);
+    let gmin = d.group_us.iter().copied().min().unwrap_or(0);
+    let gmean = if d.group_us.is_empty() {
+        0.0
+    } else {
+        d.group_us.iter().sum::<u64>() as f64 / d.group_us.len() as f64
+    };
+    let mmin = d.group_manifs.iter().copied().min().unwrap_or(0);
+    let mmax = d.group_manifs.iter().copied().max().unwrap_or(0);
+    println!(
+            "岛并行拆分（最后 tick）：岛 {} 流形 {} 组数 {}｜gather {} µs（串行）｜scope {} µs（并行）｜scatter {} µs（串行）｜点数 {}",
+            d.islands,
+            d.manifolds,
+            d.g_count,
+            d.gather_us,
+            d.scope_us,
+            d.scatter_us,
+            w.solver.last_points.0
+        );
+    println!(
+        "   gather 拆解：建岛 {} µs ｜ 按组 fill {} µs（fill 与解算同属带宽受限：
+**并行化反而更慢**，见 EXPERIMENTS C8）",
+        d.island_build_us, d.fill_us
+    );
+    println!(
+            "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
+            if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
+        );
+    // **规范指标（唯一口径）**：窗口均值（后半程 {wn} 个子步）——约束构建 CPU 合计
+    // （各组之和）÷ 同窗口的流形/点数 ⇒ ns/流形、ns/点。**跨场景/跨改动比较只用这一组**，
+    // 并同时看**窗口内的流形区间**（好判"测的是哪个阶段"）。
+    println!(
+            "   规范指标（窗口均值，后半程 {wn} 子步；流形 {mf_min}–{mf_max}）：约束构建 {:.0} µs/解算 ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {:.0} µs｜迭代 {:.0} µs",
+            wf as f64 / wn.max(1) as f64,
+            1e3 * wf as f64 / wm.max(1) as f64,
+            1e3 * wf as f64 / wp.max(1) as f64,
+            wm_sum as f64 / wn.max(1) as f64,
+            it_sum as f64 / wn.max(1) as f64
+        );
+    let mf = d.manifolds.max(1) as f64;
+    let pt = d.points.max(1) as f64;
+    println!(
+            "   规范指标（同帧）：约束构建 {} µs ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {} µs｜迭代 {} µs｜流形 {} 点 {}｜占比 构建{:.0}%/热启动{:.0}%/迭代{:.0}%",
+            d.build_us,
+            1e3 * d.build_us as f64 / mf,
+            1e3 * d.build_us as f64 / pt,
+            d.warm_us,
+            d.iter_us,
+            d.manifolds,
+            d.points,
+            100.0 * d.build_us as f64 / d.build_us.max(1) as f64,
+            100.0 * d.warm_us as f64 / d.build_us.max(1) as f64,
+            100.0 * d.iter_us as f64 / d.build_us.max(1) as f64
+        );
+    // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠)。
+    let d4 = w.solver.last_detail_us;
+    let tot_d: f64 = d4.iter().map(|&x| x as f64).sum::<f64>().max(1.0);
+    if d4[1] + d4[2] + d4[3] == 0 {
+        println!(
+                "   ⚠️ 逐岛三段细分已关（`vxl_phys_solver::ISLAND_SEG_PROBE` = {}）⇒ 下面的「约束构建/热启动/迭代」三列恒 0（默认；该探针每岛 6 次读钟）。",
+                vxl_phys_solver::ISLAND_SEG_PROBE
+            );
+    }
+    println!(
+            "   解算细分（累计 µs）：建岛 {}（{:.0}%）｜约束构建 {}（{:.0}%）｜热启动预施加 {}（{:.0}%）｜迭代扫掠 {}（{:.0}%）",
+            d4[0],
+            100.0 * d4[0] as f64 / tot_d,
+            d4[1],
+            100.0 * d4[1] as f64 / tot_d,
+            d4[2],
+            100.0 * d4[2] as f64 / tot_d,
+            d4[3],
+            100.0 * d4[3] as f64 / tot_d
+        );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let clusters: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(4000);
@@ -109,105 +211,7 @@ fn main() {
     println!("扩展比：解算 **{sp_solve:.2}×** | 总 tick {sp_total:.2}×");
     // **岛级并行的内部拆分**（T4 饱和真因）：只有当串行占比（gather+scatter）解释不了
     // 饱和时，才轮到"负载不均/调度"这些次级解释。判读：串行占比 ≈ (1 − 1/扩展比) 的上限。
-    {
-        let mut w = build(clusters, hi);
-        // **窗口累计**（本仓纪律：决定量必须窗口均值，不能用单点）：碎片雨有三个阶段
-        // —— 下落（几乎无流形）→ 落定峰值 → **睡眠塌缩**（子岛睡眠生效后流形数骤降，
-        // 实测 60 tick 末帧 11836 → 400 tick 末帧 707）⇒ 末帧单点与"全程累计均值"**都不代表场景成本**。
-        // 这里取**后半程**窗口（tick ≥ 半程）求均值，并报出窗口端点与流形区间供判读。
-        let (mut wf, mut wm, mut wp, mut wn) = (0u64, 0u64, 0u64, 0u64);
-        let (mut mf_min, mut mf_max) = (u32::MAX, 0u32);
-        let (mut it_sum, mut wm_sum) = (0u64, 0u64);
-        for t in 0..(10 + ticks) {
-            w.step();
-            if t >= (10 + ticks) / 2 {
-                let dd = &w.solver.island_diag;
-                wf += dd.build_us;
-                wm += dd.manifolds as u64;
-                wp += dd.points as u64;
-                it_sum += dd.iter_us;
-                wm_sum += dd.warm_us;
-                mf_min = mf_min.min(dd.manifolds);
-                mf_max = mf_max.max(dd.manifolds);
-                wn += 1;
-            }
-        }
-        let d = w.solver.island_diag.clone();
-        let gmax = d.group_us.iter().copied().max().unwrap_or(0);
-        let gmin = d.group_us.iter().copied().min().unwrap_or(0);
-        let gmean = if d.group_us.is_empty() {
-            0.0
-        } else {
-            d.group_us.iter().sum::<u64>() as f64 / d.group_us.len() as f64
-        };
-        let mmin = d.group_manifs.iter().copied().min().unwrap_or(0);
-        let mmax = d.group_manifs.iter().copied().max().unwrap_or(0);
-        println!(
-            "岛并行拆分（最后 tick）：岛 {} 流形 {} 组数 {}｜gather {} µs（串行）｜scope {} µs（并行）｜scatter {} µs（串行）｜点数 {}",
-            d.islands,
-            d.manifolds,
-            d.g_count,
-            d.gather_us,
-            d.scope_us,
-            d.scatter_us,
-            w.solver.last_points.0
-        );
-        println!(
-            "   gather 拆解：建岛 {} µs ｜ 按组 fill {} µs（fill 与解算同属带宽受限：
-**并行化反而更慢**，见 EXPERIMENTS C8）",
-            d.island_build_us, d.fill_us
-        );
-        println!(
-            "   每组耗时 µs: min {gmin} / 均值 {gmean:.0} / max {gmax}（离散度 {:.2}×）｜每组流形: min {mmin} / max {mmax}",
-            if gmin > 0 { gmax as f64 / gmin as f64 } else { 0.0 }
-        );
-        // **规范指标（唯一口径）**：窗口均值（后半程 {wn} 个子步）——约束构建 CPU 合计
-        // （各组之和）÷ 同窗口的流形/点数 ⇒ ns/流形、ns/点。**跨场景/跨改动比较只用这一组**，
-        // 并同时看**窗口内的流形区间**（好判"测的是哪个阶段"）。
-        println!(
-            "   规范指标（窗口均值，后半程 {wn} 子步；流形 {mf_min}–{mf_max}）：约束构建 {:.0} µs/解算 ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {:.0} µs｜迭代 {:.0} µs",
-            wf as f64 / wn.max(1) as f64,
-            1e3 * wf as f64 / wm.max(1) as f64,
-            1e3 * wf as f64 / wp.max(1) as f64,
-            wm_sum as f64 / wn.max(1) as f64,
-            it_sum as f64 / wn.max(1) as f64
-        );
-        let mf = d.manifolds.max(1) as f64;
-        let pt = d.points.max(1) as f64;
-        println!(
-            "   规范指标（同帧）：约束构建 {} µs ⇒ **{:.0} ns/流形、{:.1} ns/点**｜热启动 {} µs｜迭代 {} µs｜流形 {} 点 {}｜占比 构建{:.0}%/热启动{:.0}%/迭代{:.0}%",
-            d.build_us,
-            1e3 * d.build_us as f64 / mf,
-            1e3 * d.build_us as f64 / pt,
-            d.warm_us,
-            d.iter_us,
-            d.manifolds,
-            d.points,
-            100.0 * d.build_us as f64 / d.build_us.max(1) as f64,
-            100.0 * d.warm_us as f64 / d.build_us.max(1) as f64,
-            100.0 * d.iter_us as f64 / d.build_us.max(1) as f64
-        );
-        // 解算内部细分（累计）：(建岛, 约束构建, 热启动预施加, 迭代扫掠)。
-        let d4 = w.solver.last_detail_us;
-        let tot_d: f64 = d4.iter().map(|&x| x as f64).sum::<f64>().max(1.0);
-        if d4[1] + d4[2] + d4[3] == 0 {
-            println!(
-                "   ⚠️ 逐岛三段细分已关（`vxl_phys_solver::ISLAND_SEG_PROBE` = {}）⇒ 下面的「约束构建/热启动/迭代」三列恒 0（默认；该探针每岛 6 次读钟）。",
-                vxl_phys_solver::ISLAND_SEG_PROBE
-            );
-        }
-        println!(
-            "   解算细分（累计 µs）：建岛 {}（{:.0}%）｜约束构建 {}（{:.0}%）｜热启动预施加 {}（{:.0}%）｜迭代扫掠 {}（{:.0}%）",
-            d4[0],
-            100.0 * d4[0] as f64 / tot_d,
-            d4[1],
-            100.0 * d4[1] as f64 / tot_d,
-            d4[2],
-            100.0 * d4[2] as f64 / tot_d,
-            d4[3],
-            100.0 * d4[3] as f64 / tot_d
-        );
-    }
+    report_island_breakdown(clusters, ticks, hi);
     let (bp, np, sv, ig, misc, tt) = run_phases(clusters, ticks, hi);
     println!(
         "相位占比（threads={hi}，{ticks} tick）：宽相 {:.1}% | 窄相 {:.1}% | 求解 {:.1}% | 积分 {:.1}% | 其它 {:.1}% | 合计 {:.1} ms（求解 {:.1} ms = {:.4} ms/tick）",
