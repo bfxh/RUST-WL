@@ -7,7 +7,9 @@
 # 词表与白名单（裁决 61；crate 名豁免已按用户裁决 2026-09-12 删除）：
 #   - vehicle / module / cell / 404：独立单词（词边界）形式禁止；
 #   - vxl / vxl- 前缀：引擎自身代号，**不在扫描面**（施工令 §3 推荐解释）；
-#   - `std::cell`：Rust 标准库路径（非宿主词汇）。
+#   - `std::cell`：Rust 标准库路径（非宿主词汇）；
+#   - `module: &shader`：**wgpu 计算管线描述符的字段名**（第三方 API，非宿主词汇；
+#     2026-09-23 首片 GPU 管线落地时登记，见 crates/vxl-phys-gpu/src/probe.rs）。
 
 set -u
 ROOT="${1:-.}"
@@ -27,8 +29,8 @@ scan() { # $1 = 正则；$2 = 白名单过滤正则（-v）
 
 # vehicle：无豁免（原 crate 名已改名 vxl-phys-wheeled / vxl-phys-aero）
 scan '\bvehicle\b' '^\s*$'
-# module：无豁免
-scan '\bmodule\b' '^\s*$'
+# module：豁免 wgpu 计算管线描述符的字段名（第三方 API；见头部说明）
+scan '\bmodule\b' 'module: &shader'
 # cell：豁免 Rust 标准库路径 std::cell
 scan '\bcell\b' 'std::cell'
 # 404：无豁免

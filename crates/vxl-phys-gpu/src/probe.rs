@@ -319,8 +319,11 @@ pub fn density_on_adapter(
     // （`queue.submit` 是异步的，只给它计时会把入队当执行）。
     let per_dispatch_ms = (t_disp.elapsed().as_secs_f64() * 1e3) as f32 / reps as f32;
     let data = slice.get_mapped_range();
+    // ⚠️ 不用 `chunks_exact(4)`：clippy 1.98 的 `chunks_exact_to_as_chunks` 会在 `-D warnings`
+    //    下把 CI 三个编译器矩阵全打红（本机 1.97 看不到这条 lint）⇒ 手写下标最稳。
     let mut dens = Vec::with_capacity(n);
-    for c in data.chunks_exact(4) {
+    for i in 0..n {
+        let c = &data[i * 4..i * 4 + 4];
         dens.push(f32::from_le_bytes([c[0], c[1], c[2], c[3]]));
     }
     drop(data);

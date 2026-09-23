@@ -15,7 +15,12 @@ version = 2
 yanked = "deny"
 # 例外的写法：{ id = "RUSTSEC-XXXX-YYYY", reason = "…", expiry = "YYYY-MM-DD" }
 # —— 到期后必须重新评估，不允许无声长期豁免。
-ignore = []
+ignore = [
+    # GPU 档（2026-09-23）引入：`paste` 已停止维护（RUSTSEC-2024-0436），但**只有 `metal`
+    # （macOS 后端）用它**——依赖链 metal → wgpu-hal，Windows/Linux 构建不含该路径
+    # ⇒ 本仓当前目标平台**无暴露**。移除条件：wgpu-hal 换用 `pastey`（README 推荐的 drop-in）。
+    { id = "RUSTSEC-2024-0436", reason = "未维护；仅 metal(macOS 后端) 使用，本仓当前平台不含该路径。**复查截止 2027-03-31**（本版 cargo-deny 不支持 expiry 键，故期限记在理由内；到期必须重新评估，不允许无声长期豁免）" },
+]
 
 [licenses]
 version = 2
@@ -23,7 +28,12 @@ version = 2
 # `license-not-encountered`）——即「新增许可类型必须显式开锁并写理由」：
 #   MIT / Apache-2.0  → 本仓自身（workspace.package.license）
 #   BSL-1.0           → xxhash-rust（唯一第三方依赖）
-allow = ["MIT", "Apache-2.0", "BSL-1.0"]
+# GPU 档（2026-09-23，wgpu 树引入；四条均为宽松/公共领域级，逐条标来源）：
+#   Zlib         → foldhash（← hashbrown）        OSI + FSF 双认可
+#   CC0-1.0      → hexf-parse（← wgpu-hal）       公共领域奉献
+#   ISC          → libloading（← wgpu-hal）       MIT 同族
+#   Unicode-3.0  → unicode-ident（← proc-macro2） 宽松（Unicode 数据许可）
+allow = ["MIT", "Apache-2.0", "BSL-1.0", "Zlib", "CC0-1.0", "ISC", "Unicode-3.0"]
 confidence-threshold = 0.9
 
 [bans]
