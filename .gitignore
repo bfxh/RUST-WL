@@ -3,3 +3,5 @@
 /.cargo/config.toml
 **/*.rs.bk
 ~$*
+# Python 缓存（门脚本以 python 跑 ⇒ 会在 scripts/ 下生成 __pycache__/）
+__pycache__/
