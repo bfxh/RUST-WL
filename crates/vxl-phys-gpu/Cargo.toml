@@ -17,3 +17,5 @@ vxl-phys-core = { workspace = true }
 vxl-phys-fluid = { workspace = true }
 # facade 接线验收（`gpu_facade_probe`）要建 `World` 并登记卡上步进后端；同样只进 dev。
 vxl-phys = { workspace = true }
+# 壁面鬼影验收（`gpu_walls_probe`）要体素水槽（provider 壁面）；同样只进 dev。
+vxl-phys-terrain = { workspace = true }

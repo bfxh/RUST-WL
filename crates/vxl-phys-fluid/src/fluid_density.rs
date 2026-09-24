@@ -71,7 +71,7 @@ impl FluidSystem {
     /// 供密度轮的镜像鬼影用（流体粒子专有；边界粒子不用，见 `density_pass`）。
     /// **自由函数形态**（并行密度相位在分块闭包里调用；`scratch` 由调用方给，
     /// 并行时每块一份 ⇒ 无共享可变状态）。
-    pub(crate) fn wall_planes_in(
+    pub fn wall_planes_in(
         boundaries: &[u32],
         h: f32,
         pi: Vec3,

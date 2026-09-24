@@ -28,10 +28,12 @@ mod gpu_types;
 mod reaction;
 mod readback;
 mod stepper;
+mod walls;
 pub(crate) use self::gpu_setup::*;
 pub use self::gpu_types::*;
 pub use self::reaction::*;
 pub use self::stepper::*;
+pub use self::walls::*;
 // ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 /// `Packet` 的**缓冲清单**（`new` 的第一段：建 + 上传初值）。
@@ -440,6 +442,32 @@ impl Packet {
         vel_flat: &[f32],
         pmass: &[f32],
     ) -> Result<Self, String> {
+        Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass).map(|(p, _)| p)
+    }
+
+    /// 同 [`new`](Packet::new)，并**顺带**建好**壁面鬼影阶段**（`wall_ghost.wgsl`）：它要绑
+    /// `items`/`dens` 两把只在建包那一刻拿得到的缓冲 ⇒ 阶段对象**由调用方持有**（`Packet` 字段数
+    /// 已顶门，见 §13.7 的"棘轮管既有文件"），卡上按 tick `upload`、每子步 `encode`。
+    pub fn new_with_walls(
+        adapter_index: usize,
+        cfg: PacketCfg,
+        pos_flat: &[f32],
+        vel_flat: &[f32],
+        pmass: &[f32],
+    ) -> Result<(Self, WallStage), String> {
+        let (pkt, extra) = Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass)?;
+        let walls = WallStage::new(&pkt, extra);
+        Ok((pkt, walls))
+    }
+
+    /// 建包实体：顺带把**没被 `Packet` 持有**的两把句柄（`items`/`dens`）回给调用者（给壁面阶段）。
+    fn build(
+        adapter_index: usize,
+        cfg: PacketCfg,
+        pos_flat: &[f32],
+        vel_flat: &[f32],
+        pmass: &[f32],
+    ) -> Result<(Self, walls::ExtraBufs), String> {
         let (_, device, queue) = crate::probe::device_for(adapter_index)?;
         let n = cfg.n;
         let total = cfg.total;
@@ -458,7 +486,7 @@ impl Packet {
             cfg.h,
             vxl_phys_core::grid::GRID_MAX_BINS.min(cap_total as usize),
         );
-        Ok(Self {
+        let pkt = Self {
             device,
             queue,
             n,
@@ -498,7 +526,14 @@ impl Packet {
             bg_eos: binds.bg_eos,
             bg_int: binds.bg_int,
             readback_b: bufs.readback_b,
-        })
+        };
+        Ok((
+            pkt,
+            walls::ExtraBufs {
+                items_b: bufs.items_b,
+                dens_b: bufs.dens_b,
+            },
+        ))
     }
 
     /// 一个子步（**一条命令链**）：网格四入口 + 密度 + EOS + 力 + 积分。
@@ -510,6 +545,7 @@ impl Packet {
         cfg: &PacketCfg,
         dt_sub: f32,
         stages: u32,
+        walls: Option<&WallStage>,
     ) {
         let vmax = cfg.max_speed_frac * cfg.h / dt_sub;
         let mut ip = Vec::with_capacity(32);
@@ -535,6 +571,11 @@ impl Packet {
         }
         if stages & 0b000_1000 != 0 {
             dispatch(enc, &self.p_dens, &self.bg_dens, self.groups_n);
+            // **壁面镜像鬼影**（可选档）：按 CPU 的口径必须**紧跟密度、在 EOS 之前**
+            // （它改的是 `dens` ⇒ 压力读到的才是补过的密度）。条目为 0 时是空操作。
+            if let Some(w) = walls {
+                w.encode(enc);
+            }
         }
         if stages & 0b001_0000 != 0 {
             dispatch(enc, &self.p_eos, &self.bg_eos, self.groups_n);
@@ -600,6 +641,20 @@ impl Packet {
         substeps: usize,
         tick_readback: bool,
     ) -> TickMs {
+        self.run_stages_with(cfg, stages, ticks, substeps, tick_readback, None)
+    }
+
+    /// 同 [`run_stages`](Packet::run_stages)，但带**壁面镜像鬼影**档（`walls`）：每子步在密度之后、
+    /// EOS 之前多分派一趟 `wall_ghost.wgsl`（`WallStage::upload` 先给表）。
+    pub fn run_stages_with(
+        &mut self,
+        cfg: &PacketCfg,
+        stages: u32,
+        ticks: usize,
+        substeps: usize,
+        tick_readback: bool,
+        walls: Option<&WallStage>,
+    ) -> TickMs {
         let dt_tick = 1.0 / 60.0;
         let dt_sub = dt_tick / substeps as f32;
         let mut out = TickMs::default();
@@ -616,7 +671,7 @@ impl Packet {
                     let mut enc = self
                         .device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-                    self.encode_substep(&mut enc, cfg, dt_sub, stages);
+                    self.encode_substep(&mut enc, cfg, dt_sub, stages, walls);
                     if tick_readback && si + 1 == substeps {
                         enc.copy_buffer_to_buffer(
                             &self.pos_b,
@@ -637,7 +692,7 @@ impl Packet {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
             for _ in 0..substeps {
-                self.encode_substep(&mut enc, cfg, dt_sub, stages);
+                self.encode_substep(&mut enc, cfg, dt_sub, stages, walls);
             }
             if tick_readback {
                 enc.copy_buffer_to_buffer(

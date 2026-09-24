@@ -1080,6 +1080,7 @@ dependencies = [
  "vxl-phys",
  "vxl-phys-core",
  "vxl-phys-fluid",
+ "vxl-phys-terrain",
  "wgpu",
 ]
 
