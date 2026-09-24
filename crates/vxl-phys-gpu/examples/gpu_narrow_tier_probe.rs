@@ -13,7 +13,7 @@
 //!
 //! 运行：`cargo run --release -p vxl-phys-gpu --example gpu_narrow_tier_probe [--adapter K]`
 
-use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
+use vxl_phys::{NarrowPhase, PhysConfig, Quat, Shape, Vec3, World};
 use vxl_phys_core::narrow_tier::{NarrowSlots, NarrowTierBackend, SLOT_WORDS};
 use vxl_phys_gpu::narrow::NarrowTier;
 
@@ -390,6 +390,11 @@ fn main() {
     }
     let big = rest.iter().any(|x| x == "--m1");
     println!("== 窄相卡上档接线 vs 默认 CPU 窄相：两条链只差「谁跑窄相」==");
+    // 0) **量具自检**：先把复算表拿到引擎面前对一次（不一致就先修表，别去动核）。
+    let gauge_ok = selftest();
+    if !gauge_ok {
+        println!("  ⚠️ 复算表不可信 ⇒ 下面的「轴」诊断只能当线索，不能当判据");
+    }
     println!(
         "  {TICKS} tick | threads=8 | 场景 = {} | 判据 t=1 ≤ {T1_MAX:.0e} m",
         if big {
@@ -467,6 +472,113 @@ fn main() {
             "**金丝雀没红 ✗**"
         }
     );
+}
+
+/// **量具自检**（先证明复算表可信，再用它判案）：几条**手算得清**的盒对，各跑一次
+/// 「我的 21 轴复算表 #0」与「**引擎自己**的 `DefaultNarrowPhase::collide`（单对，同一条代码路径）」，
+/// 比双方选中的轴。判据：全一致 ⇒ 复算表可用（那 m1 档的分歧就是真差）；有分歧 ⇒ **先修复算表**。
+fn selftest() -> bool {
+    type Case<'a> = (&'a str, [f32; 3], f32, [f32; 3], f32, [f32; 4]);
+    let cases: [Case; 5] = [
+        (
+            "轴对齐·X 浅叠",
+            [0.0, 0.0, 0.0],
+            0.5,
+            [0.9, 0.0, 0.0],
+            0.4,
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        (
+            "轴对齐·Y 浅叠",
+            [0.0, 0.0, 0.0],
+            0.5,
+            [0.0, 0.95, 0.0],
+            0.4,
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        (
+            "深叠·多轴近等",
+            [0.0, 0.0, 0.0],
+            0.5,
+            [0.3, 0.3, 0.3],
+            0.4,
+            [0.0, 0.0, 0.0, 1.0],
+        ),
+        (
+            "绕 Y 小角",
+            [0.0, 0.0, 0.0],
+            0.5,
+            [0.6, 0.97, 0.0],
+            0.4,
+            [0.0, -0.06619837, 0.0, 0.9978054],
+        ),
+        (
+            "m1 复现对",
+            [14.0, 0.5, -7.0],
+            0.5,
+            [13.672637, 1.395953, -6.085008],
+            0.4,
+            [-0.0013033069, -0.06619837, 0.0007164241, 0.9978054],
+        ),
+    ];
+    let jobs = vxl_phys_core::schedule::SerialJobSystem;
+    let mut all_ok = true;
+    for (name, pa, ha, pb, hb, q) in cases {
+        let (pa, pb) = (
+            Vec3::new(pa[0], pa[1], pa[2]),
+            Vec3::new(pb[0], pb[1], pb[2]),
+        );
+        let (ha, hb) = (Vec3::splat(ha), Vec3::splat(hb));
+        let (ra, rb) = (Quat::IDENTITY, Quat::new(q[0], q[1], q[2], q[3]));
+        let mut w = World::new(cfg());
+        w.add_static(Shape::Box { half: ha }, pa, ra);
+        w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
+        let mut out = Vec::new();
+        w.narrow.collide(
+            &w.bodies,
+            &[(0, 1)],
+            &[],
+            &vxl_phys_core::interop::NoProviders,
+            &mut out,
+            &jobs,
+        );
+        let table = axes_host(pa, ra, ha, pb, rb, hb);
+        let (sep0, n0, kind0) = &table[0];
+        match out.first() {
+            Some(m) => {
+                let d = m.normal.dot(*n0);
+                let ok = d > 0.999;
+                all_ok &= ok;
+                println!(
+                    "      {name}：引擎 n={:?} | 复算#0 [{kind0}] sep={sep0:+.6e} n={:?} n·={d:+.4} ⇒ {}",
+                    [m.normal.x, m.normal.y, m.normal.z],
+                    [n0.x, n0.y, n0.z],
+                    if ok { "同轴 ✓" } else { "**不同轴 ✗**" }
+                );
+            }
+            None => {
+                let ok = *sep0 > cfg().contact_skin;
+                all_ok &= ok;
+                println!(
+                    "      {name}：引擎=无接触 | 复算#0 sep={sep0:+.6e} ⇒ {}",
+                    if ok {
+                        "一致 ✓"
+                    } else {
+                        "**不一致 ✗**"
+                    }
+                );
+            }
+        }
+    }
+    println!(
+        "     量具自检：{}",
+        if all_ok {
+            "复算表与引擎同轴 ✓（可用它判案）"
+        } else {
+            "**复算表与引擎不一致 ✗ ⇒ 先修复算表，别去动核**"
+        }
+    );
+    all_ok
 }
 
 /// 对**几何不符**的前几对，打**主机侧复算的 21 条分离轴**（按 sep 降序）——判据是：
