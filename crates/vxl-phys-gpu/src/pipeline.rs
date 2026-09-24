@@ -726,9 +726,18 @@ impl Packet {
         self.poll_wait().ok();
         rx.recv().ok();
         let data = slice.get_mapped_range();
-        let mut out = Vec::with_capacity((bytes / 4) as usize);
-        for ch in data.chunks_exact(4) {
-            out.push(f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]));
+        // 按索引解码（**别用 `chunks_exact(4)`**：CI 的 clippy 比本机新，会判
+        // "using `chunks_exact` with a constant chunk size" ⇒ 门红。`bbox.rs` 的 `decode_bb` 同写法。）
+        let n4 = (bytes / 4) as usize;
+        let mut out = Vec::with_capacity(n4);
+        for k in 0..n4 {
+            let o = k * 4;
+            out.push(f32::from_le_bytes([
+                data[o],
+                data[o + 1],
+                data[o + 2],
+                data[o + 3],
+            ]));
         }
         // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
         drop(data);
