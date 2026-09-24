@@ -33,7 +33,7 @@ fn write_voxel_bits(f: &mut impl Write, v: &vxl_phys_terrain::voxel::VoxelVolume
 
 /// 帧尾流体节：每系统「粒子数 + 逐粒子 xyz」。
 fn write_fluid_frame(f: &mut impl Write, w: &World) {
-    for (sys, _) in w.fluids() {
+    for (sys, ..) in w.fluids() {
         let ps = sys.positions();
         f.write_all(&(ps.len() as u32).to_le_bytes()).unwrap();
         for p in ps {

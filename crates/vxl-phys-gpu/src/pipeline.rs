@@ -27,9 +27,11 @@ mod gpu_setup;
 mod gpu_types;
 mod reaction;
 mod readback;
+mod stepper;
 pub(crate) use self::gpu_setup::*;
 pub use self::gpu_types::*;
 pub use self::reaction::*;
+pub use self::stepper::*;
 // ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 /// `Packet` 的**缓冲清单**（`new` 的第一段：建 + 上传初值）。

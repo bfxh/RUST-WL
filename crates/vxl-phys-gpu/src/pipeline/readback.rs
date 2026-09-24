@@ -64,6 +64,55 @@ impl Packet {
         (&self.start_b, &self.cursor_b, self.total)
     }
 
+    /// **读回卡上每子步算好的包围盒**（`bbox.wgsl` 的 `box_out`，32 B：
+    /// `min.xyz | inv | dims.xyz | total`，**后四槽是 u32 位模式**）。返回 `(min, max)`，
+    /// 其中 `max = min + dims·(1/inv)`——与卡上 `box_setup` 同一规则；归约出来的盒子**不小于**
+    /// 粒子实际范围，正合"宁多不漏"的用途（近域过滤等）。`inv ≤ 0`（坏值）⇒ `None`。
+    pub fn read_box(&self) -> Option<([f32; 3], [f32; 3])> {
+        let rb = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("p.box_rb"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("p.box.enc"),
+            });
+        enc.copy_buffer_to_buffer(self.bbox.box_out(), 0, &rb, 0, 32);
+        self.queue.submit(Some(enc.finish()));
+        self.poll_wait().ok();
+        let slice = rb.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).ok();
+        });
+        self.poll_wait().ok();
+        rx.recv().ok();
+        let data = slice.get_mapped_range();
+        // 按索引解码（**别用 `chunks_exact`**：CI 的 clippy 比本机新，会判"constant chunk size"）。
+        let f = |o: usize| f32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        let u = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        let inv = f(12);
+        // 坏值/非有限 ⇒ 认作"没有盒子"（调用方退回自己的旧值）——别把 NaN 当正数用。
+        if !inv.is_finite() || inv <= 0.0 {
+            drop(data);
+            rb.unmap();
+            return None;
+        }
+        let bin = 1.0 / inv;
+        let min = [f(0), f(4), f(8)];
+        let max = [
+            min[0] + u(16) as f32 * bin,
+            min[1] + u(20) as f32 * bin,
+            min[2] + u(24) as f32 * bin,
+        ];
+        drop(data);
+        rb.unmap();
+        Some((min, max))
+    }
+
     /// 读回**未规范化的格数**（`grid.wgsl` 的 `cap` 护栏计数）：= 0 才说明网格表和 CPU 同规则。
     pub fn read_overflow(&self) -> u32 {
         let rb = self.device.create_buffer(&wgpu::BufferDescriptor {

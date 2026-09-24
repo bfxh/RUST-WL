@@ -150,7 +150,7 @@ impl World {
     /// 流体被刚体几何约束（驻留投影），对刚体无反作用（水推箱属切片2）。
     pub fn add_fluid(&mut self, mut sys: vxl_phys_fluid::FluidSystem, boundaries: &[u32]) -> usize {
         sys.set_boundaries(boundaries);
-        self.fluids.push((sys, boundaries.to_vec()));
+        self.fluids.push((sys, boundaries.to_vec(), None));
         self.fluid_2b.push(false);
         self.fluids.len() - 1
     }

@@ -562,3 +562,43 @@ CPU 侧的可比对象先钉住：`tests/boundary_reaction_balance.rs`（成对�
 
 两句实话：选项 A 要动 facade（`world_struct.rs`/`world_step.rs`）与 fluid crate 的可见性，**本机跑不了
 CI 的 GPU 路径**（CI 无适配器）⇒ 只能靠 `gpu_body_probe` 那套对拍在本机守；这就是它存在的意义。
+
+### 13.8 facade 接线**已落地**（选项 A，2026-09-24）
+
+**四件套**：
+1. **`vxl_phys_core::interop::FluidStepper`**（新 trait，落在 core ⇒ **两端都依赖 core**，不动任何依赖边）：
+   `step` / `reactions` / `bounds` —— "推进 + 聚合整段交出去"的最小契约；实现者**自己拥有流体状态**。
+2. **`World::set_fluid_stepper(fi, st)`**（facade）：注册后该流体的 `fluid_pass` 走卡上，主机此后**只**
+   做两件事：按近域体重建边界粒子（`refresh_fluid_boundary`，只需要体姿态）、AABB 用后端报的
+   （`Packet::read_box`：**24 B 回读**卡上每子步已算好的那个，§12.4）；2a 介质采样对该流体**自动让位**
+   （主机状态不再推进）。
+3. **`GpuFluidStepper`**（GPU 档）：`Packet` + `ReactionStage` + **契约核对**（tick 必须 1/60、流体前缀与
+   段长必须与建包时一致）——不满足**显式报错**而不是静默跑歪（写半段 = 一部分边界粒子停在上一 tick 的姿态）。
+4. **逐位不变性**：未注册后端的流体一行都不走新路径（`fluid_stepper_pass` 返回 false ⇒ 原路径）。
+
+**验收（新探针 `gpu_facade_probe`：静态盒体容器 + 8³@0.05 水块 + 浮盒 ρ=400；150 tick；两条链
+**只有"谁步进"不同**）**：热身 1 tick（同 CPU 路径）⇒ B 链按同一状态建包并登记 ⇒ 之后各跑各的。
+
+| 判据 | 读数 |
+|---|---|
+| 浮盒 `y`（t=150） | CPU 1.44632 vs 卡上 1.44630（差 **1.39e-5 m**） |
+| 浮盒 `vy`（t=150） | −0.04945 vs −0.04956（相对 2.3e-3；vy 过零时逐点相对量会放大，按幅值读） |
+| 逐 tick 最坏（有载） | \|Δy\| 相对 **9.64e-6**；\|Δvy\| 绝对 **2.33e-4 m/s** |
+| t=1 / t=5 | 0.00e0 / 5.96e-7 ⇒ **接线从第一个 tick 就对** |
+| 金样门三场景（未注册后端的老路径） | 与冻结基线**逐项相同** ⇒ 加这条档位没有动既有场景 |
+
+**已知边界（写下来）**：B 链的近域盒子取自**卡上网格盒**（≈ 真实 AABB + ≤1 bin = ≤h）⇒ 恰落在那条带里的
+体，两条链的近域集可能不同（本场景容器体贴着水 ⇒ 不触发）。要完全对齐，可让 `read_box` 改报**紧凑 AABB**
+（卡上再加一趟精简归约）——进待办。
+
+**三处"为什么这么写"（都是尺寸门/clippy 逼出来的形状）**：
+- `FluidSlot` 别名放在 `world_step/fluid_stepper.rs`：裸写三元组撞 `clippy::type_complexity`，而
+  `world_struct.rs` 是**零函数**的档（加行即红）⇒ 类型必须能写在一行内、还要有个能按路径引用的名字
+  （`pub(crate) mod` + 全路径 `crate::world_step::fluid_stepper::FluidSlot`）。
+- `medium_pass` 段①（喷溅场作介质）抽成 `splat_medium_pass`：既有文件加行要配"函数变短"，
+  这一刀把 `medium_pass` **116 → 94 行**，正好换来接线那几十行。
+- `vxl-phys` 进 `[workspace.dependencies]`：它此前是 DAG 顶（无内部使用者）；GPU 档的接线探针要建
+  `World` ⇒ 按**内部**依赖登记（`deps_lock` 只数外部依赖）。
+
+**下一步**：① `read_box` 报紧凑 AABB；② 提供者壁面 SDF 分支（含密度轮镜像鬼影）；③ `integrate.wgsl`
+刚体前缀。

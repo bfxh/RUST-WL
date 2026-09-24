@@ -12,8 +12,8 @@ impl World {
         &self.fluid_boundary_covered
     }
 
-    /// 已注册流体系统及其边界 provider id（渲染读 `.0.positions()` / `.0.velocities()`）。
-    pub fn fluids(&self) -> &[(vxl_phys_fluid::FluidSystem, Vec<u32>)] {
+    /// 已注册流体系统及其边界 provider id（渲染读 `.0.positions()` / `.0.velocities()`；第三槽 = 卡上步进后端）。
+    pub fn fluids(&self) -> &[crate::world_step::fluid_stepper::FluidSlot] {
         &self.fluids
     }
 
@@ -25,8 +25,7 @@ impl World {
         self.spawn_box_debris_vel(id, min, max, density, Vec3::ZERO)
     }
 
-    /// 同 [`spawn_box_debris`](Self::spawn_box_debris)，但碎块带初速 `vel`
-    /// （冲击破坏用：碎块继承部分冲击速度 ⇒ 与冲击体的相对速度被压低）。
+    /// 同 [`spawn_box_debris`](Self::spawn_box_debris)，但碎块带初速 `vel`（冲击破坏用：碎块继承部分冲击速度）。
     pub fn spawn_box_debris_vel(
         &mut self,
         id: u32,

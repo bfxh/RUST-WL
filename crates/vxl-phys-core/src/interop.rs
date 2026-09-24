@@ -129,12 +129,7 @@ pub trait CollisionProvider {
     ) -> bool {
         let m = crate::Mat3::from_quat(rot);
         let mut any = false;
-        for k in 0..8 {
-            let local = Vec3::new(
-                if k & 1 == 0 { -half.x } else { half.x },
-                if k & 2 == 0 { -half.y } else { half.y },
-                if k & 4 == 0 { -half.z } else { half.z },
-            );
+        for (k, local) in box_corners(half).into_iter().enumerate() {
             let p = pos + m.mul_vec3(local);
             if let Some(hit) = self.closest_point(p) {
                 if hit.signed_dist < skin {
@@ -150,6 +145,19 @@ pub trait CollisionProvider {
         }
         any
     }
+}
+
+/// 盒的 8 个角点（局部系；`k` 的位 0/1/2 分别选 x/y/z 的负/正）。
+fn box_corners(half: Vec3) -> [Vec3; 8] {
+    let mut out = [Vec3::ZERO; 8];
+    for (k, c) in out.iter_mut().enumerate() {
+        *c = Vec3::new(
+            if k & 1 == 0 { -half.x } else { half.x },
+            if k & 2 == 0 { -half.y } else { half.y },
+            if k & 4 == 0 { -half.z } else { half.z },
+        );
+    }
+    out
 }
 
 /// 外部碰撞提供者集合（体素/网格/喷溅场…）：**窄相的查询面**。
@@ -277,6 +285,31 @@ pub trait ConstraintElement {
     /// 该元素当前是否有效（失效元素不参与求解，见 M1 的 `active` 门）。
     fn is_active(&self) -> bool {
         true
+    }
+}
+
+/// **流体步进后端**（门面的可选档）：把"推进一个 tick + 聚合每体反作用"整段交给实现者（如 GPU 档），
+/// 门面只保留**边界粒子重建**。实现者必须与 `FluidSystem::step` + `boundary_reactions` **同口径**，
+/// 并**自己拥有流体状态**（宿主那份只当脚手架 ⇒ 门面不得再用它做物理判断）。契约见 `PLAN-gpu.md` §13.7。
+pub trait FluidStepper {
+    /// 推进一个 tick。`pos`/`vel`/`pmass` 是**全部粒子**（流体前缀 + 边界段，同 `raw_particles` 序），
+    /// `spans` = 段表 `(体 id, 体原点, start, end)`。
+    fn step(
+        &mut self,
+        dt_tick: f32,
+        n_fluid: usize,
+        pos: &[Vec3],
+        vel: &[Vec3],
+        pmass: &[f32],
+        spans: &[(u32, Vec3, u32, u32)],
+    );
+
+    /// 最近一次 `step` 得到的每体 `(体 id, 力, 绕体原点的力矩)`。
+    fn reactions(&self) -> &[(u32, Vec3, Vec3)];
+
+    /// 流体粒子当前的 AABB（近域过滤用）；`None` = 未知 ⇒ 调用方退回主机侧那份。
+    fn bounds(&self) -> Option<(Vec3, Vec3)> {
+        None
     }
 }
 

@@ -1,6 +1,8 @@
 //! world_step：从 lib.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
+pub(crate) mod fluid_stepper;
+
 impl World {
     /// 推进一个固定 60Hz tick（内部按 config.substeps 细分，§4.2）。
     pub fn step(&mut self) {
@@ -43,7 +45,10 @@ impl World {
                 self.refresh_fluid_boundary(fi);
             }
             let dt = self.config.dt;
-            self.fluids[fi].0.step(dt, &self.providers);
+            // **卡上步进档**（§13.7 选项 A）：把重建好的边界段交给后端，主机不推进自己的流体状态。
+            if !self.fluid_stepper_pass(fi) {
+                self.fluids[fi].0.step(dt, &self.providers);
+            }
         }
     }
 
@@ -58,7 +63,9 @@ impl World {
         self.fluid_boundary_scratch.clear();
         self.fluid_boundary_covered.clear();
         self.fluid_boundary_covered.resize(self.bodies.len(), false);
-        if let Some((lo, hi)) = particle_bounds(&self.fluids[fi].0) {
+        let bb = fluid_stepper::bounds_of(&self.fluids[fi])
+            .or_else(|| particle_bounds(&self.fluids[fi].0));
+        if let Some((lo, hi)) = bb {
             let pad = self.fluids[fi].0.config().smoothing_radius;
             for i in 0..self.bodies.len() {
                 let shape = self.bodies.shape[i];
@@ -96,21 +103,9 @@ impl World {
         self.fluid_boundary_scratch = scratch;
     }
 
-    /// **介质通道**：把「介质状提供者」的状态作用到刚体上（单侧：介质 → 体）。
-    ///
-    /// **两段，物理分量不同（别混）**：
-    /// ① **喷溅场作介质**（既有，2026-09 起）：只累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`。
-    ///    密度 0 的场直接跳过；**本段是冻结行为**（PhysArena/喷溅场景的哈希以它为基准）⇒ 不动。
-    /// ② **流体作介质**（2a，2026-09-22，`ROUTE.md` §4「刚体↔液体」格）：**浮力 + 阻力**——
-    ///    浮力按阿基米德 `F = −g·ρ_med·V·frac_sub`（`frac_sub` = 采样点占用率均值，
-    ///    即"浸没体积分数"的代理），阻力同 ①。采样点 = **体心 + 4 个水平表面点**
-    ///    （单点采样在水线处是阶跃 ⇒ 盒子会抖；四点平均把水线过渡抹平）。
-    ///    ⇒ 比水轻的盒浮起、比水重的盒下沉（物理量纲齐备，不看质量以外的旋钮）。
-    ///
-    /// 确定性：场/流体按注册序、体按索引序、采样点固定序 ⇒ 全索引序可复现；
-    /// `v_rel` 取体心速度减介质流速（力矩本切片不施加，与 ① 一致）。
-    /// **零成本短路**：无流体 / 无介质密度 / 体不在介质包围盒内 ⇒ 不采样。
-    pub(crate) fn medium_pass(&mut self) {
+    /// 介质通道**段①**：喷溅场作介质（只累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`；
+    /// 密度 0 的场直接跳过）。**冻结行为**（PhysArena/喷溅场景的哈希以它为基准）⇒ 纯搬移。
+    fn splat_medium_pass(&mut self) {
         const DRAG_CD: f32 = 1.0;
         for id in 0..self.providers.len() as u32 {
             let Some(f) = self.providers.splat(id) else {
@@ -151,6 +146,25 @@ impl World {
                 self.bodies.force[i] += v_rel * (-0.5 * m.density * DRAG_CD * a * sp);
             }
         }
+    }
+
+    /// **介质通道**：把「介质状提供者」的状态作用到刚体上（单侧：介质 → 体）。
+    ///
+    /// **两段，物理分量不同（别混）**：
+    /// ① **喷溅场作介质**（既有，2026-09 起）：只累加二次阻力 `F = −½·ρ·Cd·A·|v_rel|·v_rel`。
+    ///    密度 0 的场直接跳过；**本段是冻结行为**（PhysArena/喷溅场景的哈希以它为基准）⇒ 不动。
+    /// ② **流体作介质**（2a，2026-09-22，`ROUTE.md` §4「刚体↔液体」格）：**浮力 + 阻力**——
+    ///    浮力按阿基米德 `F = −g·ρ_med·V·frac_sub`（`frac_sub` = 采样点占用率均值，
+    ///    即"浸没体积分数"的代理），阻力同 ①。采样点 = **体心 + 4 个水平表面点**
+    ///    （单点采样在水线处是阶跃 ⇒ 盒子会抖；四点平均把水线过渡抹平）。
+    ///    ⇒ 比水轻的盒浮起、比水重的盒下沉（物理量纲齐备，不看质量以外的旋钮）。
+    ///
+    /// 确定性：场/流体按注册序、体按索引序、采样点固定序 ⇒ 全索引序可复现；
+    /// `v_rel` 取体心速度减介质流速（力矩本切片不施加，与 ① 一致）。
+    /// **零成本短路**：无流体 / 无介质密度 / 体不在介质包围盒内 ⇒ 不采样。
+    pub(crate) fn medium_pass(&mut self) {
+        const DRAG_CD: f32 = 1.0;
+        self.splat_medium_pass();
 
         // ── ② 流体作介质（2a，见上方文档）：浮力（阿基米德）+ 阻力 ──
         // （2b 覆盖的体在此**让位**：其浮力/阻力由 Akinci 反作用接管，见段③）
@@ -159,7 +173,12 @@ impl World {
             return;
         }
         let g = self.config.gravity;
-        for (fi, (sys, _)) in self.fluids.iter().enumerate() {
+        for (fi, (sys, _, st)) in self.fluids.iter().enumerate() {
+            // **卡上步进的流体不参与 2a 介质采样**：主机那份状态不再推进 ⇒ 采样是陈的
+            // （§13.7 的契约）⇒ 整体让位（该流体的 2b 覆盖判据同样不适用）。
+            if st.is_some() {
+                continue;
+            }
             let pos = sys.positions();
             if pos.is_empty() {
                 continue;
@@ -235,7 +254,8 @@ impl World {
             if !self.fluid_2b.get(fi).copied().unwrap_or(false) {
                 continue;
             }
-            for &(body, f, tau) in self.fluids[fi].0.boundary_reactions() {
+            let reacts = fluid_stepper::reactions_of(&self.fluids[fi]);
+            for &(body, f, tau) in reacts {
                 let i = body as usize;
                 if i >= self.bodies.len() || !self.bodies.is_dynamic(i) || !self.bodies.awake[i] {
                     continue;

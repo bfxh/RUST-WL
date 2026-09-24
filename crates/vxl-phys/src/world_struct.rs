@@ -29,11 +29,10 @@ pub struct World {
     /// 外部碰撞提供者集合（体素/网格…；ROUTE §2.1 兼容轴）与其 AABB。
     pub(crate) providers: Providers,
     pub(crate) provider_bounds: Vec<Aabb>,
-    /// 已注册流体系统（液体域；边界 provider id 随行存档）。
-    pub(crate) fluids: Vec<(vxl_phys_fluid::FluidSystem, Vec<u32>)>,
-    /// **2b（Akinci 边界粒子）开关**，与 `fluids` 同序：true = 每 tick 按近域体重建
-    /// 边界粒子、反作用（力 + 力矩）回流；被覆盖的体由 2b 接管，2a 让位。
-    /// `add_fluid` 一律 false ⇒ **既有场景逐位不变**（2b 是显式选择档）。
+    /// 已注册流体系统（液体域；边界 provider id 随行存档；第三槽 = 可选的**卡上步进后端**，见 §13.7）。
+    pub(crate) fluids: Vec<crate::world_step::fluid_stepper::FluidSlot>,
+    /// **2b（Akinci 边界粒子）开关**，与 `fluids` 同序：true = 每 tick 按近域体重建边界粒子、
+    /// 反作用（力 + 力矩）回流；被覆盖的体由 2b 接管、2a 让位。`add_fluid` 一律 false ⇒ **既有场景逐位不变**（显式选择档）。
     pub(crate) fluid_2b: Vec<bool>,
     /// 边界粒子生成的暂存 `(体 id, 形状, 位姿)`（复用免每 tick 分配）。
     pub(crate) fluid_boundary_scratch: Vec<(u32, Shape, vxl_phys_fluid::BodyPose)>,

@@ -48,6 +48,8 @@ vxl-phys-terrain = { version = "0.1.0", path = "crates/vxl-phys-terrain" }
 wgpu = "27"
 vxl-phys-splat = { version = "0.1.0", path = "crates/vxl-phys-splat" }
 vxl-phys-replay = { version = "0.1.0", path = "crates/vxl-phys-replay" }
+# 门面（DAG 顶）：此前只有外部使用者；GPU 档的接线探针要建 `World` ⇒ 作为内部依赖登记。
+vxl-phys = { version = "0.1.0", path = "crates/vxl-phys" }
 
 [profile.release]
 lto = "thin"

@@ -15,3 +15,5 @@ vxl-phys-core = { workspace = true }
 [dev-dependencies]
 # 探针要用现有 CPU 流体做"苹果对苹果"对拍（同数学/同场景）；只进 dev ⇒ 不进发布依赖面。
 vxl-phys-fluid = { workspace = true }
+# facade 接线验收（`gpu_facade_probe`）要建 `World` 并登记卡上步进后端；同样只进 dev。
+vxl-phys = { workspace = true }

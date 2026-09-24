@@ -341,7 +341,7 @@ fn main() {
         }
         f.write_all(&bits).unwrap();
         // 流体粒子位置（帧尾；每系统：粒子数 + 位置 3f32 × n）
-        for (sys, _) in w.fluids() {
+        for (sys, ..) in w.fluids() {
             let ps = sys.positions();
             f.write_all(&(ps.len() as u32).to_le_bytes()).unwrap();
             for p in ps {
@@ -363,7 +363,7 @@ fn main() {
         cloud_boxes.len(),
         mesh_boxes.len() + 1,
         w.providers().splat(splat_id).unwrap().len(),
-        w.fluids().first().map(|(s, _)| s.positions().len()).unwrap_or(0),
+        w.fluids().first().map(|(s, ..)| s.positions().len()).unwrap_or(0),
         ms_sum / ticks as f64,
         1000.0 / (ms_sum / ticks as f64),
         ms_max,
