@@ -363,3 +363,22 @@ bind group，缓冲**只建一次**）+ `examples/gpu_tick_probe`（整 tick 计
 （挂住的那个进程还占着 `vxl_phys_gpu-*.exe` ⇒ 后续链接期 `Permission denied`）。`cargo test` 默认
 多线程跑测试 ⇒ 已用一把进程内互斥锁把 GPU 用例串行化（`bbox.rs` 的 tests 模块），否则会偶发挂住
 整轮测试、连带门链与 CI；无适配器的机器上用例会快速跳过，锁不造成等待。
+
+## 13. 边界/提供者相位（2026-09-24，第一条腿落地）
+
+**核侧其实已经是一半通的**（读码核对）：`density.wgsl` 有 `sum_b = Σ pmass_j·W`（边界粒子的密度贡献）、
+`force.wgsl` 的邻居项用 `m_j = pmass[j]` —— 也就是 2b 边界粒子的**数学已经在里面**了。
+
+**CPU 侧语义（对齐口径，逐条对应）**：网格/密度/压力/力跑**全部**粒子（邻域必须看得见边界粒子），
+**积分（含 XSPH/CFL）只跑 `0..n_fluid`**（边界粒子运动学冻结）；`boundary_pass` 是**提供者（体素/三角网/
+喷溅）壁面**的投影——**边界粒子 tank 不需要它**（体↔流体耦合走壁压 `sum_b` 自平衡）。
+
+**本轮落地**：
+- `PacketCfg::n_fluid` + `Packet.groups_fluid`：积分分派只覆盖流体前缀（此前按 `n/64` 全跑 ⇒
+  边界粒子会被积分、飘走）。纯流体场景 `n_fluid == n` ⇒ **与旧口径逐位一致**（已用漂移表回归）。
+- `FluidSystem::raw_particles() -> (pos, vel, pmass, n_fluid)`：后端/耦合用的**全粒子**视图
+  （`positions()`/`velocities()` 只给流体前缀，是给渲染/导出的）。
+
+**剩下**：① **边界粒子 tank 场景的验收**（静态盒体 → `set_boundary_particles` → 把"全部粒子 + pmass"
+喂给 `Packet` → 逐 tick 漂移表）；② **反作用回读**（2b 的 `bforce` → 体上的力/力矩，`aggregate_reactions`
+现在只在 CPU 侧）；③ 提供者壁面的 SDF 分支；④ `integrate.wgsl` 的刚体前缀。

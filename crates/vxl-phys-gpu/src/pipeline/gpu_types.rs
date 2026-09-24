@@ -4,6 +4,11 @@
 #[derive(Clone, Copy, Debug)]
 pub struct PacketCfg {
     pub n: u32,
+    /// **流体粒子数**（索引前缀；含 2b 边界粒子时 `n_fluid < n`）。
+    /// 语义与 CPU 的 `FluidSystem::substep` 逐条对应：密度/压力/力跑**全部**粒子（邻域必须看得见
+    /// 边界粒子），而**积分（含 XSPH/CFL）只跑 `0..n_fluid`**——边界粒子是运动学冻结的。
+    /// 纯流体场景令 `n_fluid == n`（此时与旧口径逐位一致）。
+    pub n_fluid: u32,
     pub total: u32,
     pub gmin: [f32; 3],
     pub inv: f32,
@@ -58,6 +63,8 @@ pub struct Packet {
     /// 活的格数（**诊断/未来用途**：`recompute_box` 时它是分配额度——真值由 GPU 侧决定）。
     pub(crate) total: u32,
     pub(crate) groups_n: u32,
+    /// 流体前缀的组数（积分相位用；见 `PacketCfg::n_fluid`）。
+    pub(crate) groups_fluid: u32,
     pub(crate) groups_total: u32,
     /// 格表：`start`（每格起点，长度 `total + 1`）与 `cursor`（`place` 用的可变游标）。
     /// 二者现在**只由 `grid.wgsl` 写**（`scan` 一次写两份，省掉每子步的 `copy_buffer_to_buffer`），

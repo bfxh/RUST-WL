@@ -137,6 +137,15 @@ impl FluidSystem {
         &self.pos[..self.n_fluid]
     }
 
+    /// **全部粒子**（含 2b 边界粒子）的 `(pos, vel, pmass, n_fluid)`——**GPU 后端/耦合**用。
+    /// 渲染与导出请走 `positions()`（只给流体前缀）。
+    ///
+    /// 语义（与 CPU 的 `substep` 逐条对应）：密度/压力/力跑**全部**粒子（邻域必须看得见边界粒子），
+    /// 而**积分（含 XSPH/CFL）只跑 `0..n_fluid`**（边界粒子是运动学冻结的）。
+    pub fn raw_particles(&self) -> (&[Vec3], &[Vec3], &[f32], usize) {
+        (&self.pos, &self.vel, &self.pmass, self.n_fluid)
+    }
+
     pub fn velocities(&self) -> &[Vec3] {
         &self.vel[..self.n_fluid]
     }

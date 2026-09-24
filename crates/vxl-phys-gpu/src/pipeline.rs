@@ -458,6 +458,7 @@ impl Packet {
             // 空转、不改变结果（4 MB 的拷贝换来"零回读"，实测净赚）。
             total: if cfg.recompute_box { cap_total } else { total },
             groups_n: n.div_ceil(64),
+            groups_fluid: cfg.n_fluid.div_ceil(64),
             groups_total: if cfg.recompute_box {
                 cap_total.div_ceil(64)
             } else {
@@ -532,7 +533,9 @@ impl Packet {
             dispatch(enc, &self.p_force, &self.bg_force, self.groups_n);
         }
         if stages & 0b100_0000 != 0 {
-            dispatch(enc, &self.p_int, &self.bg_int, self.groups_n);
+            // 积分**只跑流体前缀**：边界粒子（2b）是运动学冻结的，被积分会飘走——
+            // 与 CPU `FluidSystem::substep` 的 `for i in 0..nf` 逐条对应。
+            dispatch(enc, &self.p_int, &self.bg_int, self.groups_fluid);
         }
     }
 

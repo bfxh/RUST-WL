@@ -190,9 +190,9 @@
   "max_type_members": 14
  },
  "crates/vxl-phys-fluid/src/fluid_access.rs": {
-  "file_lines": 167,
+  "file_lines": 176,
   "max_fn_lines": 70,
-  "max_type_members": 17
+  "max_type_members": 18
  },
  "crates/vxl-phys-fluid/src/fluid_boundary.rs": {
   "file_lines": 116,
@@ -260,8 +260,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
-  "file_lines": 305,
-  "max_fn_lines": 289,
+  "file_lines": 307,
+  "max_fn_lines": 291,
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/src/bbox.rs": {
@@ -280,7 +280,7 @@
   "max_type_members": 3
  },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 761,
+  "file_lines": 764,
   "max_fn_lines": 99,
   "max_type_members": 12
  },
@@ -290,9 +290,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/src/pipeline/gpu_types.rs": {
-  "file_lines": 93,
+  "file_lines": 100,
   "max_fn_lines": 0,
-  "max_type_members": 30
+  "max_type_members": 31
  },
  "crates/vxl-phys-gpu/src/probe.rs": {
   "file_lines": 483,

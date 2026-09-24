@@ -89,6 +89,8 @@ fn main() {
     let ks = 45.0 / (std::f32::consts::PI * h.powi(6));
     let pc = PacketCfg {
         n: np as u32,
+        // 本探针的场景是纯流体（无 2b 边界粒子）⇒ 流体前缀 = 全部；接边界场景时改成真实前缀。
+        n_fluid: np as u32,
         total,
         gmin: [gmin.x, gmin.y, gmin.z],
         inv: ginv,
