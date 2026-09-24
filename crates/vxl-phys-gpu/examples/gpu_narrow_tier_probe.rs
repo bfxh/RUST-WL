@@ -329,6 +329,11 @@ fn run_pair(
     if let Some(t) = tier {
         b.set_narrow_tier(t);
     }
+    // 切档**之前**的状态快照（诊断用：流形是在这一刻的位姿上算的，事后读体态已推进过一步）。
+    let snap: (Vec<Vec3>, Vec<Quat>) = (
+        (0..a.bodies.len()).map(|i| a.bodies.position[i]).collect(),
+        (0..a.bodies.len()).map(|i| a.bodies.rot(i)).collect(),
+    );
     let mut t1 = 0.0f32;
     let mut t1_diag = String::new();
     let mut geom_bad = 0usize;
@@ -362,6 +367,7 @@ fn run_pair(
         println!("     t=1 诊断：{t1_diag}");
         if want_dump && !t1_diag.contains("几何不符 0 条") {
             dump_diff(&a, &b, 3);
+            axes_probe(&a, &b, &snap, 2);
         }
     }
     println!(
@@ -461,4 +467,118 @@ fn main() {
             "**金丝雀没红 ✗**"
         }
     );
+}
+
+/// 对**几何不符**的前几对，打**主机侧复算的 21 条分离轴**（按 sep 降序）——判据是：
+/// 卡上选中的那条，是否就是这里的第一名。不是 ⇒ 卡上的轴集/择优**真差**（查核里棱轴的构建）；
+/// 前两名只差 ~1 ulp ⇒ 刀刃（口径 B），判据该放宽。
+fn axes_probe(a: &World, b: &World, snap: &(Vec<Vec3>, Vec<Quat>), max_n: usize) {
+    let (ma, mb) = (a.manifolds(), b.manifolds());
+    let mut shown = 0usize;
+    for (x, y) in ma.iter().zip(mb.iter()) {
+        if geom_ok(x, y) {
+            continue;
+        }
+        let (ha, hb) = match (a.bodies.shape[x.a as usize], a.bodies.shape[x.b as usize]) {
+            (Shape::Box { half: h1 }, Shape::Box { half: h2 }) => (h1, h2),
+            _ => (Vec3::ZERO, Vec3::ZERO),
+        };
+        let (pa, pb) = (snap.0[x.a as usize], snap.0[x.b as usize]);
+        let (ra, rb) = (snap.1[x.a as usize], snap.1[x.b as usize]);
+        println!(
+            "       ⌖ 轴表 对 ({}, {})：切档前 a.pos={:?} half={:?} | b.pos={:?} half={:?}",
+            x.a,
+            x.b,
+            [pa.x, pa.y, pa.z],
+            [ha.x, ha.y, ha.z],
+            [pb.x, pb.y, pb.z],
+            [hb.x, hb.y, hb.z]
+        );
+        for (k, (sep, n, kind)) in axes_host(pa, ra, ha, pb, rb, hb).iter().take(5).enumerate() {
+            let cpu_hit = (n.dot(x.normal) - 1.0).abs() < 1e-4;
+            let gpu_hit = (n.dot(y.normal) - 1.0).abs() < 1e-4;
+            println!(
+                "          轴#{k} sep={sep:+.8e} n={:?} [{kind}]{}{}",
+                [n.x, n.y, n.z],
+                if cpu_hit { " ←CPU选中" } else { "" },
+                if gpu_hit { " ←卡上选中" } else { "" }
+            );
+        }
+        shown += 1;
+        if shown >= max_n {
+            break;
+        }
+    }
+}
+
+/// **主机侧复算**该对的 21 条分离轴（镜像 `sat.rs::build_axes` + 标量 sep 公式，全用 core 数学）。
+/// 返回按 `sep` 降序的 `(sep, n_a→b, 轴类)`。**这只是诊断**：真值以 CPU 窄相自己算的流形为准。
+fn axes_host(
+    pa: Vec3,
+    ra: Quat,
+    ha: Vec3,
+    pb: Vec3,
+    rb: Quat,
+    hb: Vec3,
+) -> Vec<(f32, Vec3, String)> {
+    let aa = [
+        ra.rotate_vec3(Vec3::X),
+        ra.rotate_vec3(Vec3::Y),
+        ra.rotate_vec3(Vec3::Z),
+    ];
+    let ab = [
+        rb.rotate_vec3(Vec3::X),
+        rb.rotate_vec3(Vec3::Y),
+        rb.rotate_vec3(Vec3::Z),
+    ];
+    // 面轴序照抄 BOX_FACES：+X,−X,+Y,−Y,+Z,−Z（体轴带符号）。
+    let faces = [
+        (0usize, 1.0f32),
+        (0, -1.0),
+        (1, 1.0),
+        (1, -1.0),
+        (2, 1.0),
+        (2, -1.0),
+    ];
+    let mut axes: Vec<(Vec3, String)> = Vec::new();
+    for (f, (ax, sg)) in faces.iter().enumerate() {
+        axes.push((aa[*ax] * *sg, format!("A面{f}")));
+    }
+    for (f, (ax, sg)) in faces.iter().enumerate() {
+        axes.push((ab[*ax] * *sg, format!("B面{f}")));
+    }
+    let (ea, eb) = ([aa[1], aa[2], aa[0]], [ab[1], ab[2], ab[0]]);
+    for (i, x) in ea.iter().enumerate() {
+        for (j, y) in eb.iter().enumerate() {
+            let c = x.cross(*y);
+            let l2 = c.length_squared();
+            if l2 > 1e-8 {
+                axes.push((c * (1.0 / l2.sqrt()), format!("棱{i}{j}")));
+            }
+        }
+    }
+    let mut out: Vec<(f32, Vec3, String)> = axes
+        .into_iter()
+        .filter(|(n, _)| n.length_squared() >= 0.5)
+        .map(|(n0, kind)| {
+            let ra_ = ha.x * aa[0].dot(n0).abs()
+                + ha.y * aa[1].dot(n0).abs()
+                + ha.z * aa[2].dot(n0).abs();
+            let rb_ = hb.x * ab[0].dot(n0).abs()
+                + hb.y * ab[1].dot(n0).abs()
+                + hb.z * ab[2].dot(n0).abs();
+            let ca = pa.dot(n0);
+            let cb = pb.dot(n0);
+            let sep1 = (cb - rb_) - (ca + ra_);
+            let sep2 = (ca - ra_) - (cb + rb_);
+            let (sep, n) = if sep1 >= sep2 {
+                (sep1, n0)
+            } else {
+                (sep2, -n0)
+            };
+            (sep, n, kind)
+        })
+        .collect();
+    out.sort_by(|x, y| y.0.total_cmp(&x.0));
+    out
 }
