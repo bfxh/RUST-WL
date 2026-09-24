@@ -233,6 +233,41 @@ fn onestep_ab(
     }
 }
 
+/// **②m 投影的"停滞-推回"锯齿**（**CPU 单侧**，无需显卡）：逐 tick 打印**最低那粒**的 `sdf`。
+///
+/// 机制：两侧的投影都是"**`pen > 0` 就推到 `sdf = +skin`**"（`fluid_boundary.rs:74` /
+/// `wall_ghost.wgsl:161`，同式）⇒ 静置层不是停在一个点上，而是**下沉到穿透、再被整段推回静置线**
+/// 的锯齿（振幅 ≈ `skin` = 15 mm）⇒ 这既是近壁层的保真问题，也是**所有壁面路径对照被"离散事件 ×
+/// 机器精度"支配**的根源（②e 的 1e-8 自敏感就饱和、②f 的 3.4 mm 都是它）。
+///
+/// 场景里地板顶面在 `y = 1.0` ⇒ 打印的 `y − 1.0` 就是该粒的 `sdf`（判据：应在 `0`（穿透、触发推）
+/// 与 `+skin = +0.015`（推回后）之间摆）。
+fn push_sawtooth(ids: &[u32], prov: &dyn ProviderColliders, n: usize, ticks: usize) {
+    let mut f = water();
+    f.set_boundaries(ids);
+    println!(
+        "  ── ②m **投影的停滞-推回锯齿**（CPU 单侧）：最低粒的 sdf 逐 tick（地板顶面 y=1.0）──"
+    );
+    for k in 0..ticks {
+        f.step(1.0 / 60.0, prov);
+        let ps = f.positions();
+        let (mut lo, mut at) = (f32::MAX, 0usize);
+        for (i, p) in ps.iter().take(n).enumerate() {
+            if p.y < lo {
+                lo = p.y;
+                at = i;
+            }
+        }
+        if k < 14 {
+            println!(
+                "     tick {:>2}：最低粒 #{at} sdf = {:+.5} m",
+                k + 1,
+                lo - 1.0
+            );
+        }
+    }
+}
+
 /// **②j 分相定位**（k=1，带壁面档时的逐粒密度对拍）：密度同 ⇒ 差在力/积分相；密度就不同 ⇒ 密度/镜像相。
 fn dens_split(
     adapter: usize,
@@ -391,6 +426,7 @@ fn main() {
     onestep_ab(adapter, &[v], h, prov, true, true);
     onestep_ab(adapter, &[v], h, prov, true, false);
     onestep_ab(adapter, &[v], h, prov, false, false);
+    push_sawtooth(&[v], prov, n, 60);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }

@@ -652,6 +652,28 @@ impl Packet {
         self.run_stages_with(cfg, stages, ticks, substeps, tick_readback, None)
     }
 
+    /// **跑一个子步**（`dt_sub` 由调用方给；`cfg.recompute_box` 时先刷箱子）——给"**逐子步**喂表/换档"
+    /// 这类接线与诊断用（`run_stages_with` 把子步批在一次提交里，调用方插不进手）。
+    /// 语义与 `run_stages_with(.., substeps = 1)` 相同，**只有 dt 不同**（那个固定 1/60）。
+    pub fn run_substep(
+        &mut self,
+        cfg: &PacketCfg,
+        dt_sub: f32,
+        stages: u32,
+        walls: Option<&WallStage>,
+    ) -> TickMs {
+        let mut out = TickMs::default();
+        if cfg.recompute_box {
+            out.box_ms += self.refresh_box();
+        }
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        self.encode_substep(&mut enc, cfg, dt_sub, stages, walls);
+        self.queue.submit(Some(enc.finish()));
+        out
+    }
+
     /// 同 [`run_stages`](Packet::run_stages)，但带**壁面镜像鬼影**档（`walls`）：每子步在密度之后、
     /// EOS 之前多分派一趟 `wall_ghost.wgsl`（`WallStage::upload` 先给表）。
     pub fn run_stages_with(
