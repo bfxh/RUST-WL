@@ -22,3 +22,6 @@ vxl-phys-terrain = { workspace = true }
 # 宽相上卡的对拍（`gpu_broad_probe`）要 CPU 的**同一份** `shape_aabb` 与 `GridBroadPhase` 当参考
 # （判据 = 配对集合逐位相同）⇒ 必须复用而不是各写一份；同样只进 dev。
 vxl-phys-broad = { workspace = true }
+# 窄相上卡的对拍（`gpu_narrow_probe`）要 CPU 的**同一个入口** `DefaultNarrowPhase` 当参考
+# （判据 = 逐对容差 + feature/点数逐位），并承担"卡上不接手的对"的**主机回填** —— 同一份实现，别各写一份。
+vxl-phys-narrow = { workspace = true }
