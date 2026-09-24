@@ -317,19 +317,20 @@ fn sim_report(a: &[Vec3], b: &[Vec3], c: &[Vec3], n: usize, ticks: usize) {
 /// A = 整段 CPU；B = 该流体的步进在卡上（门面每 tick 让**后端自己**收集壁面接触表——
 /// 主机那份流体状态是陈的，位置必须以卡上为准）。
 fn facade_path(adapter: usize) {
-    const TICKS: usize = 150;
+    // 跑久一点（≈6.7 s）让浮体**静下来**：要检验的预言是"浮体（不触底）的差应回到 mm 量级"
+    // —— 它成立则 1.5 cm 那笔账归给"接触/缓冲双稳放大"，不成立则壁面路径另有系统性误差。
+    const TICKS: usize = 400;
     let mut wa = World::new(PhysConfig::default());
     let ka = tank(&mut wa);
     wa.add_fluid_with_boundary_coupling(water(), &[ka]);
-    // **重物**（ρ=3000 ⇒ 沉底静置）：**不起伏** ⇒ 去掉"起伏相位差"这一项，剩下的差才是系统性的
-    // （每 tick 一张平面表 vs CPU 逐子步重查、不做同位坍缩消解）。
+    // **浮体**（ρ=800 ⇒ 约 80% 没入、**不触底**）：把"地板接触"这一项从判据里去掉。
     wa.add_dynamic(
         Shape::Box {
             half: Vec3::splat(0.1),
         },
         Vec3::new(0.0, 1.5, 0.0),
         Quat::IDENTITY,
-        3000.0,
+        800.0,
     );
     let mut wb = World::new(PhysConfig::default());
     let kb = tank(&mut wb);
@@ -340,7 +341,7 @@ fn facade_path(adapter: usize) {
         },
         Vec3::new(0.0, 1.5, 0.0),
         Quat::IDENTITY,
-        3000.0,
+        800.0,
     );
     wa.step();
     wb.step();
@@ -365,17 +366,25 @@ fn facade_path(adapter: usize) {
         println!("  ── ③ facade 路径：登记后端失败（跳过）");
         return;
     }
-    for _ in 0..TICKS {
+    // 末窗**均值**（不是单点）：浮体在极限环里（实测 A 侧 400 tick 时 vy 仍有 0.18）⇒ 单点差可能
+    // 只是相位（见 `vxl-phys-measurement-protocol` §「决定量必须窗口均值」）。
+    const WIN: usize = 40;
+    let (mut sa, mut sb) = (0.0f32, 0.0f32);
+    for k in 0..TICKS {
         wa.step();
         wb.step();
+        if k + WIN >= TICKS {
+            sa += box_yv(&wa).0;
+            sb += box_yv(&wb).0;
+        }
     }
-    let (ya, va) = box_yv(&wa);
-    let (yb, vb) = box_yv(&wb);
+    let (ya, va) = (sa / WIN as f32, box_yv(&wa).1);
+    let (yb, vb) = (sb / WIN as f32, box_yv(&wb).1);
     println!(
-        "  ── ③ **facade 路径**（provider 壁面 + 卡上步进，{TICKS} tick、下沉重物 ⇒ 静置对比）──"
+        "  ── ③ **facade 路径**（provider 壁面 + 卡上步进，{TICKS} tick、浮体 ρ=800 ⇒ 不触底）──"
     );
     println!(
-        "     重物 y {ya:.5} vs {yb:.5}（差 {:.2e} m）| vy {va:.5} vs {vb:.5}（差 {:.2e} m/s，静置应 ≈0）",
+        "     浮体 y（末 {WIN} tick 均值）{ya:.5} vs {yb:.5}（差 {:.2e} m）| 瞬时 vy {va:.5} vs {vb:.5}（差 {:.2e} m/s）",
         (ya - yb).abs(),
         (va - vb).abs()
     );
