@@ -1160,3 +1160,24 @@ bind group + 一趟提交 + 一次回读）+ 探针 `gpu_broad_probe`（参考 =
 **下一步（第二片）**：窄相上卡（固定槽 104 B/对；几何分批移植；其余对主机回填同槽 ⇒ 流形表 = 对序；
 判据 = 逐对容差 + **feature 逐位**）。**还没有做的**：宽相接进 `World`（默认档仍是 `BvhBroadPhase`；
 接入形状 = 像 `set_fluid_stepper` 那样的显式档，`BroadPhase` trait 是现成的缝）。
+
+### 17.5 第二片（窄相上卡）的**入口清单**（2026-09-25 勘察，未动代码 —— 下次从这里开工）
+
+- **对标点 = `DefaultNarrowPhase::process_pair(a, b, bodies, heightfields, providers, out)`**
+  （`crates/vxl-phys-narrow/src/pair_shaped.rs`，670 行）。`NarrowPhase::collide`（`entry.rs`）只做两件事：
+  逐对调它、并行时**按块序拼接 = pair 序**（§5 的确定性契约）⇒ **卡上要复刻的就是 `process_pair`** 及其几何助手。
+- **几何助手（按体量）**：`sat.rs` 443（盒-盒 SAT + 裁剪 + 特征号）/ `simd.rs` 387 / `support.rs` 357
+  （支持映射凸壳）/ `polytope.rs` 255（世界多面体缓存，跨帧键 = 体号+形状）/ `gjk.rs` 242 /
+  `heightfield.rs` 217 + `hf.rs` 154 / `prims.rs` 155（球-凸：`closest_point_on_poly` + **inside 分支走
+  `max_plane_d`**）。
+- **流形形状**（`types.rs`）：`Manifold { a, b, normal（a→b）, points }`；
+  `ContactPoint { point, depth, feature }`；`ContactPoints { buf: [ContactPoint; 4], len, space }`
+  —— `space` = 复合体子形状号 + 1，**不许借 `feature` 的位**（借了会让暖启动随机失效，`types.rs` 有实测留痕）；
+  `feature` 位域：bit31 = 入射侧 B、bit30 = 裁剪交点、否则入射面顶点号。
+- **卡上固定槽（104 B/对）**：`a(4) | b(4) | normal.xyz(12) | n_points(4) | 4×(point.xyz(12) | depth(4) |
+  feature(4) | pad(4))` ⇒ 4 点整、16 B 对齐 ⇒ **槽位 = 对序 ⇒ 结构天然确定**（不需要重排）。
+- **动手前要先读掉的三件**：① `process_pair` 里"形状种类 ⇒ 哪条几何路"的**分派表**（球/盒/凸壳/高度场/
+  体素/复合体）；② 各级的**法线方向与点放置约定**（`sat.rs` 的参考面选择 + 裁剪）；③ `inflate` / `out_hint`
+  是否影响判据（默认值下 `inflate = 0` ⇒ 逐位同现行）。
+- **落地顺序**：**先球×球**（约定最简）把**槽位布局 + 回读 + 判据**三件事跑通，再按分派表逐族补；
+  不支持的对**主机回填同一槽位** ⇒ 流形表 = 对序 ⇒ 判据仍可逐对比较。
