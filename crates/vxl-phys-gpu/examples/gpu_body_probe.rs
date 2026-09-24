@@ -23,7 +23,7 @@
 use vxl_phys_core::interop::NoProviders;
 use vxl_phys_core::{Quat, Shape, Vec3};
 use vxl_phys_fluid::{BodyPose, FluidConfig, FluidSystem};
-use vxl_phys_gpu::pipeline::{Packet, PacketCfg, ReactionStage};
+use vxl_phys_gpu::pipeline::{BodyStage, BodyState, Packet, PacketCfg, ReactionStage, StepCfg};
 
 /// 固定 tick 步长（与引擎同：60 Hz）。
 const DT: f32 = 1.0 / 60.0;
@@ -85,6 +85,8 @@ struct Args {
     n: usize,
     ticks: usize,
     adapter: usize,
+    /// `--card-body`：GPU 链的**体也走卡上积分**（`BodyStage`，两条积分腿同一 loop）。
+    card_body: bool,
 }
 
 fn parse_args() -> Args {
@@ -96,7 +98,12 @@ fn parse_args() -> Args {
     if let Some(k) = rest.iter().position(|x| x == "--adapter") {
         adapter = rest.get(k + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
     }
-    Args { n, ticks, adapter }
+    Args {
+        n,
+        ticks,
+        adapter,
+        card_body: rest.iter().any(|x| x == "--card-body"),
+    }
 }
 
 fn make_fluid(n: usize) -> FluidSystem {
@@ -188,6 +195,12 @@ struct Rig {
     pc: PacketCfg,
     b_cpu: Body,
     b_gpu: Body,
+    /// `--card-body` 时的**卡上体**档（阶段 + 当前状态 + 设备句柄）。
+    body_stage: Option<BodyStage>,
+    body_st: BodyState,
+    step_cfg: StepCfg,
+    dev: wgpu::Device,
+    q: wgpu::Queue,
     substeps: usize,
     n_fluid: usize,
     mass: f32,
@@ -227,6 +240,32 @@ fn build(a: &Args) -> Option<Rig> {
     };
     let pk = Packet::new(a.adapter, pc, &pos_flat, &vel_flat, &pmass).ok()?;
     let stage = ReactionStage::new(&pk);
+    // `--card-body`：另建设备 + 卡上体档（挡板是平动体 ⇒ 局部逆惯量给 0 ⇒ ω 恒 0，与宿主档同语义）。
+    let (body_stage, dev, q) = if a.card_body {
+        let (_, dev, q) = vxl_phys_gpu::probe::device_for(a.adapter).ok()?;
+        let stage = BodyStage::new(&dev);
+        (Some(stage), dev, q)
+    } else {
+        // 不开时给一份占位设备（`device_for` 只需一次；这里复用同一调用，保持字段类型一致）。
+        let (_, dev, q) = vxl_phys_gpu::probe::device_for(a.adapter).ok()?;
+        (None, dev, q)
+    };
+    let step_cfg = StepCfg {
+        gravity: Vec3::ZERO,
+        dt: 1.0 / 60.0,
+        max_lin: 1e6,
+        max_ang: 1e6,
+    };
+    let body_st = BodyState {
+        pos: b0.pos,
+        inv_mass: 1.0 / b0.mass,
+        rot: Quat::IDENTITY,
+        linvel: Vec3::ZERO,
+        angvel: Vec3::ZERO,
+        loc_inv_i: Vec3::ZERO,
+        force: Vec3::ZERO,
+        torque: Vec3::ZERO,
+    };
     Some(Rig {
         p0: fluid_momentum(&cpu),
         cpu,
@@ -239,6 +278,11 @@ fn build(a: &Args) -> Option<Rig> {
         substeps,
         n_fluid,
         mass,
+        body_stage,
+        body_st,
+        step_cfg,
+        dev,
+        q,
     })
 }
 
@@ -275,7 +319,24 @@ fn tick(r: &mut Rig, dt: f32) -> f32 {
             df = df.max((fcpu - g).length());
         }
     }
-    r.b_gpu.integrate(fg, dt);
+    // ② 卡上体的两条腿：
+    //   - 默认：宿主积分（与 CPU 链同一份 `Body::integrate` ⇒ 只比"反作用"这条路）；
+    //   - `--card-body`：**体也在卡上积分**（`BodyStage`）⇒ 卡上"反作用聚合 + 体积分"同一 loop。
+    if let Some(stage) = r.body_stage.as_mut() {
+        r.body_st.force = fg;
+        stage.upload(&r.dev, &r.q, r.step_cfg, std::slice::from_ref(&r.body_st));
+        let mut enc = r
+            .dev
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        stage.encode(&mut enc);
+        r.q.submit(Some(enc.finish()));
+        let out = stage.download(&r.dev, &r.q);
+        r.body_st = out[0];
+        r.b_gpu.pos = r.body_st.pos;
+        r.b_gpu.vel = r.body_st.linvel;
+    } else {
+        r.b_gpu.integrate(fg, dt);
+    }
     // 相对量按**当 tick 的 Σ|F_cpu|** 归一（逐粒归一会让小力处爆掉）。**空载 tick**（撞上之前 /
     // 推走之后）里力全是浮点噪声 ⇒ 比值没有意义 ⇒ 记 0，只由调用方统计**有载** tick。
     if scale < LOAD_MIN {
@@ -352,8 +413,16 @@ fn run_loop(r: &mut Rig, a: &Args) -> Run {
 fn report(a: &Args, r: &Rig, o: &Run) {
     println!("== 闭环：GPU 反作用推动刚体（开放域 ⇒ 流体 + 挡板 = **闭合系统**）==");
     println!(
-        "  {}³ 流体 {} 粒 + 挡板（厚 0.25 m，{:.0} kg）| 流体初速 {V0} m/s | {} tick",
-        a.n, r.n_fluid, r.b_cpu.mass, a.ticks
+        "  {}³ 流体 {} 粒 + 挡板（厚 0.25 m，{:.0} kg）| 流体初速 {V0} m/s | {} tick{}",
+        a.n,
+        r.n_fluid,
+        r.b_cpu.mass,
+        a.ticks,
+        if r.body_stage.is_some() {
+            "｜**体也在卡上积分**（两条积分腿同一 loop）"
+        } else {
+            ""
+        }
     );
     println!(
         "  ① 逐 tick 反作用相对差（按当 tick 的 Σ|F_cpu| 归一；只在 {} 个有载 tick 上取）：最坏 {:.2e}",
