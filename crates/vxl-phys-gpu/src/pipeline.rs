@@ -442,6 +442,7 @@ impl Packet {
         let pipes = make_pipelines(&device);
         let binds = make_bind_groups(&device, &bufs, &prm, &pipes);
         // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。
+        // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。箱子三件套仍**在主机侧**按 `grid_box` 算——卡上 setup 那条支线有开口项（`PLAN-gpu.md` §12.4）。
         let bbox = crate::bbox::BboxStage::new(&device, &bufs.pos_b, n);
         Ok(Self {
             device,
