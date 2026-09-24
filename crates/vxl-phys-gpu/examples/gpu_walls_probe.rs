@@ -131,6 +131,31 @@ fn bottom_mean_y(ps: &[Vec3], n_fluid: usize) -> f32 {
     ys[..k].iter().sum::<f32>() / k as f32
 }
 
+/// **按"到最近壁面的水平距离"分箱的平均高度**（腔体半宽 0.25 ⇒ 距离 = 0.25 − max(|x|,|z|)）。
+/// 用途：把"水位差 2.8 mm"定位到**近壁带**还是**内部**——近壁为主 ⇒ 投影/镜像的局部效应；
+/// 全箱均匀 ⇒ 鬼影的**全局补偿**偏差（它加的质量整体抬高压力）。
+fn band_profile(ps: &[Vec3], n: usize) -> [(f32, usize); 3] {
+    let mut acc = [(0.0f32, 0usize); 3];
+    for p in ps.iter().take(n) {
+        let d = 0.25 - p.x.abs().max(p.z.abs());
+        let k = if d < 0.01 {
+            0
+        } else if d < 0.05 {
+            1
+        } else {
+            2
+        };
+        acc[k].0 += p.y;
+        acc[k].1 += 1;
+    }
+    for a in acc.iter_mut() {
+        if a.1 > 0 {
+            a.0 /= a.1 as f32;
+        }
+    }
+    acc
+}
+
 /// 唯一动态体的 `(y, vy)`（两侧同序 ⇒ 索引相同）。
 fn box_yv(w: &World) -> (f32, f32) {
     let mut out = (0.0f32, 0.0f32);
@@ -364,6 +389,23 @@ fn main() {
         return;
     };
     sim_report(&a, &b, &c, n, ticks);
+    // **定位**：那 2.8 mm 落在哪些带？近壁为主 ⇒ 投影/镜像的局部效应；全箱均匀 ⇒ 鬼影的全局补偿偏差。
+    let (ba, bb) = (band_profile(&a, n), band_profile(&b, n));
+    println!("  ── ②c 水位的**按到壁面水平距离分箱**（provider 容器，{ticks} tick）──");
+    for (name, x, y) in [
+        ("近壁 <1cm", ba[0], bb[0]),
+        ("中 1–5cm", ba[1], bb[1]),
+        ("内 >5cm ", ba[2], bb[2]),
+    ] {
+        println!(
+            "     {name}：CPU {:.5}（{:>4} 粒）vs 卡上 {:.5}（{:>4} 粒）⇒ 差 **{:.2e} m**",
+            x.0,
+            x.1,
+            y.0,
+            y.1,
+            (x.0 - y.0).abs()
+        );
+    }
     // ②b 决定性对照：同一场景换 2b 容器（无 provider）⇒ 看那 2.77e-3 是不是口径 B 的宏观噪声底。
     sim_2b(adapter, substeps, h, ticks);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
