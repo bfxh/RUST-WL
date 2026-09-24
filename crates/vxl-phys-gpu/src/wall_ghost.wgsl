@@ -39,13 +39,15 @@ struct Wall {
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
-@group(0) @binding(1) var<storage, read> pos: array<f32>;
+@group(0) @binding(1) var<storage, read_write> pos: array<f32>;
 @group(0) @binding(2) var<storage, read> cell_start: array<u32>;
 @group(0) @binding(3) var<storage, read> cell_items: array<u32>;
 @group(0) @binding(4) var<storage, read_write> dens: array<f32>;
 @group(0) @binding(5) var<storage, read> ids: array<u32>;
 @group(0) @binding(6) var<storage, read> start: array<u32>;
 @group(0) @binding(7) var<storage, read> planes: array<Wall>;
+/// 速度（`vx`）：鬼影核只读密度、不碰它；**投影核**要写它（法向速度归零）。
+@group(0) @binding(8) var<storage, read_write> vx: array<f32>;
 
 fn p3(i: u32) -> vec3<f32> {
     return vec3<f32>(pos[i * 3u], pos[i * 3u + 1u], pos[i * 3u + 2u]);
@@ -98,6 +100,12 @@ fn wall_ghost(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let pj = pi - d;
                     for (var q = st; q < en; q = q + 1u) {
                         let wall = planes[q];
+                        // **鬼影的域**（与 CPU 同口径）：只对 `0 < sdf(pi) < h` 的粒子补——
+                        // 穿透（≤0）交给投影，超带（≥h）不补。（表本身放宽到 `sdf < h` 收集，
+                        // 同一张表也给投影用，见 `wall_project`。）
+                        let rel_i = pi - wall.point;
+                        let sdf_i = rel_i.x * wall.normal.x + rel_i.y * wall.normal.y + rel_i.z * wall.normal.z;
+                        if (sdf_i <= 0.0 || sdf_i >= P.h) { continue; }
                         let rel = pj - wall.point;
                         let dn = rel.x * wall.normal.x + rel.y * wall.normal.y + rel.z * wall.normal.z;
                         let g = pj - wall.normal * (2.0 * dn);
@@ -115,5 +123,56 @@ fn wall_ghost(@builtin(global_invocation_id) gid: vec3<u32>) {
     // 密度核已乘过 `mass`（流体项）⇒ 鬼影同样按 `mass` 计入（与 CPU 的 `mass·sum` 一致）。
     if (add != 0.0) {
         dens[i] = dens[i] + P.mass * add;
+    }
+}
+
+// **壁面投影**（CPU `boundary_pass` 的卡上对应物）：把穿透粒子推回静置线、法向速度归零。
+//
+// **为什么能用同一张平面表**：`sdf = (p − pt)·n` 只用到"点 + 法线"，而体素/容器壁是**分片平面**
+// ⇒ 平面在 tick 内不变 ⇒ 用**tick 起点**收集的表做投影是**精确**的（曲面壁近似；CPU 是逐子步重查）。
+// 与 CPU 的差别只有两条（都记在 `PLAN-gpu.md`）：① 逐子步重查换成了逐 tick 表；② **不做**"同位
+// 坍缩消解"那趟两两分离（那是主机侧 O(k²) 的小循环，见 `fluid_boundary.rs::separate_coincident`）。
+//
+// 时序：**每个子步的积分之后**（与 CPU `substep` 末尾一致）——所以本入口由 `encode_project` 分派。
+@compute @workgroup_size(64)
+fn wall_project(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let e = gid.x;
+    if (e >= arrayLength(&ids)) {
+        return;
+    }
+    let i = ids[e];
+    let st = start[e];
+    let en = start[e + 1u];
+    if (st >= en) {
+        return;
+    }
+    // 静置线：与 CPU 同一常数（`fluid_access.rs` 里 `skin = 0.15·h`）。
+    let skin = 0.15 * P.h;
+    var p = p3(i);
+    var v = vec3<f32>(vx[i * 3u], vx[i * 3u + 1u], vx[i * 3u + 2u]);
+    var hit = false;
+    for (var q = st; q < en; q = q + 1u) {
+        let wall = planes[q];
+        let rel = p - wall.point;
+        let sdf = rel.x * wall.normal.x + rel.y * wall.normal.y + rel.z * wall.normal.z;
+        let pen = -sdf;
+        if (pen > 0.0) {
+            // 推到 sdf = +skin（穿透量 + skin），单次上限 h（与 CPU 的 `.min(self.h)` 同）。
+            let push = min(pen + skin, P.h);
+            p = p + wall.normal * push;
+            let vn = v.x * wall.normal.x + v.y * wall.normal.y + v.z * wall.normal.z;
+            if (vn < 0.0) {
+                v = v - wall.normal * vn;
+            }
+            hit = true;
+        }
+    }
+    if (hit) {
+        pos[i * 3u] = p.x;
+        pos[i * 3u + 1u] = p.y;
+        pos[i * 3u + 2u] = p.z;
+        vx[i * 3u] = v.x;
+        vx[i * 3u + 1u] = v.y;
+        vx[i * 3u + 2u] = v.z;
     }
 }

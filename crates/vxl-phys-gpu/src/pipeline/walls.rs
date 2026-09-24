@@ -24,13 +24,70 @@ pub struct WallStage {
     start_b: wgpu::Buffer,
     planes_b: wgpu::Buffer,
     bg: wgpu::BindGroup,
+    /// **投影入口**（同一 `wall_ghost.wgsl` 的第二个入口）：每子步积分之后跑，把穿透粒子
+    /// 推回静置线、法向速度归零（CPU `substep` 末尾的 `boundary_pass` 对应物）。
+    pipe_proj: wgpu::ComputePipeline,
     entries: usize,
     cap_entries: usize,
     cap_planes: usize,
+    /// 是否投影（金丝雀/消融用；默认开）。
+    project: bool,
 }
 
 /// 每个壁面在卡上的 32 B：`point.xyz | 填充 | normal.xyz | 填充`（vec3 的 16 对齐）。
 const WALL_STRIDE: usize = 32;
+
+/// **收集壁面接触**（主机侧；provider 的 SDF 查询只有主机能做）⇒ 稀疏三段表。
+///
+/// 域：保留 `sdf < h` 的接触（**含穿透** `sdf ≤ 0`）——同一张表给两个入口用：
+/// - `wall_ghost`（密度镜像）自己按 CPU 口径过滤 `0 < sdf < h`；
+/// - `wall_project`（投影）用 `pen > 0` 那部分（CPU 侧对应 `boundary_pass`）。
+///
+/// 用 `contacts_point_boundary`（**流体边界口径**：内点鲁棒、给出"最近真表面"）：对 `sdf > 0`
+/// 它与 CPU 镜像用的 `contacts_point` 等价，对 `sdf ≤ 0` 只有它给得对（穿透粒子的投影靠它）。
+pub fn gather_wall_contacts(
+    boundaries: &[u32],
+    h: f32,
+    ps: &[Vec3],
+    providers: &dyn vxl_phys_core::interop::ProviderColliders,
+) -> (Vec<u32>, Vec<u32>, Vec<(Vec3, Vec3)>) {
+    let mut out_ids = Vec::new();
+    let mut start = vec![0u32];
+    let mut planes = Vec::new();
+    let mut scratch = Vec::new();
+    for (i, p) in ps.iter().enumerate() {
+        let mut np = 0usize;
+        for &bid in boundaries {
+            if let Some(bb) = providers.bounds(bid) {
+                let m = h;
+                if p.x < bb.min.x - m
+                    || p.x > bb.max.x + m
+                    || p.y < bb.min.y - m
+                    || p.y > bb.max.y + m
+                    || p.z < bb.min.z - m
+                    || p.z > bb.max.z + m
+                {
+                    continue;
+                }
+            }
+            scratch.clear();
+            if providers.contacts_point_boundary(bid, *p, h, &mut scratch) {
+                for c in scratch.iter() {
+                    let sdf = (*p - c.point).dot(c.normal);
+                    if sdf < h && np < 8 {
+                        planes.push((c.point, c.normal));
+                        np += 1;
+                    }
+                }
+            }
+        }
+        if np > 0 {
+            out_ids.push(i as u32);
+            start.push(planes.len() as u32);
+        }
+    }
+    (out_ids, start, planes)
+}
 
 /// 建包时**没被 `Packet` 持有**的两把缓冲句柄（`items` / `dens`）——壁面鬼影阶段要绑它们。
 /// 由 `Packet::new_with_walls` 在建包那一刻转交（见该函数注：`Packet` 字段数已顶门）。
@@ -48,13 +105,16 @@ impl WallStage {
             "p.wall_bgl",
             &[
                 (0, Kind::Uniform),
-                (1, Kind::Ro),
+                // 1 pos：鬼影只读、**投影要写** ⇒ 声明 Rw（两个入口共用同一张布局）。
+                (1, Kind::Rw),
                 (2, Kind::Ro),
                 (3, Kind::Ro),
                 (4, Kind::Rw),
                 (5, Kind::Ro),
                 (6, Kind::Ro),
                 (7, Kind::Ro),
+                // 8 vel：投影把法向速度归零（鬼影不碰）。
+                (8, Kind::Rw),
             ],
         );
         let sh = pkt
@@ -64,6 +124,7 @@ impl WallStage {
                 source: wgpu::ShaderSource::Wgsl(include_str!("../wall_ghost.wgsl").into()),
             });
         let pipe = mk_pipe(&pkt.device, &bgl, &sh, "p.wall_ghost", "wall_ghost");
+        let pipe_proj = mk_pipe(&pkt.device, &bgl, &sh, "p.wall_project", "wall_project");
         let mk = |label: &str, size: u64| {
             pkt.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -84,10 +145,17 @@ impl WallStage {
             start_b,
             planes_b,
             bg,
+            pipe_proj,
             entries: 0,
             cap_entries: 1,
             cap_planes: 1,
+            project: true,
         }
+    }
+
+    /// 开关**壁面投影**（默认开；关掉 = 只补密度、不挡穿透 ⇒ 金丝雀/消融档）。
+    pub fn set_project(&mut self, on: bool) {
+        self.project = on;
     }
 
     fn make_bg(
@@ -110,6 +178,7 @@ impl WallStage {
                 ent(5, ids_b),
                 ent(6, start_b),
                 ent(7, planes_b),
+                ent(8, &pkt.vel_b),
             ],
         })
     }
@@ -213,6 +282,16 @@ impl WallStage {
         drop(data);
         rb.unmap();
         out
+    }
+
+    /// 追加一趟**壁面投影**（**每子步积分之后**；条目为 0 时是空操作）。
+    /// 与 `encode`（鬼影）共用同一张平面表与同一张 bind group。
+    pub fn encode_project(&self, enc: &mut wgpu::CommandEncoder) {
+        if self.entries == 0 || !self.project {
+            return;
+        }
+        let groups = (self.entries as u32).div_ceil(64);
+        dispatch(enc, &self.pipe_proj, &self.bg, groups);
     }
 
     /// 追加一趟鬼影分派（**必须排在密度相位之后、EOS 之前**；条目为 0 时是空操作）。

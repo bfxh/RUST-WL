@@ -587,6 +587,11 @@ impl Packet {
             // 积分**只跑流体前缀**：边界粒子（2b）是运动学冻结的，被积分会飘走——
             // 与 CPU `FluidSystem::substep` 的 `for i in 0..nf` 逐条对应。
             dispatch(enc, &self.p_int, &self.bg_int, self.groups_fluid);
+            // **壁面投影**（可选档）：CPU `substep` 末尾的 `boundary_pass` 对应物——
+            // 按同一张平面表把穿透粒子推回静置线、法向速度归零。无壁面档时是空操作。
+            if let Some(w) = walls {
+                w.encode_project(enc);
+            }
         }
     }
 
