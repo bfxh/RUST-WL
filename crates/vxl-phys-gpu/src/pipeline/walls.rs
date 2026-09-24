@@ -39,6 +39,10 @@ const WALL_STRIDE: usize = 32;
 
 /// **收集壁面接触**（主机侧；provider 的 SDF 查询只有主机能做）⇒ 稀疏三段表。
 ///
+/// ⚠️ **与 `FluidSystem::gather_wall_contacts` 是同一实现的两份**（本 crate 对 `vxl-phys-fluid`
+/// 只有 **dev-dependency** ⇒ lib 侧不能转发）⇒ **改一处要改两处**。探针走 fluid 那份（facade 将来
+/// 也用那份）；本函数留给"只想用 GPU crate、不引 fluid"的调用方。
+///
 /// 域：保留 `sdf < h` 的接触（**含穿透** `sdf ≤ 0`）——同一张表给两个入口用：
 /// - `wall_ghost`（密度镜像）自己按 CPU 口径过滤 `0 < sdf < h`；
 /// - `wall_project`（投影）用 `pen > 0` 那部分（CPU 侧对应 `boundary_pass`）。

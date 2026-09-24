@@ -1,6 +1,8 @@
 //! fluid_density：从 lib.rs 按域拆出（纯搬移，语义未改）。
 use super::*;
 
+mod wall_gather;
+
 impl FluidSystem {
     /// 密度：ρ_i = m·(W(0) + Σ_j W(r_ij) + Σ_ghost W)（poly6，含自身项）。
     /// 边界镜像鬼影：壁邻粒子（0 < sdf < h）把真实邻居关于壁面（接触点 +
@@ -120,7 +122,6 @@ impl FluidSystem {
     /// （无共享可变状态）⇒ 结果与串行**逐位一致**。
     pub(crate) fn density_pass_parallel(&mut self, providers: &dyn ProviderColliders) {
         let nf = self.n_fluid;
-        let nt = self.pos.len();
         let threads = self.cfg.threads.max(1);
         {
             let Self {
@@ -186,41 +187,49 @@ impl FluidSystem {
             });
         }
         // 边界粒子（2b）：同一式、只吃流体邻居（见串行路径注）。
-        if nt > nf {
-            let Self {
-                pos,
-                dens,
-                pmass,
-                grid,
-                h2,
-                k6,
-                w0,
-                ..
-            } = self;
-            let (h2, k6, w0) = (*h2, *k6, *w0);
-            let nb = nt - nf;
-            let per = nb.div_ceil(threads).max(1);
-            std::thread::scope(|s| {
-                for (ci, d_out) in dens[nf..].chunks_mut(per).enumerate() {
-                    let base = nf + ci * per;
-                    let (pos, pmass, grid) = (&*pos, &*pmass, &*grid);
-                    s.spawn(move || {
-                        for (k, d_out) in d_out.iter_mut().enumerate() {
-                            let i = base + k;
-                            let mut sum = 0.0f32;
-                            grid.for_neighbors_in(pos, h2, i, |j, _d, r2| {
-                                if j >= nf {
-                                    return;
-                                }
-                                let t = h2 - r2;
-                                sum += pmass[j] * (k6 * t * t * t);
-                            });
-                            *d_out = pmass[i] * w0 + sum;
-                        }
-                    });
-                }
-            });
+        self.density_boundary_pass(nf, threads);
+    }
+
+    /// **边界粒子（2b）的密度**（并行档）：与流体段无关的另一批索引 ⇒ 单独一趟。
+    /// 只吃**流体**邻居（Akinci 口径，理由见 `density_pass` 的注）。
+    fn density_boundary_pass(&mut self, nf: usize, threads: usize) {
+        let nt = self.pos.len();
+        if nt <= nf {
+            return;
         }
+        let Self {
+            pos,
+            dens,
+            pmass,
+            grid,
+            h2,
+            k6,
+            w0,
+            ..
+        } = self;
+        let (h2, k6, w0) = (*h2, *k6, *w0);
+        let nb = nt - nf;
+        let per = nb.div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            for (ci, d_out) in dens[nf..].chunks_mut(per).enumerate() {
+                let base = nf + ci * per;
+                let (pos, pmass, grid) = (&*pos, &*pmass, &*grid);
+                s.spawn(move || {
+                    for (k, d_out) in d_out.iter_mut().enumerate() {
+                        let i = base + k;
+                        let mut sum = 0.0f32;
+                        grid.for_neighbors_in(pos, h2, i, |j, _d, r2| {
+                            if j >= nf {
+                                return;
+                            }
+                            let t = h2 - r2;
+                            sum += pmass[j] * (k6 * t * t * t);
+                        });
+                        *d_out = pmass[i] * w0 + sum;
+                    }
+                });
+            }
+        });
     }
 
     pub(crate) fn wall_planes(

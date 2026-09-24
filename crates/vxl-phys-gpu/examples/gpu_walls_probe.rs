@@ -20,7 +20,7 @@
 use vxl_phys::{PhysConfig, Vec3, World};
 use vxl_phys_core::interop::ProviderColliders;
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
-use vxl_phys_gpu::pipeline::{gather_wall_contacts, Packet, PacketCfg, WallStage};
+use vxl_phys_gpu::pipeline::{Packet, PacketCfg, WallStage};
 
 const SPACING: f32 = 0.05;
 
@@ -159,7 +159,7 @@ fn chain_sim(s: &Sim, prov: &dyn ProviderColliders) -> Option<Vec<Vec3>> {
             let ps: Vec<Vec3> = (0..gp.len() / 3)
                 .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
                 .collect();
-            let (i2, st, pl) = gather_wall_contacts(&s.ids, s.h, &ps, prov);
+            let (i2, st, pl) = FluidSystem::gather_wall_contacts(&s.ids, s.h, &ps, prov);
             walls.upload(&pk, &i2, &st, &pl);
             w_arg = Some(&walls);
         }
@@ -199,7 +199,7 @@ fn main() {
     let cfg = make_cfg(&sys);
     let ps: Vec<Vec3> = sys.positions().to_vec();
     let prov = w.providers();
-    let (i2, st, pl) = gather_wall_contacts(&[v], h, &ps, prov);
+    let (i2, st, pl) = FluidSystem::gather_wall_contacts(&[v], h, &ps, prov);
     let Some(gpu_with) = dens_on_gpu(
         &init,
         cfg,
