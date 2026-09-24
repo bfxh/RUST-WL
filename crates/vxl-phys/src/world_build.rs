@@ -13,9 +13,8 @@ impl World {
         fields.add(Box::new(GravityField { g: config.gravity }));
         let skin = config.contact_skin;
         let mut bodies = BodySet::new();
-        // 配置里的摩擦/恢复 = 默认材质（槽 0）；逐材质用 add_material 覆盖。
-        bodies.materials[0] = Material::new(config.friction, config.restitution);
-        // §6 调度注入：threads ≤ 1 → 串行（默认，回归对照基准）。
+        bodies.materials[0] = Material::new(config.friction, config.restitution); // 默认材质（槽 0；逐材质用 add_material 覆盖）
+                                                                                  // §6 调度注入：threads ≤ 1 → 串行（默认，回归对照基准）。
         let jobs: Box<dyn JobSystem> = if config.threads > 1 {
             Box::new(ScopedPool::new(config.threads))
         } else {
@@ -23,7 +22,7 @@ impl World {
         };
         Self {
             broad,
-            narrow: DefaultNarrowPhase::new(skin),
+            narrow: DefaultNarrowPhase::new(skin).into(),
             solver: ImpulseSolver::new(skin),
             joints: JointSet::default(),
             config,

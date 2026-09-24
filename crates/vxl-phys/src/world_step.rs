@@ -2,6 +2,7 @@
 use super::*;
 
 pub(crate) mod fluid_stepper;
+pub(crate) mod narrow_tier;
 
 impl World {
     /// 推进一个固定 60Hz tick（内部按 config.substeps 细分，§4.2）。
@@ -305,16 +306,19 @@ impl World {
             // 速度充气视野（见 `narrow::DefaultNarrowPhase::set_predict_dt`）：
             // 预测时长 = **距下一次检测的间隔**（复用流形 ⇒ 整个 tick；否则不预测）。
             // 关闭检测复用时恒传 0 ⇒ 现行行为逐位不变。
-            self.narrow
-                .set_predict_dt(if reuse_manifolds { self.config.dt } else { 0.0 });
-            self.narrow.collide(
-                &self.bodies,
-                &pairs,
-                self.terrain.slice(),
-                &self.providers,
-                &mut self.manifolds,
-                self.jobs.as_ref(),
-            );
+            let predict_dt = if reuse_manifolds { self.config.dt } else { 0.0 };
+            self.narrow.set_predict_dt(predict_dt);
+            // 卡上窄相档（§17.9）：未注册 / 跑不通 / `predict_dt > 0` ⇒ 整趟回退 CPU（不半途混用）。
+            if !self.narrow_tier_pass(&pairs, predict_dt) {
+                self.narrow.collide(
+                    &self.bodies,
+                    &pairs,
+                    self.terrain.slice(),
+                    &self.providers,
+                    &mut self.manifolds,
+                    self.jobs.as_ref(),
+                );
+            }
             self.timings.narrowphase_us += vxl_phys_core::probe::us(t0);
             self.pairs = pairs;
         }

@@ -15,27 +15,21 @@
 
 use crate::probe::device_for;
 
+// 布局常量**只有一份**：定义在 `vxl_phys_core::narrow_tier`（卡上档的接口契约），这里重导出
+// ⇒ 探针/门面写 `vxl_phys_gpu::narrow::SLOT_WORDS` 与写 core 那份是同一个值。
+pub use vxl_phys_core::narrow_tier::{
+    flat_pairs, BODY_WORDS, KIND_BOX, KIND_NONE, KIND_SPHERE, NOT_HANDLED, SLOT_BYTES, SLOT_WORDS,
+};
+
 const WG: u32 = 64;
-/// 槽字数（u32）：`a|b|normal.xyz|count` + 4×`(point.xyz|depth|feature)` = 6 + 20。
-pub const SLOT_WORDS: usize = 26;
-/// 槽字节数（104 B/对）。**与 `narrow.wgsl` 的 `SLOT_WORDS` 必须同值**。
-pub const SLOT_BYTES: usize = SLOT_WORDS * 4;
-/// 逐体输入字数（48 B/体）：`pos.xyz | rot.xyzw | kind | p0 | p1 | p2 | pad`。
-pub const BODY_WORDS: usize = 12;
-/// 体记录里 `kind` 的字偏移（裸整数：1 = 球、0 = 本档不接手）。
+/// 体记录里 `kind` 的字偏移（裸整数：1 = 球、2 = 盒、0 = 本档不接手）。
 pub const BODY_KIND_AT: usize = 7;
-/// 体记录里 `p0`（形状参数 0；球 = 半径）的字偏移（f32 位模式）。
+/// 体记录里 `p0`（形状参数 0）的字偏移（f32 位模式）。
 pub const BODY_P0_AT: usize = 8;
-/// `count` 哨兵：本档不接手该对 ⇒ 调用方按**主机回填**处理（别当成"无流形"）。
-pub const NOT_HANDLED: u32 = u32::MAX;
-/// 体种类：球（`p0` = 半径）。其余形状一律 0 = 不接手（留给后续族按分派表补）。
-pub const KIND_SPHERE: u32 = 1;
-/// 体种类：盒（`p0..p2` = `half.xyz`；`rot` 走记录里的四元数）。
-pub const KIND_BOX: u32 = 2;
-/// 护栏：体数/对数上限（超了直接报错，让调用方回退 CPU）。
-const MAX_ITEMS: u32 = 1 << 22;
 /// 诊断字个数（`[0]` = 裁剪多边形越界次数）。
 pub const DIAG_WORDS: usize = 2;
+/// 护栏：体数/对数上限（超了直接报错，让调用方回退 CPU）。
+const MAX_ITEMS: u32 = 1 << 22;
 
 /// 逐对槽（主机侧视图 = 卡上 26 字的**逐字镜像** ⇒ 比较与装配都在同一份数据上做）。
 #[derive(Clone, Copy, Debug)]
@@ -360,5 +354,25 @@ impl NarrowTier {
         drop(data);
         self.bufs.rb.unmap();
         Ok(NarrowRun { slots: out, diag })
+    }
+}
+
+/// **卡上档的接口实现**（`vxl_phys_core::narrow_tier` 的契约）：把逐槽的 `Slot` 摊成**裸字表**，
+/// 门面那边只认字、不认几何类型 ⇒ 卡上档不把任何物理知识带进 core。
+impl vxl_phys_core::narrow_tier::NarrowTierBackend for NarrowTier {
+    fn narrow_run(
+        &self,
+        bodies: &[u32],
+        pairs: &[u32],
+    ) -> Result<vxl_phys_core::narrow_tier::NarrowSlots, String> {
+        let r = self.run(bodies, pairs)?;
+        let mut words = Vec::with_capacity(r.slots.len() * SLOT_WORDS);
+        for s in &r.slots {
+            words.extend_from_slice(&s.words);
+        }
+        Ok(vxl_phys_core::narrow_tier::NarrowSlots {
+            words,
+            diag: r.diag,
+        })
     }
 }

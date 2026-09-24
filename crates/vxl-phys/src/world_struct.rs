@@ -7,7 +7,7 @@ pub struct World {
     pub terrain: TerrainSet,
     /// 宽相（§2.3 主路径 = 增量 BVH；可用 `with_broadphase` 换网格等实现）。
     pub broad: Box<dyn BroadPhase>,
-    pub narrow: DefaultNarrowPhase,
+    pub narrow: crate::world_step::narrow_tier::NarrowSlot, // 宿主窄相 + 可选卡上档（§17.9）
     pub solver: ImpulseSolver,
     /// **关节约束族**（§2.5）：接触解算之后、位置积分之前整帧求解一遍；
     /// 空集时零成本（`solve` 首行短路）。
