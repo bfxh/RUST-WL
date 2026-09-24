@@ -253,7 +253,7 @@ fn make_probe(
     });
     let box_out_b = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("bbox.box_out"),
-        size: 32,
+        size: 48, // 8 槽（uniform 形）+ 3 槽紧凑 `hi`（近域过滤用的真 AABB，见 `bbox.wgsl` 头注）
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST,
@@ -266,7 +266,7 @@ fn make_probe(
     });
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("bbox.readback"),
-        size: 56,
+        size: 72, // bb（24 B）+ box_out（48 B）
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -310,9 +310,9 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         cp.set_bind_group(0, &pipes.bg, &[]);
         cp.dispatch_workgroups(1, 1, 1);
     }
-    // 回读布局：bb 0..24 | box_out 24..56
+    // 回读布局：bb 0..24 | box_out 24..72
     enc.copy_buffer_to_buffer(&bb_b, 0, &readback, 0, 24);
-    enc.copy_buffer_to_buffer(&box_out_b, 0, &readback, 24, 32);
+    enc.copy_buffer_to_buffer(&box_out_b, 0, &readback, 24, 48);
     queue.submit(Some(enc.finish()));
 
     let slice = readback.slice(..);
@@ -422,7 +422,7 @@ impl BboxStage {
         });
         let box_out_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bbox.stage.box_out"),
-            size: 32,
+            size: 48, // 同探针：8 槽 uniform 形 + 3 槽紧凑 `hi`
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_SRC
                 | wgpu::BufferUsages::COPY_DST,

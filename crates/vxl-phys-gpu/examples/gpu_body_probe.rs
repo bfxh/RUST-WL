@@ -405,6 +405,27 @@ fn report(a: &Args, r: &Rig, o: &Run) {
         r.b_gpu.vel.x,
         (r.b_cpu.vel.x - r.b_gpu.vel.x).abs() / r.b_cpu.vel.x.abs().max(1e-30)
     );
+    // ⑤ 卡上报的**紧凑包围盒** vs 主机按卡上状态算的 AABB —— 门面的近域过滤用的就是它。
+    // ⚠️ **差不为 0 是对的**：卡上盒子是**上一子步起点**的（`box_setup` 在每子步开头跑），
+    // 而这里比的是末态 ⇒ 期望差 ≈ 每子步行距 `|v|·dt_sub`（本场景 0.8 m/s × 1/240 ≈ 3.3 mm ✓ 实测 3–4 mm）。
+    // 近域过滤自带 `pad = h = 0.1 m` 的余量 ⇒ 这点滞后盖得住（要零差就在 `step` 末再刷一次盒子）。
+    let (gp, _) = r.pk.read_state();
+    let nb = r.gpu.raw_particles().0.len() - r.n_fluid;
+    let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for k in 0..(r.n_fluid + nb) {
+        let p = Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]);
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let d = match r.pk.read_box() {
+        Some((l, h)) => format!(
+            "min 差 {:.2e} m / max 差 {:.2e} m",
+            (lo - Vec3::new(l[0], l[1], l[2])).length(),
+            (hi - Vec3::new(h[0], h[1], h[2])).length()
+        ),
+        None => "（未取到）".to_string(),
+    };
+    println!("  ⑤ 卡上紧凑盒 vs 主机算的 AABB：{d}");
 }
 
 fn main() {

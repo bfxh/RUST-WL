@@ -28,6 +28,8 @@
 /// setup 的产物（**按 uniform 的动态字段排布**，主机侧用 `copy_buffer_to_buffer` 逐字节搬进 uniform）：
 /// `[min.x, min.y, min.z, inv, dims.x, dims.y, dims.z, total]`——后四槽是 **u32 位模式**（存在
 /// `array<u32>` 里，前四槽的 f32 也用 bitcast 存）⇒ 搬运是逐字节的，位模式原样落地 ✓。
+/// **另加 8..10 槽 = 紧凑 `hi`**（位模式）：网格盒的 max 被 `dims` 上取整放大过（最多 1 bin），
+/// 而近域过滤要的是**真 AABB** ⇒ 精确的 max 单独留一份（`min` 槽本来就是精确的）。
 @group(0) @binding(3) var<storage, read_write> box_out: array<u32>;
 /// `(h, max_bins, 0, 0)`。
 @group(0) @binding(4) var<uniform> sp: vec4<f32>;
@@ -99,6 +101,10 @@ fn box_setup() {
     box_out[5] = dims.y;
     box_out[6] = dims.z;
     box_out[7] = dims.x * dims.y * dims.z;
+    // 紧凑 `hi`（见头注）：近域过滤按真 AABB 判，与 CPU 侧 `particle_bounds` 同口径。
+    box_out[8] = bitcast<u32>(hi.x);
+    box_out[9] = bitcast<u32>(hi.y);
+    box_out[10] = bitcast<u32>(hi.z);
 }
 
 /// 全位置 min/max 归约（原子；跨组也用同一个数组 ⇒ 单次 dispatch 即可）。
