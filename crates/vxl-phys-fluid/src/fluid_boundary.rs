@@ -87,10 +87,15 @@ impl FluidSystem {
                 pushed.push((i, n_sum));
             }
         }
-        // 同位坍缩消解：仅在本子步被投影粒子间做最小间距（r_min = 0.2h，
-        // 远小于静置间距，常态零触发）。高索引者沿 n_sum 内移——投影把
-        // 深穿粒子逐轴推到平面交集点，法线和指向流体侧，一步拉开后
-        // 常规压强接管。位移 ≤ r_min，不注入爆发能量。
+        // 同位坍缩消解（见 `separate_coincident`）。
+        self.separate_coincident(&pushed);
+    }
+
+    /// 同位坍缩消解：仅在本子步被投影粒子间做最小间距（r_min = 0.2h，
+    /// 远小于静置间距，常态零触发）。高索引者沿 n_sum 内移——投影把
+    /// 深穿粒子逐轴推到平面交集点，法线和指向流体侧，一步拉开后
+    /// 常规压强接管。位移 ≤ r_min，不注入爆发能量。
+    fn separate_coincident(&mut self, pushed: &[(usize, Vec3)]) {
         let r_min = 0.2 * self.h;
         for a in 0..pushed.len() {
             let (ia, na) = pushed[a];
@@ -111,5 +116,12 @@ impl FluidSystem {
             }
             self.pos[ia] = pa;
         }
+    }
+
+    /// **边界段表**（只读；GPU 档与耦合回路用）：段序 = 生成序（确定性），每项
+    /// `(体 id, 体原点, 起始索引, 结束索引)`。`[start, end)` 即该体的边界粒子区间，
+    /// 也正是 `boundary_reactions()` 的聚合单位 ⇒ GPU 侧按同一段表聚合即可**逐体对拍**。
+    pub fn boundary_spans(&self) -> &[(u32, Vec3, u32, u32)] {
+        &self.spans
     }
 }

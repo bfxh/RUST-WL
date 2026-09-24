@@ -24,9 +24,11 @@ use wgpu::util::DeviceExt;
 // ── 按域拆出的子模块（子目录 pipeline/）
 mod gpu_setup;
 mod gpu_types;
+mod reaction;
 mod readback;
 pub(crate) use self::gpu_setup::*;
 pub use self::gpu_types::*;
+pub use self::reaction::*;
 // ↑ 子模块顶层条目再导出（impl-only 模块不入 glob，避免 unused）
 
 /// `Packet` 的**缓冲清单**（`new` 的第一段：建 + 上传初值）。

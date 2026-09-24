@@ -11,7 +11,7 @@
 
 use vxl_phys_core::{Quat, Shape, Vec3};
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
-use vxl_phys_gpu::pipeline::{Packet, PacketCfg};
+use vxl_phys_gpu::pipeline::{Packet, PacketCfg, ReactionStage};
 
 /// `--tank` 的静态盒体（地板 + 四壁）：按"表面采样 + 两层内移"变成 2b 边界粒子
 /// （壁厚取 2×晶格间距 ⇒ 采成实心；四壁贴着流体块的 x/z 边界，地板顶面 = 流体底面）。
@@ -239,28 +239,11 @@ fn main() {
             }
         }
     }
-    // ③b **反作用回读**验收（`--tank`）：GPU 的边界受力 vs CPU 的 `boundary_forces()`——
-    // 同一末态、同一子步（两边都停在末子步边界）⇒ 只该差浮点累加序（`PLAN-gpu.md` §13.2）。
+    // ③b **反作用回读 + 聚合**验收（`--tank`）：GPU 逐粒 / 每体（卡上聚合）vs CPU 的
+    // `boundary_forces()` / `boundary_reactions()`——同一末态、同一子步（两边都停在
+    // 末子步边界）⇒ 只该差浮点累加序（`PLAN-gpu.md` §13.2 / §13.3）。
     if tank {
-        let gf = pk.read_boundary_forces(n_fluid as u32);
-        let cf = f.boundary_forces();
-        let (mut mx, mut scale) = (0.0f32, 0.0f32);
-        let (mut sc, mut sg) = (Vec3::ZERO, Vec3::ZERO);
-        for (k, b) in cf.iter().enumerate() {
-            let g = Vec3::new(gf[k * 6], gf[k * 6 + 1], gf[k * 6 + 2]);
-            mx = mx.max((*b - g).length());
-            scale += b.length();
-            sc += *b;
-            sg += g;
-        }
-        println!(
-            "  ├ 反作用（{} 粒边界）：max |ΔF| = {mx:.3e} N（相对 Σ|F_cpu| = {:.2e}）| ΣF：CPU {:.4e} N vs GPU {:.4e} N（差 {:.2e}）",
-            cf.len(),
-            mx / scale.max(1e-30),
-            sc.length(),
-            sg.length(),
-            (sc - sg).length()
-        );
+        report_reactions(&pk, &f, n_fluid as u32);
     }
     // ④ CPU 引擎的相位计时（**放在漂移表之后**：它会把状态推进，放在前面会让对照组错位一个 tick
     //    ——踩过：那样 GPU 全程滞后一 tick，漂移表里表现为"刚性平移 + 精确 g·Δt"的假信号；
@@ -387,4 +370,18 @@ fn main() {
             " ⚠️ 非 0 ⇒ 表未规范化（箱内粒子过挤，换箱或调 cap）"
         }
     );
+}
+
+/// `--tank` 的③b：反作用验收——GPU 逐粒回读 + **卡上每体聚合**，与 CPU 的
+/// `boundary_forces()` / `boundary_reactions()` 对拍（判据与读数口径见 `PLAN-gpu.md` §13.3）。
+fn report_reactions(pk: &Packet, f: &FluidSystem, n_fluid: u32) {
+    let mut stage = ReactionStage::new(pk);
+    let text = stage.report(
+        pk,
+        n_fluid,
+        f.boundary_forces(),
+        f.boundary_reactions(),
+        f.boundary_spans(),
+    );
+    print!("{text}");
 }
