@@ -314,3 +314,35 @@ bind group，缓冲**只建一次**）+ `examples/gpu_tick_probe`（整 tick 计
 - **分派上限**：单维 ≤65535 工作组 ⇒ 当前 `n ≤ 4.19M`；10M 档要二维分派。
 - **传输**：耦合回读已实测（125k 0.99 ms / 301k 2.59 ms）——它现在是"第二根杠杆"里的**小头**
   （因为每 tick 只回读一次），大头是**上传**（本片常驻 ⇒ 零上传）。
+
+## 12.4 每子步包围盒（2026-09-24，§12.3 第一条**已闭合**）
+
+**口径**：CPU 引擎在 `substep()` 开头就 `UniformGrid::rebuild(&pos, h)` ⇒ **每子步**一次；GPU 必须同频。
+
+**实现**（三片，各自可验）：
+1. `vxl_phys_core::grid::grid_box` —— 箱子规则**单一来源**（`bin` 从 `h` 起、`dims = floor(ext/bin)+1`
+   钳 16384、总格数超预算翻倍；`GRID_MAX_BINS` 与 `GRID_DIM_MAX` 随之上移）。CPU 侧 `rebuild` 改调它，
+   fluid 侧一条测试锁"两侧逐位相同"。
+2. `bbox.wgsl` + `bbox.rs` —— 归约核：f32 → **单调 u32 有序映射** + `atomicMin/Max`（min/max 是精确运算、
+   与求值顺序无关 ⇒ 原子不破坏确定性）。三件套仍在主机侧按 `grid_box` 算（"规则只有一处"）。
+   上卡对拍 3 例（本机 RTX 4060 Ti）：n=3/64/65/1000 手算期望 + 5000 粒全量，`min/max/bin/dims/inv`
+   **逐位相同**。
+3. `Packet`：`PacketCfg::{recompute_box, grid_bins_cap}` + `Packet::refresh_box`（归约 → 回读 24 B →
+   `grid_box` → 写两组 uniform 的动态字段）；`run_stages` 在开关打开时按子步提交，成本记进
+   `TickMs::box_ms`。`gpu_tick_probe` 加 `--box=follow` / `--gravity`。
+
+**读数**（40³ = 64000 粒、300 tick、自由落体 0.981 m/s²）：
+
+| 档 | 整 tick | overflow | Δpos(t=300) | \|Δv\|max |
+|---|---|---|---|---|
+| 固定箱子（§12.1 口径） | 65.1 ms/tick（2.1×） | **20 ⚠️** | 0.00010 m | 2e-5 |
+| `--box=follow` | **3.57 ms/tick（42.1×）** | **0 ✅** | 0.00010 m | 2e-5 |
+
+⇒ 收益是**性能（18×）与护栏清零**；本场景里固定箱子并未让物理变错（大箱子给出同样的邻居集合，
+只是慢且挤）。**接线时踩的两条**（都已修）：① 扫描→占位的拷贝长度按 `self.total` 算 ⇒ 箱子跟随
+后活的格数变了、长度不符 ⇒ 游标错位、力爆炸（判别法：**零重力下也炸 ⇒ 必是接线 bug**）；
+② 格表缓冲不会自增长（CPU 侧 `Vec` 会）⇒ 需要 `grid_bins_cap` 显式给额度、预算取
+`min(GRID_MAX_BINS, 额度)`。
+
+**仍未做**：卡上 setup（首版那条单线程 pass 写出的箱子缓冲是未初始化内存——已移除，规则在主机侧算，
+代价是每子步一次 24 B 往返）；边界/提供者相位；`integrate.wgsl` 的刚体前缀。
