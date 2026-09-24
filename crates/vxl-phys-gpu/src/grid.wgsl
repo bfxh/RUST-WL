@@ -102,7 +102,12 @@ fn scan(@builtin(local_invocation_index) lid: u32) {
             inc = inc * 2u;
         }
         if (idx < m) {
-            start[idx] = running + s_scan[lid];
+            let s = running + s_scan[lid];
+            start[idx] = s;
+            // **同时写游标**：`place` 需要可变游标（= start 的副本），此前由调用方
+            // `copy_buffer_to_buffer` 每子步拷一遍（箱子跟随时**必须**拷满分配额度 ⇒ 125k 档
+            // 每子步 4 MB）。这里顺手写掉 ⇒ 那条拷贝整条去掉。**逐位与原口径相同**（同一批前缀和）。
+            atomicStore(&cursor[idx], s);
         }
         running = running + s_scan[255];
         workgroupBarrier();

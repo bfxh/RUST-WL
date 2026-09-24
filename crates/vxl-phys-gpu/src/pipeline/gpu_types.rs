@@ -55,16 +55,18 @@ pub struct Packet {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub(crate) n: u32,
+    /// 活的格数（**诊断/未来用途**：`recompute_box` 时它是分配额度——真值由 GPU 侧决定）。
     pub(crate) total: u32,
     pub(crate) groups_n: u32,
     pub(crate) groups_total: u32,
-    /// 格表缓冲的**分配额度**（格数）；`refresh_box` 用它夹预算（详见 `PacketCfg::grid_bins_cap`）。
-    pub(crate) total_alloc: u32,
+    /// 格表：`start`（每格起点，长度 `total + 1`）与 `cursor`（`place` 用的可变游标）。
+    /// 二者现在**只由 `grid.wgsl` 写**（`scan` 一次写两份，省掉每子步的 `copy_buffer_to_buffer`），
+    /// 主机侧只在诊断里取用。
+    pub(crate) start_b: wgpu::Buffer,
+    pub(crate) cursor_b: wgpu::Buffer,
     pub(crate) pos_b: wgpu::Buffer,
     pub(crate) vel_b: wgpu::Buffer,
     pub(crate) counts_b: wgpu::Buffer,
-    pub(crate) start_b: wgpu::Buffer,
-    pub(crate) cursor_b: wgpu::Buffer,
     pub(crate) overflow_b: wgpu::Buffer,
     pub(crate) int_params_b: wgpu::Buffer,
     /// 网格 uniform（每子步重算箱子时要改它前 36 字节）。

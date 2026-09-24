@@ -34,6 +34,10 @@ pub struct BoxOut {
     pub total: u32,
     /// **原始原子累加器**（有序映射下的 6 个 u32）——诊断用：判"归约错"还是"下游接线错"。
     pub bb: [u32; 6],
+    /// **卡上 setup** 的产物：`inv`（f32）/ `dims` / `total`（主机那份在上面 `bin`/`inv`/`dims`）。
+    pub gpu_inv: f32,
+    pub gpu_dims: [u32; 3],
+    pub gpu_total: u32,
 }
 
 impl BoxOut {
@@ -48,6 +52,9 @@ impl BoxOut {
             dims: [0; 3],
             total: 0,
             bb: [0; 6],
+            gpu_inv: 0.0,
+            gpu_dims: [0; 3],
+            gpu_total: 0,
         }
     }
 }
@@ -87,26 +94,29 @@ pub fn host_box(pos_flat: &[f32], h: f32, max_bins: usize) -> ([f32; 3], [f32; 3
 struct BboxPipes {
     bg: wgpu::BindGroup,
     reduce: wgpu::ComputePipeline,
+    setup: wgpu::ComputePipeline,
 }
 
-/// 一次性建置：着色器 / 绑定布局 / 绑定组 / 归约管线（不进出稳态计时）。
+/// 一次性建置：着色器 / 绑定布局 / 绑定组 / 两条管线（不进出稳态计时）。
 fn make_bbox_pipes(
     device: &wgpu::Device,
     pos_b: &wgpu::Buffer,
     bb_b: &wgpu::Buffer,
     rp_b: &wgpu::Buffer,
+    box_out_b: &wgpu::Buffer,
+    sp_b: &wgpu::Buffer,
 ) -> BboxPipes {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bbox.wgsl"),
         source: wgpu::ShaderSource::Wgsl(include_str!("bbox.wgsl").into()),
     });
-    // 3 个槽位：0 pos(read) | 1 bb(read_write，原子) | 2 rp(uniform)
-    let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..3u32)
+    // 5 个槽位：0 pos(read) | 1 bb(rw，原子) | 2 rp(uniform) | 3 box_out(rw) | 4 sp(uniform)
+    let entries: Vec<wgpu::BindGroupLayoutEntry> = (0..5u32)
         .map(|binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
-                ty: if binding == 2 {
+                ty: if binding == 2 || binding == 4 {
                     wgpu::BufferBindingType::Uniform
                 } else {
                     wgpu::BufferBindingType::Storage {
@@ -139,6 +149,14 @@ fn make_bbox_pipes(
                 binding: 2,
                 resource: rp_b.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: box_out_b.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: sp_b.as_entire_binding(),
+            },
         ],
     });
     let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -154,10 +172,19 @@ fn make_bbox_pipes(
         compilation_options: Default::default(),
         cache: None,
     });
+    let p_setup = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("bbox.setup"),
+        layout: Some(&pl),
+        module: &shader,
+        entry_point: Some("box_setup"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
 
     BboxPipes {
         bg,
         reduce: p_reduce,
+        setup: p_setup,
     }
 }
 
@@ -191,19 +218,16 @@ fn bb_init_bytes() -> Vec<u8> {
     b
 }
 
-/// 在**指定适配器序号**上跑归约，读回 `(lo, hi)`，再按**同一条**箱子规则（`grid_box`）算三件套。
-/// `error` 非空即未测到（无适配器 / 空输入）。
-pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: usize) -> BoxOut {
-    let n = (pos_flat.len() / 3) as u32;
-    if n == 0 {
-        return BoxOut::err("空输入（n = 0）：CPU 侧此时把格数置 0，GPU 路径无意义".to_string());
-    }
-    let (adapter, device, queue) = match crate::probe::device_for(adapter_index) {
-        Ok(v) => v,
-        Err(e) => return BoxOut::err(e),
-    };
-    let ngroups = n.div_ceil(WG).max(1);
-
+/// 探针的一次性建置（`box_on_adapter` 的第一段）：`pos`/`bb`/`box_out`/`sp`/`rp` 与回读缓冲 + 管线。
+/// 返回 `(bb, box_out, readback, pipes)`——`pos` 与两个 uniform 只被 bind group 持有。
+fn make_probe(
+    device: &wgpu::Device,
+    pos_flat: &[f32],
+    n: u32,
+    ngroups: u32,
+    h: f32,
+    max_bins: usize,
+) -> (wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, BboxPipes) {
     let pos_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("bbox.pos"),
         contents: &f32_bytes(pos_flat),
@@ -227,14 +251,44 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         },
         usage: wgpu::BufferUsages::UNIFORM,
     });
+    let box_out_b = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("bbox.box_out"),
+        size: 32,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let sp_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("bbox.sp"),
+        contents: &f32_bytes(&[h, max_bins as f32, 0.0, 0.0]),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
     let readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("bbox.readback"),
-        size: 24,
+        size: 56,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
 
-    let pipes = make_bbox_pipes(&device, &pos_b, &bb_b, &rp_b);
+    let pipes = make_bbox_pipes(device, &pos_b, &bb_b, &rp_b, &box_out_b, &sp_b);
+    (bb_b, box_out_b, readback, pipes)
+}
+
+/// 在**指定适配器序号**上跑归约 + setup，读回角点与卡上箱子。
+/// `error` 非空即未测到（无适配器 / 空输入）。
+pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: usize) -> BoxOut {
+    let n = (pos_flat.len() / 3) as u32;
+    if n == 0 {
+        return BoxOut::err("空输入（n = 0）：CPU 侧此时把格数置 0，GPU 路径无意义".to_string());
+    }
+    let (adapter, device, queue) = match crate::probe::device_for(adapter_index) {
+        Ok(v) => v,
+        Err(e) => return BoxOut::err(e),
+    };
+    let ngroups = n.div_ceil(WG).max(1);
+    let (bb_b, box_out_b, readback, pipes) = make_probe(&device, pos_flat, n, ngroups, h, max_bins);
+
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("bbox.enc"),
     });
@@ -247,7 +301,18 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         cp.set_bind_group(0, &pipes.bg, &[]);
         cp.dispatch_workgroups(ngroups, 1, 1);
     }
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("bbox.setup"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(&pipes.setup);
+        cp.set_bind_group(0, &pipes.bg, &[]);
+        cp.dispatch_workgroups(1, 1, 1);
+    }
+    // 回读布局：bb 0..24 | box_out 24..56
     enc.copy_buffer_to_buffer(&bb_b, 0, &readback, 0, 24);
+    enc.copy_buffer_to_buffer(&box_out_b, 0, &readback, 24, 32);
     queue.submit(Some(enc.finish()));
 
     let slice = readback.slice(..);
@@ -265,6 +330,14 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
     let data = slice.get_mapped_range();
     let bb = decode_bb(&data);
     let (lo, hi) = bb_to_corners(bb);
+    let u = |k: usize| {
+        let o = 24 + k * 4;
+        u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]])
+    };
+    // 卡上 setup 的产物：[3]=inv(f32 位模式) | [4..6]=dims | [7]=total。
+    let gpu_inv = f32::from_bits(u(3));
+    let gpu_dims = [u(4), u(5), u(6)];
+    let gpu_total = u(7);
     // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
     drop(data);
     readback.unmap();
@@ -285,6 +358,9 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         dims,
         total: dims[0] * dims[1] * dims[2],
         bb,
+        gpu_inv,
+        gpu_dims,
+        gpu_total,
     }
 }
 
@@ -314,18 +390,27 @@ fn decode_bb(data: &[u8]) -> [u32; 6] {
     bb
 }
 
-/// **常驻**包围盒阶段（`Packet` 用）：缓冲/管线只建一次，每子步只"写中性元 + 归约 + 回读"。
+/// **常驻**包围盒阶段（`Packet` 用）：缓冲/管线只建一次，每子步只"写中性元 + 归约 + setup"。
 pub struct BboxStage {
     groups: u32,
     bb_b: wgpu::Buffer,
+    /// setup 的产物（与 uniform 动态字段同形，见 `bbox.wgsl`）——主机侧用 `copy_buffer_to_buffer` 搬。
+    box_out_b: wgpu::Buffer,
     readback: wgpu::Buffer,
     bg: wgpu::BindGroup,
     reduce: wgpu::ComputePipeline,
+    setup: wgpu::ComputePipeline,
 }
 
 impl BboxStage {
-    /// 建常驻件（`pos_b` 复用管线自己的位置缓冲，不复制）。
-    pub fn new(device: &wgpu::Device, pos_b: &wgpu::Buffer, n: u32) -> Self {
+    /// 建常驻件（`pos_b` 复用管线自己的位置缓冲，不复制；`sp` 用 `(h, max_bins)`）。
+    pub fn new(
+        device: &wgpu::Device,
+        pos_b: &wgpu::Buffer,
+        n: u32,
+        h: f32,
+        max_bins: usize,
+    ) -> Self {
         let groups = n.div_ceil(WG).max(1);
         let bb_b = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bbox.stage.bb"),
@@ -335,9 +420,22 @@ impl BboxStage {
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let box_out_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bbox.stage.box_out"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let sp_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bbox.stage.sp"),
+            contents: &f32_bytes(&[h, max_bins as f32, 0.0, 0.0]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
         let readback = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("bbox.stage.readback"),
-            size: 24,
+            size: 56,
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -352,17 +450,19 @@ impl BboxStage {
             },
             usage: wgpu::BufferUsages::UNIFORM,
         });
-        let pipes = make_bbox_pipes(device, pos_b, &bb_b, &rp_b);
+        let pipes = make_bbox_pipes(device, pos_b, &bb_b, &rp_b, &box_out_b, &sp_b);
         Self {
             groups,
             bb_b,
+            box_out_b,
             readback,
             bg: pipes.bg,
             reduce: pipes.reduce,
+            setup: pipes.setup,
         }
     }
 
-    /// 一次"写中性元 → 归约 → 拷回读缓冲"（调用方负责 `submit`；三步在同一 encoder 内有序）。
+    /// 一次"写中性元 → 归约 → setup"（调用方负责 `submit`；三步在同一 encoder 内有序）。
     pub fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder) {
         // ⚠️ `write_buffer` 是**提交前**生效的队列操作 ⇒ 它一定落在下面的归约之前。
         queue.write_buffer(&self.bb_b, 0, &bb_init_bytes());
@@ -375,10 +475,23 @@ impl BboxStage {
             cp.set_bind_group(0, &self.bg, &[]);
             cp.dispatch_workgroups(self.groups, 1, 1);
         }
-        enc.copy_buffer_to_buffer(&self.bb_b, 0, &self.readback, 0, 24);
+        {
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bbox.stage.setup"),
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(&self.setup);
+            cp.set_bind_group(0, &self.bg, &[]);
+            cp.dispatch_workgroups(1, 1, 1);
+        }
     }
 
-    /// 同步回读角点（**调用方需先 `submit` + `poll_wait`**）。
+    /// setup 的产物缓冲（与 uniform 的动态字段同形）——调用方按需 `copy_buffer_to_buffer` 搬到 uniform。
+    pub fn box_out(&self) -> &wgpu::Buffer {
+        &self.box_out_b
+    }
+
+    /// 同步回读角点（**调用方需先 `submit` + `poll_wait`**；需先自己把 `bb` 拷进 `readback`）。
     pub fn read_corners(&self, device: &wgpu::Device) -> ([f32; 3], [f32; 3]) {
         let slice = self.readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -405,6 +518,15 @@ impl BboxStage {
 mod tests {
     use super::*;
 
+    /// GPU 用例**必须串行**：同一块卡上并发跑「建缓冲 + 提交 + 回读」会**挂死**（实测多次；
+    /// `cargo test` 默认多线程跑测试 ⇒ 不加这把锁会偶发挂住整轮测试、连带门链与 CI）。
+    /// 无适配器的机器上用例会快速跳过 ⇒ 锁不会造成等待。
+    static GPU_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn gpu_guard() -> std::sync::MutexGuard<'static, ()> {
+        GPU_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// 确定性伪随机位置（LCG；含负坐标与一条极扁的分布）。
     fn positions(n: usize) -> Vec<f32> {
         let mut s = 0x2545_F491_4F6C_DD1Du64;
@@ -427,6 +549,7 @@ mod tests {
     /// 位置取 `(i, -2i, 1)` ⇒ min = `(0, -(n-1)*2, 1)`、max = `(n-1, 0, 1)`。
     #[test]
     fn gpu_reduce_covers_all_particles() {
+        let _g = gpu_guard();
         for n in [3usize, 64, 65, 1000] {
             let mut pos = Vec::with_capacity(n * 3);
             for i in 0..n {
@@ -449,6 +572,7 @@ mod tests {
     /// （CI 上 GPU 不可用 ⇒ 不能红）。
     #[test]
     fn gpu_box_matches_host_rule() {
+        let _g = gpu_guard();
         let pos = positions(5_000);
         let h = 0.05f32;
         let max_bins = 1usize << 20;
@@ -472,6 +596,23 @@ mod tests {
             "total = dims 之积"
         );
         assert_eq!(out.inv, 1.0 / hbin, "inv 与主机同式 ⇒ 逐位相同");
+        // **卡上 setup**（`box_setup`）必须与主机规则一致：dims/total 逐位、inv ≤1 ulp。
+        // 这条同时钉住 `o2f` 的**分支顺序**（首版写反 ⇒ 核解出的角点全乱，归约却是对的）。
+        assert_eq!(
+            out.gpu_dims, hdims,
+            "卡上 setup 的 dims 必须逐位相同（核看到 lo/hi 见 gpu_* 诊断）"
+        );
+        assert_eq!(
+            out.gpu_total,
+            hdims[0] * hdims[1] * hdims[2],
+            "卡上 setup 的 total 必须逐位相同"
+        );
+        assert!(
+            (out.gpu_inv - 1.0 / hbin).abs() <= f32::EPSILON * (1.0 / hbin).abs(),
+            "卡上 setup 的 inv 只允许 ≤1 ulp：gpu={} host={}",
+            out.gpu_inv,
+            1.0 / hbin
+        );
     }
 
     /// 主机参考自身：与 `grid_box` 一致（薄包装，防"参考实现自己写歪"）。

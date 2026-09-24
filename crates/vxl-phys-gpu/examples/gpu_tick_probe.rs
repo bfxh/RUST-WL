@@ -197,9 +197,13 @@ fn main() {
     let gpu_ticks = ticks.max(100);
     let (snap_pos, snap_vel) = pk.snapshot();
     let mut reps = [0.0f32; 3];
+    let mut box_ms = 0.0f32;
     for r in reps.iter_mut() {
         pk.restore(&snap_pos, &snap_vel);
-        *r = pk.run(&pc, gpu_ticks, substeps, false).per_tick;
+        let t = pk.run(&pc, gpu_ticks, substeps, false);
+        *r = t.per_tick;
+        // 记最后一次的"每子步箱子"累计（读数含在 `per_tick` 里，这里只把它单列出来）。
+        box_ms = t.box_ms / gpu_ticks.max(1) as f32;
     }
     let gpu_ms = reps.iter().cloned().fold(f32::INFINITY, f32::min);
     // **相位消融**（位：1 分箱 / 2 扫描+占位 / 4 规范化 / 8 密度 / 16 EOS / 32 力 / 64 积分）
@@ -248,6 +252,14 @@ fn main() {
         f64::from(gpu_ms + rb_ms),
         cpu_phase_ms / ticks as f64 / f64::from((gpu_ms + rb_ms).max(1e-9))
     );
+    if pc.recompute_box {
+        // 诚实记账：`--box=follow` 的"每子步一次归约 + 24 B 回读往返"占整 tick 多少（已含在上面）。
+        println!(
+            "  ├ 其中**每子步箱子**：{:.2} ms/tick（{:.0}%，{substeps} 子步 × 归约+回读+写 uniform）",
+            box_ms,
+            100.0 * box_ms / gpu_ms.max(1e-9)
+        );
+    }
     {
         let mut line = String::from("  相位消融（ms/tick）");
         let mut prev = 0.0f32;

@@ -442,16 +442,27 @@ impl Packet {
         let pipes = make_pipelines(&device);
         let binds = make_bind_groups(&device, &bufs, &prm, &pipes);
         // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。
-        // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。箱子三件套仍**在主机侧**按 `grid_box` 算——卡上 setup 那条支线有开口项（`PLAN-gpu.md` §12.4）。
-        let bbox = crate::bbox::BboxStage::new(&device, &bufs.pos_b, n);
+        let bbox = crate::bbox::BboxStage::new(
+            &device,
+            &bufs.pos_b,
+            n,
+            cfg.h,
+            vxl_phys_core::grid::GRID_MAX_BINS.min(cap_total as usize),
+        );
         Ok(Self {
             device,
             queue,
             n,
-            total,
+            // `recompute_box` 时活格数由 GPU 侧决定（主机不再回读）⇒ 规范化分派与"扫描→占位"
+            // 拷贝都按**分配额度**来：核函数按 uniform 里的活 `total` 自限 ⇒ 多出的线程/字节只是
+            // 空转、不改变结果（4 MB 的拷贝换来"零回读"，实测净赚）。
+            total: if cfg.recompute_box { cap_total } else { total },
             groups_n: n.div_ceil(64),
-            groups_total: total.div_ceil(64),
-            total_alloc: cap_total,
+            groups_total: if cfg.recompute_box {
+                cap_total.div_ceil(64)
+            } else {
+                total.div_ceil(64)
+            },
             pos_b: bufs.pos_b,
             vel_b: bufs.vel_b,
             counts_b: bufs.counts_b,
@@ -505,13 +516,7 @@ impl Packet {
         }
         if stages & 0b000_0010 != 0 {
             dispatch(enc, &self.p_scan, &self.bg_grid, 1);
-            enc.copy_buffer_to_buffer(
-                &self.start_b,
-                0,
-                &self.cursor_b,
-                0,
-                ((self.total + 1) as u64) * 4,
-            );
+            // 游标由 `scan` 自己写（见 `grid.wgsl`）⇒ 这里不再 `copy_buffer_to_buffer`。
             dispatch(enc, &self.p_place, &self.bg_grid, self.groups_n);
         }
         if stages & 0b000_0100 != 0 {
@@ -531,13 +536,14 @@ impl Packet {
         }
     }
 
-    /// **每子步重算箱子**（`cfg.recompute_box`）：归约 → 回读 → 同一条规则（`grid_box`）→ 写两组 uniform。
-    /// 返回这一步的墙钟毫秒（含回读同步）——诚实记账：这是"每子步一次往返"的代价。
+    /// **每子步重算箱子**（`cfg.recompute_box`）：卡上"归约 → setup"写出**与 uniform 同形**的箱子，
+    /// 再用**设备内拷贝**搬进两组 uniform —— **不需要任何回读**（这正是卡上 setup 的意义：主机侧
+    /// 规则那条路每子步要一次 24 B 往返，实测占整 tick 的 **88%**）。返回这一步的墙钟毫秒。
     ///
     /// 为什么必须每子步：CPU 引擎在 `substep()` 开头就 `self.grid.rebuild(&self.pos, self.h)`
     /// （见 `vxl-phys-fluid/src/fluid_step.rs`）⇒ GPU 若不与其同频，两条链的分箱/邻域就不同，
     /// 逐 tick 漂移表失去意义。
-    fn refresh_box(&mut self, cfg: &PacketCfg) -> f32 {
+    fn refresh_box(&mut self) -> f32 {
         let t = std::time::Instant::now();
         let mut enc = self
             .device
@@ -545,47 +551,16 @@ impl Packet {
                 label: Some("bbox"),
             });
         self.bbox.encode(&self.queue, &mut enc);
-        self.queue.submit(Some(enc.finish()));
-        self.poll_wait().ok();
-        let (lo, hi) = self.bbox.read_corners(&self.device);
-        let (_, bin, dims) = vxl_phys_core::grid::grid_box(
-            vxl_phys_core::Vec3::new(lo[0], lo[1], lo[2]),
-            vxl_phys_core::Vec3::new(hi[0], hi[1], hi[2]),
-            cfg.h,
-            // 预算取 `min(GRID_MAX_BINS, 分配额度)`：GPU 的格表缓冲不会增长 ⇒ 超了就得粗化
-            // （粗化只让格边变粗：邻域集合由 `r ≤ h` 决定 ⇒ **物理不变**，代价是候选变多、变慢）。
-            vxl_phys_core::grid::GRID_MAX_BINS.min(self.total_alloc as usize),
-        );
-        // 活的格数决定规范化相位的分派数（箱子跟随时它每子步都会变）。
-        let total = dims[0] * dims[1] * dims[2];
-        // ⚠️ **`self.total` 必须跟着更新**：扫描→占位那段拷贝的长度按它算
-        // （`copy_buffer_to_buffer(..., (self.total + 1) * 4)`）——不更新的话，箱子一跟随，
-        // 拷贝长度就与活的格数不符 ⇒ 占位游标错位 ⇒ 邻域切片错 ⇒ 力爆炸。
-        // 首版漏了这条：零重力下也在 t=3 炸（被"零重力判别"抓出来：箱子几乎不动也炸 ⇒ 接线 bug）。
-        self.total = total;
-        self.groups_total = total.div_ceil(64);
-        // uniform 的**动态**字段（偏移口径见 `make_params`，其余静态字段不动）：
+        // 搬进 uniform 的**动态字段**（偏移口径见 `make_params`，其余静态字段不动）：
         //   grid_params ：gmin 0..12 | inv 12..16 | dims 16..28 | n 28..32 | total 32..36
-        //   phase_params：gmin 0..12 | inv 12..16 | … | [n, dims0, dims1, dims2] 60..76
-        let mut head = Vec::with_capacity(16);
-        for x in [lo[0], lo[1], lo[2], 1.0 / bin] {
-            head.extend_from_slice(&x.to_le_bytes());
-        }
-        let mut dims_b = Vec::with_capacity(12);
-        for x in dims {
-            dims_b.extend_from_slice(&x.to_le_bytes());
-        }
-        self.queue.write_buffer(&self.grid_params_b, 0, &head);
-        self.queue.write_buffer(&self.grid_params_b, 16, &dims_b);
-        let total = dims[0] * dims[1] * dims[2];
-        self.queue
-            .write_buffer(&self.grid_params_b, 32, &total.to_le_bytes());
-        self.queue.write_buffer(&self.phase_params_b, 0, &head);
-        let mut tail = Vec::with_capacity(16);
-        for x in [self.n, dims[0], dims[1], dims[2]] {
-            tail.extend_from_slice(&x.to_le_bytes());
-        }
-        self.queue.write_buffer(&self.phase_params_b, 60, &tail);
+        //   phase_params：gmin 0..12 | inv 12..16 | … | n 60..64 | dims 64..76
+        let src = self.bbox.box_out();
+        enc.copy_buffer_to_buffer(src, 0, &self.grid_params_b, 0, 16);
+        enc.copy_buffer_to_buffer(src, 16, &self.grid_params_b, 16, 12);
+        enc.copy_buffer_to_buffer(src, 28, &self.grid_params_b, 32, 4);
+        enc.copy_buffer_to_buffer(src, 0, &self.phase_params_b, 0, 16);
+        enc.copy_buffer_to_buffer(src, 16, &self.phase_params_b, 64, 12);
+        self.queue.submit(Some(enc.finish()));
         (t.elapsed().as_secs_f64() * 1e3) as f32
     }
 
@@ -624,7 +599,7 @@ impl Packet {
                 // **每子步重算箱子**（与 CPU 的 `substep()` 同频）：代价 = 每子步一次提交 + 回读往返，
                 // 单独记进 `out.box_ms` 以便读数里能看见这笔开销。
                 for si in 0..substeps {
-                    out.box_ms += self.refresh_box(cfg);
+                    out.box_ms += self.refresh_box();
                     let mut enc = self
                         .device
                         .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
@@ -710,6 +685,12 @@ impl Packet {
     pub fn restore(&self, pos: &[f32], vel: &[f32]) {
         self.queue.write_buffer(&self.pos_b, 0, &f32_bytes(pos));
         self.queue.write_buffer(&self.vel_b, 0, &f32_bytes(vel));
+    }
+
+    /// 格表句柄（诊断/复核用）：`(start, cursor, 活的格数)`。
+    /// 两者都由 `scan` 写（见 `grid.wgsl`），主机侧要核对"网格表是不是按预期建的"时取它们。
+    pub fn grid_tables(&self) -> (&wgpu::Buffer, &wgpu::Buffer, u32) {
+        (&self.start_b, &self.cursor_b, self.total)
     }
 
     /// 读回**未规范化的格数**（`grid.wgsl` 的 `cap` 护栏计数）：= 0 才说明网格表和 CPU 同规则。
