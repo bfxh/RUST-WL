@@ -142,6 +142,89 @@ fn box_yv(w: &World) -> (f32, f32) {
     out
 }
 
+/// **②b 对照：同一场景换 2b 容器**（静态盒体当墙 ⇒ **无 provider** ⇒ 壁面档不参与）。
+/// 判据用途：若它的 A/B **宏观差**也在 mm 量级 ⇒ 那 2.8 mm 是**口径 B 的宏观噪声底**，
+/// 不是 provider 壁面路径的缺陷；若它是 1e-5 量级 ⇒ provider 路径确实多出系统性差。
+fn sim_2b(adapter: usize, substeps: usize, h: f32, ticks: usize) {
+    let t = 0.05f32;
+    let half = 0.25f32;
+    let pose = |p: Vec3| vxl_phys_fluid::BodyPose {
+        pos: p,
+        rot: Quat::IDENTITY,
+        linvel: Vec3::ZERO,
+        angvel: Vec3::ZERO,
+    };
+    let bodies = vec![
+        (
+            0u32,
+            Shape::Box {
+                half: Vec3::new(0.6, t, 0.6),
+            },
+            pose(Vec3::new(0.0, 1.0 - t, 0.0)),
+        ),
+        (
+            1,
+            Shape::Box {
+                half: Vec3::new(t, 0.6, 0.6),
+            },
+            pose(Vec3::new(half + t, 1.2, 0.0)),
+        ),
+        (
+            2,
+            Shape::Box {
+                half: Vec3::new(t, 0.6, 0.6),
+            },
+            pose(Vec3::new(-(half + t), 1.2, 0.0)),
+        ),
+        (
+            3,
+            Shape::Box {
+                half: Vec3::new(0.6, 0.6, t),
+            },
+            pose(Vec3::new(0.0, 1.2, half + t)),
+        ),
+        (
+            4,
+            Shape::Box {
+                half: Vec3::new(0.6, 0.6, t),
+            },
+            pose(Vec3::new(0.0, 1.2, -(half + t))),
+        ),
+    ];
+    let mut cpu = water();
+    cpu.set_boundary_particles(&bodies);
+    // ⚠️ 本场景的 `cfg` 必须**按本场景自己算**（`n`/`n_fluid` 要含 2b 边界粒子——
+    // 借用 provider 场景那份会把边界粒子在建包时丢掉 ⇒ 水没人托、直接穿地，实测 −18 m ✗）。
+    let cfg = make_cfg(&cpu);
+    let init = flat(&cpu);
+    let n = cpu.len();
+    for _ in 0..ticks {
+        cpu.step(1.0 / 60.0, &vxl_phys_core::interop::NoProviders);
+    }
+    let a = cpu.positions().to_vec();
+    let mk = Sim {
+        init: &init,
+        cfg,
+        substeps,
+        ticks,
+        ghost: false,
+        project: false,
+        ids: Vec::new(),
+        h,
+        adapter,
+    };
+    let Some(b) = chain_sim(&mk, &vxl_phys_core::interop::NoProviders) else {
+        println!("  ── ②b 2b 容器对照：没起 GPU 管线（跳过）");
+        return;
+    };
+    let (ya, yb) = (bottom_mean_y(&a, n), bottom_mean_y(&b, n));
+    println!("  ── ②b **对照：同一场景换 2b 容器**（静态盒体当墙、无 provider，{ticks} tick）──");
+    println!(
+        "     底层平均 y：CPU {ya:.5} vs 卡上 {yb:.5}（差 **{:.2e} m**）⇒ 与 provider 容器的 2.77e-3 比",
+        (ya - yb).abs()
+    );
+}
+
 /// 静置仿真的参数（避免长参数表）。
 struct Sim<'a> {
     init: &'a (Vec<f32>, Vec<f32>, Vec<f32>),
@@ -281,6 +364,8 @@ fn main() {
         return;
     };
     sim_report(&a, &b, &c, n, ticks);
+    // ②b 决定性对照：同一场景换 2b 容器（无 provider）⇒ 看那 2.77e-3 是不是口径 B 的宏观噪声底。
+    sim_2b(adapter, substeps, h, ticks);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }
