@@ -22,6 +22,12 @@ use vxl_phys_core::interop::ProviderColliders;
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
 use vxl_phys_gpu::pipeline::{GpuFluidStepper, Packet, PacketCfg, WallSide, WallStage};
 
+// 子档放在**同名目录**里（`#[path]`：示例的 crate root 在 `examples/` 下 ⇒ 裸 `mod` 会去找
+// `examples/diag.rs` 而与其它示例撞名）。文件名与主档同名目录并列 ⇒ 一眼看出归属。
+#[path = "gpu_walls_probe/diag.rs"]
+mod diag;
+use diag::{band_profile, bottom_mean_y, chain_sim, chain_sim_dens, sim_2b, Sim};
+
 const SPACING: f32 = 0.05;
 
 /// 体素水槽：5×5 格（外沿 2.5 m）地板 + 中心围堰 ⇒ 内腔 0.5×0.5 m（与 `tests/fluid_boundary.rs` 同款）。
@@ -123,39 +129,6 @@ fn flat(f: &FluidSystem) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
     (p, v, apmass.to_vec())
 }
 
-/// **底层粒子平均高度**（按 y 取最低 25%）——静置仿真里"站没站住"的判据。
-fn bottom_mean_y(ps: &[Vec3], n_fluid: usize) -> f32 {
-    let mut ys: Vec<f32> = ps[..n_fluid.min(ps.len())].iter().map(|p| p.y).collect();
-    ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let k = (ys.len() / 4).max(1);
-    ys[..k].iter().sum::<f32>() / k as f32
-}
-
-/// **按"到最近壁面的水平距离"分箱的平均高度**（腔体半宽 0.25 ⇒ 距离 = 0.25 − max(|x|,|z|)）。
-/// 用途：把"水位差 2.8 mm"定位到**近壁带**还是**内部**——近壁为主 ⇒ 投影/镜像的局部效应；
-/// 全箱均匀 ⇒ 鬼影的**全局补偿**偏差（它加的质量整体抬高压力）。
-fn band_profile(ps: &[Vec3], n: usize) -> [(f32, usize); 3] {
-    let mut acc = [(0.0f32, 0usize); 3];
-    for p in ps.iter().take(n) {
-        let d = 0.25 - p.x.abs().max(p.z.abs());
-        let k = if d < 0.01 {
-            0
-        } else if d < 0.05 {
-            1
-        } else {
-            2
-        };
-        acc[k].0 += p.y;
-        acc[k].1 += 1;
-    }
-    for a in acc.iter_mut() {
-        if a.1 > 0 {
-            a.0 /= a.1 as f32;
-        }
-    }
-    acc
-}
-
 /// 唯一动态体的 `(y, vy)`（两侧同序 ⇒ 索引相同）。
 fn box_yv(w: &World) -> (f32, f32) {
     let mut out = (0.0f32, 0.0f32);
@@ -167,134 +140,127 @@ fn box_yv(w: &World) -> (f32, f32) {
     out
 }
 
-/// **②b 对照：同一场景换 2b 容器**（静态盒体当墙 ⇒ **无 provider** ⇒ 壁面档不参与）。
-/// 判据用途：若它的 A/B **宏观差**也在 mm 量级 ⇒ 那 2.8 mm 是**口径 B 的宏观噪声底**，
-/// 不是 provider 壁面路径的缺陷；若它是 1e-5 量级 ⇒ provider 路径确实多出系统性差。
-fn sim_2b(adapter: usize, substeps: usize, h: f32, ticks: usize) {
-    let t = 0.05f32;
-    let half = 0.25f32;
-    let pose = |p: Vec3| vxl_phys_fluid::BodyPose {
-        pos: p,
-        rot: Quat::IDENTITY,
-        linvel: Vec3::ZERO,
-        angvel: Vec3::ZERO,
+/// **②k 单子步 A/B**（把 k=1 再切细）：两侧都设成"一个 tick = 一个子步"（dt = 1/60，**破声学 CFL 但两侧
+/// 同等** ⇒ 比较仍然有效）。判读：
+/// - **第一个子步就分道** ⇒ 与"tick 起点冻结表"**无关**（此时冻结表就是新鲜表）⇒ 密度/镜像相有真差；
+/// - 第一个子步一致、后续才分道 ⇒ 命中 §13.10/13.11 记的已知近似①（每 tick 一张平面表）。
+fn onestep_ab(
+    adapter: usize,
+    ids: &[u32],
+    h: f32,
+    prov: &dyn ProviderColliders,
+    ghost: bool,
+    project: bool,
+) {
+    let cfg_f = FluidConfig {
+        substeps: 1,
+        ..FluidConfig::default()
     };
-    let bodies = vec![
-        (
-            0u32,
-            Shape::Box {
-                half: Vec3::new(0.6, t, 0.6),
-            },
-            pose(Vec3::new(0.0, 1.0 - t, 0.0)),
-        ),
-        (
-            1,
-            Shape::Box {
-                half: Vec3::new(t, 0.6, 0.6),
-            },
-            pose(Vec3::new(half + t, 1.2, 0.0)),
-        ),
-        (
-            2,
-            Shape::Box {
-                half: Vec3::new(t, 0.6, 0.6),
-            },
-            pose(Vec3::new(-(half + t), 1.2, 0.0)),
-        ),
-        (
-            3,
-            Shape::Box {
-                half: Vec3::new(0.6, 0.6, t),
-            },
-            pose(Vec3::new(0.0, 1.2, half + t)),
-        ),
-        (
-            4,
-            Shape::Box {
-                half: Vec3::new(0.6, 0.6, t),
-            },
-            pose(Vec3::new(0.0, 1.2, -(half + t))),
-        ),
-    ];
-    let mut cpu = water();
-    cpu.set_boundary_particles(&bodies);
-    // ⚠️ 本场景的 `cfg` 必须**按本场景自己算**（`n`/`n_fluid` 要含 2b 边界粒子——
-    // 借用 provider 场景那份会把边界粒子在建包时丢掉 ⇒ 水没人托、直接穿地，实测 −18 m ✗）。
-    let cfg = make_cfg(&cpu);
+    let mut cpu = FluidSystem::new(cfg_f, Vec3::new(-0.2, 0.99, -0.2), [8, 8, 8], SPACING);
+    cpu.set_boundaries(if ghost { ids } else { &[] });
     let init = flat(&cpu);
-    let n = cpu.len();
-    for _ in 0..ticks {
-        cpu.step(1.0 / 60.0, &vxl_phys_core::interop::NoProviders);
-    }
-    let a = cpu.positions().to_vec();
-    let mk = Sim {
+    let cfg = make_cfg(&cpu);
+    cpu.step(1.0 / 60.0, prov); // 一整个 tick = 一个子步
+    let (ca, cd) = (cpu.positions().to_vec(), cpu.densities().to_vec());
+    let sim = Sim {
         init: &init,
         cfg,
-        substeps,
-        ticks,
-        ghost: false,
-        project: false,
-        ids: Vec::new(),
+        substeps: 1,
+        ticks: 1,
+        ghost,
+        project,
+        ids: if ghost { ids.to_vec() } else { Vec::new() },
         h,
         adapter,
     };
-    let Some(b) = chain_sim(&mk, &vxl_phys_core::interop::NoProviders) else {
-        println!("  ── ②b 2b 容器对照：没起 GPU 管线（跳过）");
+    let Some((gb, gd)) = chain_sim_dens(&sim, prov) else {
         return;
     };
-    let (ya, yb) = (bottom_mean_y(&a, n), bottom_mean_y(&b, n));
-    println!("  ── ②b **对照：同一场景换 2b 容器**（静态盒体当墙、无 provider，{ticks} tick）──");
+    let mut mpos = 0.0f32;
+    for (p, q) in ca.iter().zip(gb.iter()) {
+        mpos = mpos.max((*p - *q).length());
+    }
+    let (mut mrho, mut cnt) = (0.0f32, 0usize);
+    for (x, y) in cd.iter().zip(gd.iter()) {
+        let d = (x - y).abs();
+        mrho = mrho.max(d);
+        if d > 0.1 {
+            cnt += 1;
+        }
+    }
+    let tag = match (ghost, project) {
+        (false, _) => "无壁面档",
+        (true, true) => "镜像+投影",
+        (true, false) => "只镜像（**表新鲜** ⇒ 隔离镜像）",
+    };
     println!(
-        "     底层平均 y：CPU {ya:.5} vs 卡上 {yb:.5}（差 **{:.2e} m**）⇒ 与 provider 容器的 2.77e-3 比",
-        (ya - yb).abs()
+        "  ── ②k 单子步 A/B（substeps=1；{tag}）── max|Δpos| **{mpos:.2e} m** | max|Δρ| **{mrho:.3e} kg/m³** | |Δρ|>0.1 的粒数 {cnt}/{}",
+        cd.len()
     );
+    // 逐粒定位：最差 3 粒的**位移**（= 该链这一步的速度 × dt；`vmax·dt` 就是限速天花板）+ 两侧密度。
+    let dt = 1.0 / 60.0;
+    let ip = |i: usize| Vec3::new(init.0[i * 3], init.0[i * 3 + 1], init.0[i * 3 + 2]);
+    let mut worst: Vec<(usize, f32)> = (0..ca.len())
+        .map(|i| (i, (ca[i] - gb[i]).length()))
+        .collect();
+    worst.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+    for &(i, d) in worst.iter().take(3) {
+        let (da, db) = ((ca[i] - ip(i)).length(), (gb[i] - ip(i)).length());
+        println!(
+            "        #{i}：差 {d:.2e} m | A 位移 {da:.2e} / B 位移 {db:.2e} m（|v| {:.2} / {:.2} m/s）| ρ A {:.3} / B {:.3}",
+            da / dt,
+            db / dt,
+            cd[i],
+            gd[i]
+        );
+    }
 }
 
-/// 静置仿真的参数（避免长参数表）。
-#[derive(Clone)]
-struct Sim<'a> {
-    init: &'a (Vec<f32>, Vec<f32>, Vec<f32>),
+/// **②j 分相定位**（k=1，带壁面档时的逐粒密度对拍）：密度同 ⇒ 差在力/积分相；密度就不同 ⇒ 密度/镜像相。
+fn dens_split(
+    adapter: usize,
     cfg: PacketCfg,
     substeps: usize,
-    ticks: usize,
-    /// 喂平面表并跑**鬼影**（密度侧）。
-    ghost: bool,
-    /// 跑**投影**（穿透侧）；只有 `ghost` 打开才有意义（两侧**各有各的表**：口径不同，见 §15 补记六）。
-    project: bool,
-    ids: Vec<u32>,
     h: f32,
-    adapter: usize,
-}
-
-/// 跑一条**卡上仿真链**：每 tick 收平面表 → 上传 → 推进一个 tick（可带鬼影/投影）。
-fn chain_sim(s: &Sim, prov: &dyn ProviderColliders) -> Option<Vec<Vec3>> {
-    let (init_pos, init_vel, init_mass) = s.init;
-    let (mut pk, mut walls) =
-        Packet::new_with_walls(s.adapter, s.cfg, init_pos, init_vel, init_mass).ok()?;
-    walls.set_project(s.project);
-    for _ in 0..s.ticks {
-        let mut w_arg: Option<&WallStage> = None;
-        if s.ghost {
-            let (gp, _) = pk.read_state();
-            let ps: Vec<Vec3> = (0..gp.len() / 3)
-                .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
-                .collect();
-            let (i2, st, pl) = FluidSystem::gather_wall_contacts(&s.ids, s.h, &ps, prov);
-            walls.upload(&pk, WallSide::Mirror, &i2, &st, &pl);
-            // **投影侧另有一张表**（口径不同：`contacts_point_boundary` + 含穿透）。
-            let (i3, st3, pl3) = FluidSystem::gather_wall_project_contacts(&s.ids, s.h, &ps, prov);
-            walls.upload(&pk, WallSide::Project, &i3, &st3, &pl3);
-            w_arg = Some(&walls);
+    ids: &[u32],
+    init: &(Vec<f32>, Vec<f32>, Vec<f32>),
+    prov: &dyn ProviderColliders,
+) {
+    let mut cpu = water();
+    cpu.set_boundaries(ids);
+    cpu.step(1.0 / 60.0, prov);
+    let cd = cpu.densities().to_vec();
+    let sim = Sim {
+        init,
+        cfg,
+        substeps,
+        ticks: 1,
+        ghost: true,
+        project: true,
+        ids: ids.to_vec(),
+        h,
+        adapter,
+    };
+    let Some((_, gd)) = chain_sim_dens(&sim, prov) else {
+        return;
+    };
+    let (mut mx, mut mxs, mut cnt, mut mean) = (0.0f32, 0.0f32, 0usize, 0.0f32);
+    for (x, y) in cd.iter().zip(gd.iter()) {
+        let d = x - y;
+        if d.abs() > mx {
+            mx = d.abs();
+            mxs = d;
         }
-        pk.run_stages_with(&s.cfg, 0b111_1111, 1, s.substeps, false, w_arg);
+        if d.abs() > 0.1 {
+            cnt += 1;
+        }
+        mean += d;
     }
-    let (gp, _) = pk.read_state();
-    let n = gp.len() / 3;
-    Some(
-        (0..n)
-            .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
-            .collect(),
-    )
+    println!(
+        "  ── ②j 分相定位（k=1 逐粒密度）── max|Δρ| **{mx:.3e} kg/m³**（带符号 {mxs:+.3e}）| |Δρ|>0.1 的粒数 {cnt}/{} | 均值 {:.3e}",
+        cd.len(),
+        mean / cd.len() as f32
+    );
 }
 
 fn main() {
@@ -402,6 +368,11 @@ fn main() {
     early_series(&mk(true, true), prov, n);
     noclamp_early(adapter, substeps, h, &[v], prov);
     settled_early(adapter, substeps, h, &[v], prov);
+    bare_early(adapter, cfg, substeps, h, &init, prov, n);
+    dens_split(adapter, cfg, substeps, h, &[v], &init, prov);
+    onestep_ab(adapter, &[v], h, prov, true, true);
+    onestep_ab(adapter, &[v], h, prov, true, false);
+    onestep_ab(adapter, &[v], h, prov, false, false);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }
@@ -562,6 +533,58 @@ fn settled_early(
         (ya - yb).abs(),
         a.len()
     );
+}
+
+/// **②i 二分：把壁面档整个拿掉**（CPU 侧 `set_boundaries(&[])` 不收壁面、卡上不给 `walls`）
+/// ⇒ 同一几何、同一初值下比**纯 SPH 相位**（网格 + 密度/力/积分）的 k 曲线。
+///
+/// 判读：这一对照里两条链的**代码路径**只剩网格与三相（壁面档完全不在场）——
+/// - 差 ~1e-9 ⇒ 相位在这套几何/初值下逐位级一致 ⇒ 坍落那条 3.4 mm **只能**来自壁面档（镜像）；
+/// - 差 ~1e-3 ⇒ **相位本身**在这套几何/初值下就有 mm 级差（与 2b 对照的 6.79e-6 相冲 ⇒ 要重核那个
+///   2b 场景是不是真的"同一坍落"）。
+///
+/// 没有壁面 ⇒ 水会穿地（**两条链都穿**，可比性不受影响；这是已有的金丝雀 C 现象）。
+fn bare_early(
+    adapter: usize,
+    cfg: PacketCfg,
+    substeps: usize,
+    h: f32,
+    init: &(Vec<f32>, Vec<f32>, Vec<f32>),
+    prov: &dyn ProviderColliders,
+    n: usize,
+) {
+    println!("  ── ②i 二分：**两侧都没有壁面档**（纯 SPH 相位）──");
+    for k in [1usize, 10] {
+        let mut cpu = water();
+        cpu.set_boundaries(&[]); // ← 与卡上 `ghost = false, project = false` 对位
+        for _ in 0..k {
+            cpu.step(1.0 / 60.0, prov);
+        }
+        let a = cpu.positions().to_vec();
+        let sim = Sim {
+            init,
+            cfg,
+            substeps,
+            ticks: k,
+            ghost: false,
+            project: false,
+            ids: Vec::new(),
+            h,
+            adapter,
+        };
+        let Some(b) = chain_sim(&sim, prov) else {
+            return;
+        };
+        let mut mx = 0.0f32;
+        for (p, q) in a.iter().zip(b.iter()) {
+            mx = mx.max((*p - *q).length());
+        }
+        let (ya, yb) = (bottom_mean_y(&a, n), bottom_mean_y(&b, n));
+        println!(
+            "     k={k:>3}：底层均高差 {:.2e} m | max|Δpos| **{mx:.2e} m**",
+            (ya - yb).abs()
+        );
+    }
 }
 
 /// **②e CPU 自敏感**（把"差多少算大"标定出来）：同一初值，只把 0 号粒速度扰动 `eps` ⇒
