@@ -27,6 +27,15 @@ pub struct PacketCfg {
     // —— 积分 ——
     pub xsph_eps: f32,
     pub max_speed_frac: f32,
+    /// **每子步从位置重算箱子**（`gmin`/`inv`/`dims`）：CPU 引擎就是每子步 `rebuild` 一次
+    /// ⇒ `true` = 与 CPU 同频（自由落体等"跑出箱子"的场景必须开）；`false` = 固定箱子口径
+    /// （与 `PLAN-gpu.md` §12.1 的读数一致，留给消融/计时对比）。
+    pub recompute_box: bool,
+    /// **格表分配额度**（格数）：`counts`/`start`/`cursor` 三张缓冲按它一次性分配。
+    /// `recompute_box` 打开时，每子步的"总格数预算"取 `min(GRID_MAX_BINS, 本额度)`
+    /// ——GPU 的缓冲不会像 CPU 的 `Vec` 那样增长 ⇒ 必须显式给额度，否则箱子跟随会越界写。
+    /// 给 0 或给了比 `total` 小的值都按 `total` 处理。
+    pub grid_bins_cap: u32,
 }
 
 /// 一轮（一个 tick）跑完的耗时（毫秒）。
@@ -38,6 +47,8 @@ pub struct TickMs {
     pub per_tick: f32,
     /// 单独量的"一次状态回读 + 同步"成本（毫秒）——耦合接口的代价。
     pub readback_ms: f32,
+    /// `recompute_box` 打开时：每子步重算箱子（归约 + 回读 + 写 uniform）的**累计**毫秒。
+    pub box_ms: f32,
 }
 
 pub struct Packet {
@@ -47,6 +58,8 @@ pub struct Packet {
     pub(crate) total: u32,
     pub(crate) groups_n: u32,
     pub(crate) groups_total: u32,
+    /// 格表缓冲的**分配额度**（格数）；`refresh_box` 用它夹预算（详见 `PacketCfg::grid_bins_cap`）。
+    pub(crate) total_alloc: u32,
     pub(crate) pos_b: wgpu::Buffer,
     pub(crate) vel_b: wgpu::Buffer,
     pub(crate) counts_b: wgpu::Buffer,
@@ -54,6 +67,12 @@ pub struct Packet {
     pub(crate) cursor_b: wgpu::Buffer,
     pub(crate) overflow_b: wgpu::Buffer,
     pub(crate) int_params_b: wgpu::Buffer,
+    /// 网格 uniform（每子步重算箱子时要改它前 36 字节）。
+    pub(crate) grid_params_b: wgpu::Buffer,
+    /// 密度/力相位 uniform（同样含箱子三件套，偏移见 `make_params`）。
+    pub(crate) phase_params_b: wgpu::Buffer,
+    /// 常驻的包围盒归约阶段（`cfg.recompute_box` 时每子步用一次）。
+    pub(crate) bbox: crate::bbox::BboxStage,
     pub(crate) p_bin: wgpu::ComputePipeline,
     pub(crate) p_scan: wgpu::ComputePipeline,
     pub(crate) p_place: wgpu::ComputePipeline,

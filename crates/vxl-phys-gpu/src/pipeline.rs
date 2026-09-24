@@ -48,7 +48,7 @@ pub(crate) struct Bufs {
 pub(crate) fn make_buffers(
     device: &wgpu::Device,
     n: u32,
-    total: u32,
+    cap_total: u32,
     pos_flat: &[f32],
     vel_flat: &[f32],
     pmass: &[f32],
@@ -87,20 +87,22 @@ pub(crate) fn make_buffers(
     let dens_b = storage("p.dens", (n as u64) * 4, wgpu::BufferUsages::empty());
     let out_b = storage("p.out", (n as u64) * 24, wgpu::BufferUsages::empty());
     let bins_b = storage("p.bins", (n as u64) * 4, wgpu::BufferUsages::empty());
+    // ⚠️ 这三张**按格数**的缓冲是一次性分配的（与 CPU 侧 `Vec` 会自动增长不同）：
+    // `cap_total` = 分配额度，`refresh_box` 按它夹"总格数预算"⇒ 箱子跟随时不会越界写。
     let counts_b = storage(
         "p.counts",
-        ((total + 1) as u64) * 4,
+        ((cap_total + 1) as u64) * 4,
         wgpu::BufferUsages::empty(),
     );
     let start_b = storage(
         "p.start",
-        ((total + 1) as u64) * 4,
+        ((cap_total + 1) as u64) * 4,
         wgpu::BufferUsages::empty(),
     );
     let items_b = storage("p.items", (n as u64) * 4, wgpu::BufferUsages::empty());
     let cursor_b = storage(
         "p.cursor",
-        ((total + 1) as u64) * 4,
+        ((cap_total + 1) as u64) * 4,
         wgpu::BufferUsages::empty(),
     );
     let overflow_b = storage("p.overflow", 4, wgpu::BufferUsages::empty());
@@ -434,10 +436,13 @@ impl Packet {
         let total = cfg.total;
         // 四段各进一个 helper（`new` 由 310 行降到 ~90）：**持有结构体而不是就地解构**——
         // 后一段（bind group）要借前几段（`&bufs`/`&prm`/`&pipes`），解构会把它们移走。
-        let bufs = make_buffers(&device, n, total, pos_flat, vel_flat, pmass);
+        let cap_total = total.max(cfg.grid_bins_cap);
+        let bufs = make_buffers(&device, n, cap_total, pos_flat, vel_flat, pmass);
         let prm = make_params(&device, &cfg, n, total);
         let pipes = make_pipelines(&device);
         let binds = make_bind_groups(&device, &bufs, &prm, &pipes);
+        // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。
+        let bbox = crate::bbox::BboxStage::new(&device, &bufs.pos_b, n);
         Ok(Self {
             device,
             queue,
@@ -445,6 +450,7 @@ impl Packet {
             total,
             groups_n: n.div_ceil(64),
             groups_total: total.div_ceil(64),
+            total_alloc: cap_total,
             pos_b: bufs.pos_b,
             vel_b: bufs.vel_b,
             counts_b: bufs.counts_b,
@@ -452,6 +458,9 @@ impl Packet {
             cursor_b: bufs.cursor_b,
             overflow_b: bufs.overflow_b,
             int_params_b: prm.int_params_b,
+            grid_params_b: prm.grid_params_b,
+            phase_params_b: prm.phase_params_b,
+            bbox,
             p_bin: pipes.p_bin,
             p_scan: pipes.p_scan,
             p_place: pipes.p_place,
@@ -521,6 +530,64 @@ impl Packet {
         }
     }
 
+    /// **每子步重算箱子**（`cfg.recompute_box`）：归约 → 回读 → 同一条规则（`grid_box`）→ 写两组 uniform。
+    /// 返回这一步的墙钟毫秒（含回读同步）——诚实记账：这是"每子步一次往返"的代价。
+    ///
+    /// 为什么必须每子步：CPU 引擎在 `substep()` 开头就 `self.grid.rebuild(&self.pos, self.h)`
+    /// （见 `vxl-phys-fluid/src/fluid_step.rs`）⇒ GPU 若不与其同频，两条链的分箱/邻域就不同，
+    /// 逐 tick 漂移表失去意义。
+    fn refresh_box(&mut self, cfg: &PacketCfg) -> f32 {
+        let t = std::time::Instant::now();
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("bbox"),
+            });
+        self.bbox.encode(&self.queue, &mut enc);
+        self.queue.submit(Some(enc.finish()));
+        self.poll_wait().ok();
+        let (lo, hi) = self.bbox.read_corners(&self.device);
+        let (_, bin, dims) = vxl_phys_core::grid::grid_box(
+            vxl_phys_core::Vec3::new(lo[0], lo[1], lo[2]),
+            vxl_phys_core::Vec3::new(hi[0], hi[1], hi[2]),
+            cfg.h,
+            // 预算取 `min(GRID_MAX_BINS, 分配额度)`：GPU 的格表缓冲不会增长 ⇒ 超了就得粗化
+            // （粗化只让格边变粗：邻域集合由 `r ≤ h` 决定 ⇒ **物理不变**，代价是候选变多、变慢）。
+            vxl_phys_core::grid::GRID_MAX_BINS.min(self.total_alloc as usize),
+        );
+        // 活的格数决定规范化相位的分派数（箱子跟随时它每子步都会变）。
+        let total = dims[0] * dims[1] * dims[2];
+        // ⚠️ **`self.total` 必须跟着更新**：扫描→占位那段拷贝的长度按它算
+        // （`copy_buffer_to_buffer(..., (self.total + 1) * 4)`）——不更新的话，箱子一跟随，
+        // 拷贝长度就与活的格数不符 ⇒ 占位游标错位 ⇒ 邻域切片错 ⇒ 力爆炸。
+        // 首版漏了这条：零重力下也在 t=3 炸（被"零重力判别"抓出来：箱子几乎不动也炸 ⇒ 接线 bug）。
+        self.total = total;
+        self.groups_total = total.div_ceil(64);
+        // uniform 的**动态**字段（偏移口径见 `make_params`，其余静态字段不动）：
+        //   grid_params ：gmin 0..12 | inv 12..16 | dims 16..28 | n 28..32 | total 32..36
+        //   phase_params：gmin 0..12 | inv 12..16 | … | [n, dims0, dims1, dims2] 60..76
+        let mut head = Vec::with_capacity(16);
+        for x in [lo[0], lo[1], lo[2], 1.0 / bin] {
+            head.extend_from_slice(&x.to_le_bytes());
+        }
+        let mut dims_b = Vec::with_capacity(12);
+        for x in dims {
+            dims_b.extend_from_slice(&x.to_le_bytes());
+        }
+        self.queue.write_buffer(&self.grid_params_b, 0, &head);
+        self.queue.write_buffer(&self.grid_params_b, 16, &dims_b);
+        let total = dims[0] * dims[1] * dims[2];
+        self.queue
+            .write_buffer(&self.grid_params_b, 32, &total.to_le_bytes());
+        self.queue.write_buffer(&self.phase_params_b, 0, &head);
+        let mut tail = Vec::with_capacity(16);
+        for x in [self.n, dims[0], dims[1], dims[2]] {
+            tail.extend_from_slice(&x.to_le_bytes());
+        }
+        self.queue.write_buffer(&self.phase_params_b, 60, &tail);
+        (t.elapsed().as_secs_f64() * 1e3) as f32
+    }
+
     /// 跑 `ticks` 个 tick（每 tick `substeps` 个子步，子步 `dt = 1/(60·substeps)`）。
     /// `tick_readback = true` 时**每 tick** 回读一次状态（模拟耦合接口），否则只在末尾同步一次。
     pub fn run(
@@ -552,6 +619,31 @@ impl Packet {
         // 要摊掉首轮编译/首触成本，请由**调用方**显式跑一次丢弃计时的 `run`。
         let t0 = std::time::Instant::now();
         for _ in 0..ticks {
+            if cfg.recompute_box {
+                // **每子步重算箱子**（与 CPU 的 `substep()` 同频）：代价 = 每子步一次提交 + 回读往返，
+                // 单独记进 `out.box_ms` 以便读数里能看见这笔开销。
+                for si in 0..substeps {
+                    out.box_ms += self.refresh_box(cfg);
+                    let mut enc = self
+                        .device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+                    self.encode_substep(&mut enc, cfg, dt_sub, stages);
+                    if tick_readback && si + 1 == substeps {
+                        enc.copy_buffer_to_buffer(
+                            &self.pos_b,
+                            0,
+                            &self.readback_b,
+                            0,
+                            (self.n as u64) * 12,
+                        );
+                    }
+                    self.queue.submit(Some(enc.finish()));
+                }
+                if tick_readback {
+                    self.poll_wait().ok();
+                }
+                continue;
+            }
             let mut enc = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });

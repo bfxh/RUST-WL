@@ -69,4 +69,5 @@ impl Default for FluidConfig {
 
 /// 均匀格总数上限；超出则格边逐级加倍粗化（粗化不减正确性：
 /// r > h 的候选被核函数零剔除）。
-pub(crate) const GRID_MAX_BINS: usize = 1 << 20;
+/// **单一来源已移到 `vxl_phys_core::grid::GRID_MAX_BINS`**——GPU 侧每子步重算箱子要用同一个数。
+pub(crate) use vxl_phys_core::grid::GRID_MAX_BINS;

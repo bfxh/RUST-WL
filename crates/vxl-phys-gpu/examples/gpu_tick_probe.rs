@@ -22,13 +22,21 @@ fn main() {
     if let Some(k) = rest.iter().position(|a| a == "--adapter") {
         adapter_index = rest.get(k + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
     }
+    // `--box=follow`：每子步从位置重算箱子（与 CPU 同频）；默认 `fixed` = §12.1 的读数口径。
+    let follow_box = rest.iter().any(|a| a == "--box=follow");
+    // `--gravity`：开重力（自由落体；配合 `--box=follow` 才能不跑出箱子）。
+    let gravity_on = rest.iter().any(|a| a == "--gravity");
 
     let spacing = 0.05f32;
     // **零重力场景**：`pipeline::Packet` 的箱子是**固定**的（见其头注），自由落体会在几十个 tick 后
     // 把粒子全部钳进边缘格（段长撞 `cap`、计时失真）。关掉重力 ⇒ 流体留在箱内，且压 wave 让场景
     // 比自由落体更混沌 ⇒ 是**更好的**容差口径测试。重力项是每粒一次加法，不影响相位成本量级。
     let cfg0 = FluidConfig {
-        gravity: Vec3::ZERO,
+        gravity: if gravity_on {
+            Vec3::new(0.0, -9.81 * 0.1, 0.0)
+        } else {
+            Vec3::ZERO
+        },
         ..FluidConfig::default()
     };
     let h = cfg0.smoothing_radius;
@@ -105,6 +113,9 @@ fn main() {
         clamp_neg: f.config().tensile_instability_suppression,
         xsph_eps: f.config().xsph_viscosity,
         max_speed_frac: f.config().max_speed_frac,
+        recompute_box: follow_box,
+        // 跟随时给足额度（= CPU 侧同一个预算上限）：粒子散开后箱子变大，格表要装得下。
+        grid_bins_cap: if follow_box { 1 << 20 } else { total },
     };
     let mut pk = match Packet::new(adapter_index, pc, &pos_flat, &vel_flat, &pmass) {
         Ok(p) => p,

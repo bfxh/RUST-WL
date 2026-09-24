@@ -263,25 +263,12 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         .ok();
     rx.recv().ok();
     let data = slice.get_mapped_range();
-    let mut bb = [0u32; 6];
-    for (k, slot) in bb.iter_mut().enumerate() {
-        let o = k * 4;
-        *slot = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-    }
+    let bb = decode_bb(&data);
+    let (lo, hi) = bb_to_corners(bb);
     // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
     drop(data);
     readback.unmap();
 
-    let lo = [
-        ordered_to_f32(bb[0]),
-        ordered_to_f32(bb[1]),
-        ordered_to_f32(bb[2]),
-    ];
-    let hi = [
-        ordered_to_f32(bb[3]),
-        ordered_to_f32(bb[4]),
-        ordered_to_f32(bb[5]),
-    ];
     let (_, bin, dims) = grid_box(
         Vec3::new(lo[0], lo[1], lo[2]),
         Vec3::new(hi[0], hi[1], hi[2]),
@@ -298,6 +285,119 @@ pub fn box_on_adapter(adapter_index: usize, pos_flat: &[f32], h: f32, max_bins: 
         dims,
         total: dims[0] * dims[1] * dims[2],
         bb,
+    }
+}
+
+/// `bb` 的有序 u32 → 角点 `(min, max)`。
+fn bb_to_corners(bb: [u32; 6]) -> ([f32; 3], [f32; 3]) {
+    (
+        [
+            ordered_to_f32(bb[0]),
+            ordered_to_f32(bb[1]),
+            ordered_to_f32(bb[2]),
+        ],
+        [
+            ordered_to_f32(bb[3]),
+            ordered_to_f32(bb[4]),
+            ordered_to_f32(bb[5]),
+        ],
+    )
+}
+
+/// 回读字节 → `bb`（6 个有序 u32）。
+fn decode_bb(data: &[u8]) -> [u32; 6] {
+    let mut bb = [0u32; 6];
+    for (k, slot) in bb.iter_mut().enumerate() {
+        let o = k * 4;
+        *slot = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    }
+    bb
+}
+
+/// **常驻**包围盒阶段（`Packet` 用）：缓冲/管线只建一次，每子步只"写中性元 + 归约 + 回读"。
+pub struct BboxStage {
+    groups: u32,
+    bb_b: wgpu::Buffer,
+    readback: wgpu::Buffer,
+    bg: wgpu::BindGroup,
+    reduce: wgpu::ComputePipeline,
+}
+
+impl BboxStage {
+    /// 建常驻件（`pos_b` 复用管线自己的位置缓冲，不复制）。
+    pub fn new(device: &wgpu::Device, pos_b: &wgpu::Buffer, n: u32) -> Self {
+        let groups = n.div_ceil(WG).max(1);
+        let bb_b = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bbox.stage.bb"),
+            size: 24,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("bbox.stage.readback"),
+            size: 24,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let rp_b = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bbox.stage.rp"),
+            contents: &{
+                let mut b = Vec::with_capacity(16);
+                for x in [n, groups, 0, 0] {
+                    b.extend_from_slice(&x.to_le_bytes());
+                }
+                b
+            },
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let pipes = make_bbox_pipes(device, pos_b, &bb_b, &rp_b);
+        Self {
+            groups,
+            bb_b,
+            readback,
+            bg: pipes.bg,
+            reduce: pipes.reduce,
+        }
+    }
+
+    /// 一次"写中性元 → 归约 → 拷回读缓冲"（调用方负责 `submit`；三步在同一 encoder 内有序）。
+    pub fn encode(&self, queue: &wgpu::Queue, enc: &mut wgpu::CommandEncoder) {
+        // ⚠️ `write_buffer` 是**提交前**生效的队列操作 ⇒ 它一定落在下面的归约之前。
+        queue.write_buffer(&self.bb_b, 0, &bb_init_bytes());
+        {
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("bbox.stage.reduce"),
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(&self.reduce);
+            cp.set_bind_group(0, &self.bg, &[]);
+            cp.dispatch_workgroups(self.groups, 1, 1);
+        }
+        enc.copy_buffer_to_buffer(&self.bb_b, 0, &self.readback, 0, 24);
+    }
+
+    /// 同步回读角点（**调用方需先 `submit` + `poll_wait`**）。
+    pub fn read_corners(&self, device: &wgpu::Device) -> ([f32; 3], [f32; 3]) {
+        let slice = self.readback.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).ok();
+        });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .ok();
+        rx.recv().ok();
+        let data = slice.get_mapped_range();
+        let corners = bb_to_corners(decode_bb(&data));
+        // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
+        drop(data);
+        self.readback.unmap();
+        corners
     }
 }
 

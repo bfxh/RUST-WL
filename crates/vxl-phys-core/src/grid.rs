@@ -7,6 +7,10 @@ use crate::math::Vec3;
 /// 单维格数上限（钳位；与原 `UniformGrid::rebuild` 里的 `1 << 14` 一致）。
 pub const GRID_DIM_MAX: u32 = 1 << 14;
 
+/// 总格数上限（预算；与原 `vxl_phys_fluid::config::GRID_MAX_BINS` 一致）。
+/// **放在 core**：CPU 侧与 GPU 侧（每子步重算箱子的预算判据）必须用同一个数。
+pub const GRID_MAX_BINS: usize = 1 << 20;
+
 /// 由粒子包围盒 + 平滑长度算箱子三件套：`(min_corner, bin, dims)`，`bin` = **格边**。
 ///
 /// 规则（唯一来源；CPU 侧 `UniformGrid::rebuild` 调它，GPU 侧同样调它）：
