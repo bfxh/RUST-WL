@@ -68,6 +68,9 @@ impl World {
         let Some(mut st) = self.fluids[fi].2.take() else {
             return false;
         };
+        // **壁面**：让后端**自己**去收集（它从卡上读位置 ⇒ 主机那份脚手架是陈的，不能拿它收集）。
+        // 空 `boundaries`（纯 2b 场景）时后端直接返回 ⇒ 零开销。
+        st.gather_walls(self.fluids[fi].0.config().smoothing_radius, &self.providers);
         let (pos, vel, pmass, nf) = self.fluids[fi].0.raw_particles();
         let spans = self.fluids[fi].0.boundary_spans();
         st.step(dt, nf, pos, vel, pmass, spans);

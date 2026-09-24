@@ -16,10 +16,14 @@ use super::*;
 use vxl_phys_core::interop::FluidStepper;
 use vxl_phys_core::Vec3;
 
-/// 卡上步进后端：`Packet` + 聚合阶段 + 最近一次反作用（门面按同口径读）。
+/// 卡上步进后端：`Packet` + 聚合阶段 + 最近一次反作用（门面按同口径读）；
+/// `walls` = 可选的**壁面档**（`wall_ghost` 镜像 + `wall_project` 投影，宿主每 tick 喂接触表）。
 pub struct GpuFluidStepper {
     pk: Packet,
     stage: ReactionStage,
+    walls: Option<WallStage>,
+    /// 壁面 provider id 表（`gather_walls` 用；空 = 纯 2b 场景 ⇒ 不开销）。
+    boundaries: Vec<u32>,
     pc: PacketCfg,
     substeps: usize,
     n_fluid: u32,
@@ -29,13 +33,24 @@ pub struct GpuFluidStepper {
 
 impl GpuFluidStepper {
     /// 建后端。`packet` 必须已按**全量**粒子建好；`n_fluid`/`nb` 与包内一致，`substeps`
-    /// 与门面侧 `FluidConfig::substeps` 同值。
-    pub fn new(pk: Packet, pc: PacketCfg, substeps: usize, n_fluid: u32, nb: usize) -> Self {
+    /// 与门面侧 `FluidConfig::substeps` 同值。`walls` 只在用 provider 壁面时给
+    /// （用 `Packet::new_with_walls` 拿到的那个阶段），`boundaries` 给对应的 provider id 表。
+    pub fn new(
+        pk: Packet,
+        walls: Option<WallStage>,
+        boundaries: Vec<u32>,
+        pc: PacketCfg,
+        substeps: usize,
+        n_fluid: u32,
+        nb: usize,
+    ) -> Self {
         // `stage` 要在 `pk` 移进结构体**之前**建（结构体字面量按字段序求值）。
         let stage = ReactionStage::new(&pk);
         Self {
             pk,
             stage,
+            walls,
+            boundaries,
             pc,
             substeps: substeps.max(1),
             n_fluid,
@@ -80,13 +95,38 @@ impl FluidStepper for GpuFluidStepper {
         assert_eq!(pmass.len(), pos.len(), "pmass 长度与全粒子数不符");
         self.pk
             .upload_boundary_segment(n_fluid as u32, &pos[n_fluid..], &vel[n_fluid..]);
-        self.pk.run(&self.pc, 1, self.substeps, false);
+        self.pk.run_stages_with(
+            &self.pc,
+            0b111_1111,
+            1,
+            self.substeps,
+            false,
+            self.walls.as_ref(),
+        );
         self.reactions.clear();
         self.reactions.extend(self.stage.aggregate(&self.pk, spans));
     }
 
     fn reactions(&self) -> &[(u32, Vec3, Vec3)] {
         &self.reactions
+    }
+
+    /// **按 provider 收集壁面接触**并喂进壁面档：**从卡上读位置**（主机那份脚手架是陈的 ⇒ 位置必须以
+    /// 卡上为准，这是 facade 路径第一版踩的坑：差 0.177 m）；空 `boundaries` ⇒ 直接返回（纯 2b 零开销）。
+    fn gather_walls(&mut self, h: f32, providers: &dyn vxl_phys_core::interop::ProviderColliders) {
+        if self.boundaries.is_empty() {
+            return;
+        }
+        let Some(w) = self.walls.as_mut() else {
+            return;
+        };
+        let (gp, _) = self.pk.read_state();
+        let nf = self.n_fluid as usize;
+        let ps: Vec<Vec3> = (0..nf)
+            .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
+            .collect();
+        let (ids, start, planes) = gather_wall_contacts(&self.boundaries, h, &ps, providers);
+        w.upload(&self.pk, &ids, &start, &planes);
     }
 
     fn bounds(&self) -> Option<(Vec3, Vec3)> {

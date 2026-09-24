@@ -118,7 +118,16 @@ fn build_stepper(w: &World, fi: usize, adapter: usize) -> Option<GpuFluidStepper
     let pc = make_cfg(f);
     let substeps = f.config().substeps.max(1) as usize;
     let pk = Packet::new(adapter, pc, &p, &v, apmass).ok()?;
-    Some(GpuFluidStepper::new(pk, pc, substeps, nf as u32, nb))
+    // 本场景的容器是 2b 边界粒子（不是 provider 壁面）⇒ 壁面档给 `None`、边界表给空。
+    Some(GpuFluidStepper::new(
+        pk,
+        None,
+        Vec::new(),
+        pc,
+        substeps,
+        nf as u32,
+        nb,
+    ))
 }
 
 /// 浮盒（唯一动态体）的 `(y, vy)`；两个世界同序 ⇒ 索引相同。

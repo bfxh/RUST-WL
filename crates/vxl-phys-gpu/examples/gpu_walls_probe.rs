@@ -17,10 +17,10 @@
 //!
 //! 运行：`cargo run --release -p vxl-phys-gpu --example gpu_walls_probe -- [--adapter K]`
 
-use vxl_phys::{PhysConfig, Vec3, World};
+use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
 use vxl_phys_core::interop::ProviderColliders;
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
-use vxl_phys_gpu::pipeline::{Packet, PacketCfg, WallStage};
+use vxl_phys_gpu::pipeline::{GpuFluidStepper, Packet, PacketCfg, WallStage};
 
 const SPACING: f32 = 0.05;
 
@@ -129,6 +129,17 @@ fn bottom_mean_y(ps: &[Vec3], n_fluid: usize) -> f32 {
     ys.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let k = (ys.len() / 4).max(1);
     ys[..k].iter().sum::<f32>() / k as f32
+}
+
+/// 唯一动态体的 `(y, vy)`（两侧同序 ⇒ 索引相同）。
+fn box_yv(w: &World) -> (f32, f32) {
+    let mut out = (0.0f32, 0.0f32);
+    for i in 0..w.bodies.len() {
+        if w.bodies.is_dynamic(i) {
+            out = (w.bodies.position[i].y, w.bodies.linvel[i].y);
+        }
+    }
+    out
 }
 
 /// 静置仿真的参数（避免长参数表）。
@@ -269,10 +280,17 @@ fn main() {
     let Some(c) = chain_sim(&mk(true, false), prov) else {
         return;
     };
+    sim_report(&a, &b, &c, n, ticks);
+    // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
+    facade_path(adapter);
+}
+
+/// ② 静置仿真的读数（三档底层高度 + A/B 漂移）。
+fn sim_report(a: &[Vec3], b: &[Vec3], c: &[Vec3], n: usize, ticks: usize) {
     let (ya, yb, yc) = (
-        bottom_mean_y(&a, n),
-        bottom_mean_y(&b, n),
-        bottom_mean_y(&c, n),
+        bottom_mean_y(a, n),
+        bottom_mean_y(b, n),
+        bottom_mean_y(c, n),
     );
     let mut mx = 0.0f32;
     for (p, q) in a.iter().zip(b.iter()) {
@@ -291,5 +309,70 @@ fn main() {
         } else {
             "也站住了（异常：投影该是必需的）"
         }
+    );
+}
+
+/// ③ **facade 路径**：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）。
+/// 场景：体素水槽（provider 壁面）+ 铸装水块 + 浮盒（2b 边界粒子 ⇒ 反作用推它）；
+/// A = 整段 CPU；B = 该流体的步进在卡上（门面每 tick 让**后端自己**收集壁面接触表——
+/// 主机那份流体状态是陈的，位置必须以卡上为准）。
+fn facade_path(adapter: usize) {
+    const TICKS: usize = 150;
+    let mut wa = World::new(PhysConfig::default());
+    let ka = tank(&mut wa);
+    wa.add_fluid_with_boundary_coupling(water(), &[ka]);
+    wa.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.1),
+        },
+        Vec3::new(0.0, 1.5, 0.0),
+        Quat::IDENTITY,
+        400.0,
+    );
+    let mut wb = World::new(PhysConfig::default());
+    let kb = tank(&mut wb);
+    let fi = wb.add_fluid_with_boundary_coupling(water(), &[kb]);
+    wb.add_dynamic(
+        Shape::Box {
+            half: Vec3::splat(0.1),
+        },
+        Vec3::new(0.0, 1.5, 0.0),
+        Quat::IDENTITY,
+        400.0,
+    );
+    wa.step();
+    wb.step();
+    let f = &wb.fluids()[fi].0;
+    let (apos, avel, apmass, nf) = f.raw_particles();
+    let nb = apos.len() - nf;
+    let mut p = Vec::with_capacity(apos.len() * 3);
+    let mut v = Vec::with_capacity(apos.len() * 3);
+    for k in 0..apos.len() {
+        p.extend_from_slice(&[apos[k].x, apos[k].y, apos[k].z]);
+        v.extend_from_slice(&[avel[k].x, avel[k].y, avel[k].z]);
+    }
+    let pc = make_cfg(f);
+    let substeps = f.config().substeps.max(1) as usize;
+    let bounds = wb.fluids()[fi].1.clone();
+    let Some((pk, walls)) = Packet::new_with_walls(adapter, pc, &p, &v, apmass).ok() else {
+        println!("  ── ③ facade 路径：没起 GPU 管线（跳过）");
+        return;
+    };
+    let st = GpuFluidStepper::new(pk, Some(walls), bounds, pc, substeps, nf as u32, nb);
+    if !wb.set_fluid_stepper(fi, Box::new(st)) {
+        println!("  ── ③ facade 路径：登记后端失败（跳过）");
+        return;
+    }
+    for _ in 0..TICKS {
+        wa.step();
+        wb.step();
+    }
+    let (ya, va) = box_yv(&wa);
+    let (yb, vb) = box_yv(&wb);
+    println!("  ── ③ **facade 路径**（provider 壁面 + 卡上步进，{TICKS} tick）──");
+    println!(
+        "     浮盒 y {ya:.5} vs {yb:.5}（差 {:.2e} m）| vy {va:.5} vs {vb:.5}（差 {:.2e} m/s）",
+        (ya - yb).abs(),
+        (va - vb).abs()
     );
 }

@@ -117,8 +117,7 @@ pub trait CollisionProvider {
     /// 表面上离 `p` 最近的点；`None` = 查询范围外（视为无碰撞）。
     fn closest_point(&self, p: Vec3) -> Option<SurfaceHit>;
 
-    /// 为「盒形包络」（half + 位姿）生成接触点；返回是否产出了至少一个接触。
-    /// 默认实现 = 8 角点采样（`skin` 为预期接触带，`depth ≥ −skin` 的点才保留）。
+    /// 为「盒形包络」（half + 位姿）生成接触点；返回是否产出。默认实现 = 8 角点采样（`skin` 为预期接触带）。
     fn contacts_box(
         &self,
         half: Vec3,
@@ -311,6 +310,9 @@ pub trait FluidStepper {
     fn bounds(&self) -> Option<(Vec3, Vec3)> {
         None
     }
+
+    /// 让后端**自己**按 provider 收集壁面接触（**它才知道自己的粒子在哪**；`h` = 核半径）。默认空实现。
+    fn gather_walls(&mut self, _h: f32, _providers: &dyn ProviderColliders) {}
 }
 
 #[cfg(test)]
