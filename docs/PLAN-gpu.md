@@ -379,6 +379,29 @@ bind group，缓冲**只建一次**）+ `examples/gpu_tick_probe`（整 tick 计
 - `FluidSystem::raw_particles() -> (pos, vel, pmass, n_fluid)`：后端/耦合用的**全粒子**视图
   （`positions()`/`velocities()` 只给流体前缀，是给渲染/导出的）。
 
-**剩下**：① **边界粒子 tank 场景的验收**（静态盒体 → `set_boundary_particles` → 把"全部粒子 + pmass"
-喂给 `Packet` → 逐 tick 漂移表）；② **反作用回读**（2b 的 `bforce` → 体上的力/力矩，`aggregate_reactions`
-现在只在 CPU 侧）；③ 提供者壁面的 SDF 分支；④ `integrate.wgsl` 的刚体前缀。
+**剩下**：① **反作用回读**（2b 的 `bforce` → 体上的力/力矩，`aggregate_reactions` 现在只在 CPU 侧；
+`force.wgsl` 仍只算流体前缀的力）；② 提供者壁面的 SDF 分支（含密度轮的"壁面镜像鬼影"——CPU 侧
+`wall_planes` 那条，走 provider 几何，**边界粒子 tank 用不到**）；③ `integrate.wgsl` 的刚体前缀。
+
+### 13.1 边界粒子 tank 的验收（2026-09-24）——**已对齐**
+
+`gpu_tick_probe --tank`：静态盒体（地板 + 四壁）经 `set_boundary_particles` 变成 2b 边界粒子，
+**全部粒子 + 逐粒 `pmass`** 上传（`FluidSystem::raw_particles()`），CPU/GPU 同场景跑逐 tick 漂移表。
+场景：24³ 流体（13824）+ **20864 边界粒子**，零重力 + 剪切初速。
+
+| tick | Δpos max | \|Δv\| max | 动能比 | NaN |
+|---|---|---|---|---|
+| 1 | 0.00000 m | 1e-5 m/s | 1.0000 | 0 |
+| 30 | 0.00001 m | 4e-5 m/s | 1.0000 | 0 |
+| 60 | **0.00004 m** | 1.8e-4 m/s | **1.0000** | **0** |
+
+**接线里抓到的两条**（都是"数学早就在、接线没接"）：
+1. **相位 uniform 的 `n_fluid` 槽位写的是总粒子数**：`density.wgsl`/`force.wgsl` 靠 `j < n_fluid` 区分
+   "流体邻居 ⇒ 计 `sum`"与"边界邻居 ⇒ 计 `sum_b`"⇒ 写错后**全部邻居都当流体** ⇒ 一 tick 就炸
+   （动能比 289）。修：`make_params` 写 `cfg.n_fluid`。
+2. **密度核开头 `if i >= n_fluid { return; }`**：GPU 从不给**边界粒子**算密度 ⇒ 力核的
+   `press[j]/(ρ_j²)` 读到 0/0 ⇒ **8798 粒 NaN**。修：密度核处理**全部**粒子，边界走 Akinci 口径
+   （自身项用自己的 `pmass`、**不吃边界-边界对**、流体项**逐项** `pmass[j]*w`）——与 CPU
+   `fluid_density.rs` 的边界分支逐条对应。相位 uniform 为此补了 `n_total` 槽（原 `_pad`）。
+
+代价与注意：密度核多累一个 `sum_bf`（流体场景也跑，约几 %）；`force.wgsl` 仍只算流体前缀（反应未接）。

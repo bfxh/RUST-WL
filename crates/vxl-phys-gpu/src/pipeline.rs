@@ -181,7 +181,10 @@ pub(crate) fn make_params(device: &wgpu::Device, cfg: &PacketCfg, n: u32, total:
         for x in cfg.gravity {
             b.extend_from_slice(&x.to_le_bytes());
         }
-        for x in [n, cfg.dims[0], cfg.dims[1], cfg.dims[2], 0] {
+        // 末段首字段是相位核读的 **`n_fluid`**（不是总粒子数）：`density.wgsl`/`force.wgsl` 用它
+        // 区分"流体邻居 ⇒ 计入 sum"与"边界邻居 ⇒ 计入 sum_b"（Akinci 口径，与 CPU 同式）。
+        // ⚠️ 首版这里写的是 `n`（全量）⇒ 边界粒子上卡后全被当流体 ⇒ 一 tick 就炸（动能比 289）。
+        for x in [cfg.n_fluid, cfg.dims[0], cfg.dims[1], cfg.dims[2], n] {
             b.extend_from_slice(&x.to_le_bytes());
         }
         b

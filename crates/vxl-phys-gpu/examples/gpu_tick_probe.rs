@@ -9,9 +9,56 @@
 //!
 //! 运行：`cargo run --release -p vxl-phys-gpu --example gpu_tick_probe -- [n] [ticks] [--adapter K]`
 
-use vxl_phys_core::Vec3;
+use vxl_phys_core::{Quat, Shape, Vec3};
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
 use vxl_phys_gpu::pipeline::{Packet, PacketCfg};
+
+/// `--tank` 的静态盒体（地板 + 四壁）：按"表面采样 + 两层内移"变成 2b 边界粒子
+/// （壁厚取 2×晶格间距 ⇒ 采成实心；四壁贴着流体块的 x/z 边界，地板顶面 = 流体底面）。
+fn tank_bodies(n: usize, spacing: f32, h: f32) -> Vec<(u32, Shape, vxl_phys_fluid::BodyPose)> {
+    let half = n as f32 * spacing * 0.5;
+    let t = 2.0 * spacing;
+    let hgt = (n as f32 * spacing) + 2.0 * h;
+    let tip = 0.5 + hgt * 0.5;
+    let pose = |pos: Vec3| vxl_phys_fluid::BodyPose {
+        pos,
+        rot: Quat::IDENTITY,
+        linvel: Vec3::ZERO,
+        angvel: Vec3::ZERO,
+    };
+    let span = half + 2.0 * t;
+    let wall_x = |x: f32, id: u32| {
+        (
+            id,
+            Shape::Box {
+                half: Vec3::new(t * 0.5, hgt * 0.5, span),
+            },
+            pose(Vec3::new(x, tip, 0.0)),
+        )
+    };
+    let wall_z = |z: f32, id: u32| {
+        (
+            id,
+            Shape::Box {
+                half: Vec3::new(span, hgt * 0.5, t * 0.5),
+            },
+            pose(Vec3::new(0.0, tip, z)),
+        )
+    };
+    vec![
+        (
+            0u32,
+            Shape::Box {
+                half: Vec3::new(span, t * 0.5, span),
+            },
+            pose(Vec3::new(0.0, 0.5 - t * 0.5, 0.0)),
+        ),
+        wall_x(half + t * 0.5, 1),
+        wall_x(-(half + t * 0.5), 2),
+        wall_z(half + t * 0.5, 3),
+        wall_z(-(half + t * 0.5), 4),
+    ]
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -26,6 +73,9 @@ fn main() {
     let follow_box = rest.iter().any(|a| a == "--box=follow");
     // `--gravity`：开重力（自由落体；配合 `--box=follow` 才能不跑出箱子）。
     let gravity_on = rest.iter().any(|a| a == "--gravity");
+    // `--tank`：给 2b **边界粒子**（地板 + 四壁的静态盒体）——用来验"边界粒子在 GPU 侧也跑得对"：
+    // 密度/力核里的 `sum_b`/`m_j = pmass[j]` 是 2b 的数学，积分则必须**只跑流体前缀**。
+    let tank = rest.iter().any(|a| a == "--tank");
 
     let spacing = 0.05f32;
     // **零重力场景**：`pipeline::Packet` 的箱子是**固定**的（见其头注），自由落体会在几十个 tick 后
@@ -55,6 +105,11 @@ fn main() {
     for _ in 0..5 {
         f.step(dt_tick, &vxl_phys_core::interop::NoProviders);
     }
+    if tank {
+        let bodies = tank_bodies(n, spacing, h);
+        let nb = f.set_boundary_particles(&bodies);
+        println!("  2b 边界粒子：{nb} 个（地板 + 四壁；流体 {} 个）", f.len());
+    }
     // **给一个剪切初速**：零重力下完美晶格的 ρ ≡ ρ0 ⇒ p ≡ 0 ⇒ 全程静止（那样容差口径根本没被压到）。
     // 加一层 shear ⇒ 有真动力学，又是**受限**的（流体留在箱内，不撞固定箱子的边缘格）。
     {
@@ -71,8 +126,10 @@ fn main() {
         let gd = f.neighbor_grid();
         (gd.min, gd.inv, gd.dims)
     };
-    let pos0: Vec<Vec3> = f.positions().to_vec();
-    let vel0: Vec<Vec3> = f.velocities().to_vec();
+    // **全部粒子**（含 2b 边界粒子）：`raw_particles` 给后端用的全量视图（`positions()` 只给流体前缀）。
+    let (apos, avel, apmass, n_fluid) = f.raw_particles();
+    let pos0: Vec<Vec3> = apos.to_vec();
+    let vel0: Vec<Vec3> = avel.to_vec();
     let np = pos0.len();
     let total = gdims.0 * gdims.1 * gdims.2;
 
@@ -83,14 +140,15 @@ fn main() {
         pos_flat.extend_from_slice(&[pos0[k].x, pos0[k].y, pos0[k].z]);
         vel_flat.extend_from_slice(&[vel0[k].x, vel0[k].y, vel0[k].z]);
     }
+    // **逐粒质量**（流体 = 粒子质量；边界 = 2b 的面密度质量 ⇒ 那个 `sum_b`/`m_j` 用的就是它）。
+    let pmass: Vec<f32> = apmass.to_vec();
     let mass = f.particle_mass();
-    let pmass = vec![mass; np];
     let k6 = 315.0 / (64.0 * std::f32::consts::PI * h.powi(9));
     let ks = 45.0 / (std::f32::consts::PI * h.powi(6));
     let pc = PacketCfg {
         n: np as u32,
-        // 本探针的场景是纯流体（无 2b 边界粒子）⇒ 流体前缀 = 全部；接边界场景时改成真实前缀。
-        n_fluid: np as u32,
+        // 流体前缀（积分只跑它）；纯流体场景时 = n。
+        n_fluid: n_fluid as u32,
         total,
         gmin: [gmin.x, gmin.y, gmin.z],
         inv: ginv,
@@ -139,7 +197,10 @@ fn main() {
             let mut ke_c = 0.0f64;
             let mut ke_g = 0.0f64;
             let mut bad = 0usize;
-            for i in 0..np {
+            // **只比流体前缀**：CPU 侧的 `positions()/velocities()` 就是流体，边界粒子是运动学冻结的
+            // （比它没意义，且下标会越界）。
+            let nf = n_fluid;
+            for i in 0..nf {
                 let (px, py, pz) = (pos_gpu[i * 3], pos_gpu[i * 3 + 1], pos_gpu[i * 3 + 2]);
                 if !px.is_finite() || !py.is_finite() || !pz.is_finite() {
                     bad += 1;
@@ -165,7 +226,7 @@ fn main() {
                 ke_c += 0.5 * f64::from(mass) * f64::from(vc.length_squared());
                 ke_g += 0.5 * f64::from(mass) * f64::from(vg.length_squared());
             }
-            (bad, mx, sum / np as f64, dv, ke_g / ke_c.max(1e-30))
+            (bad, mx, sum / nf.max(1) as f64, dv, ke_g / ke_c.max(1e-30))
         };
         for t in 1..=ticks {
             f.step(dt_tick, &vxl_phys_core::interop::NoProviders);

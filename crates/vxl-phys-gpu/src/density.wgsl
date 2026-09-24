@@ -26,7 +26,9 @@ struct Params {
     nx: u32,
     ny: u32,
     nz: u32,
-    _pad: u32,
+    /// **总粒子数**（含 2b 边界粒子）——密度核要对**全部**粒子算密度（边界粒子也要有 ρ/`press`，
+    /// 因为力核的邻居项要读 `press[j]/(ρ_j²)`；不算是除零 ⇒ NaN）。
+    n_total: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
@@ -48,7 +50,8 @@ fn axis_idx(o: f32, v: f32, inv: f32, n: u32) -> i32 {
 @compute @workgroup_size(64)
 fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
-    if i >= P.n_fluid {
+    // **全部粒子**（含边界）：边界粒子的 ρ 是力核的邻域项要用的（见 `n_total` 的注释）。
+    if i >= P.n_total {
         return;
     }
     let pi = p3(i);
@@ -59,6 +62,8 @@ fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
     let nz = i32(P.nz);
     var sum = P.w0;
     var sum_b = 0.0;
+    /// 边界 i 用的流体项：**逐项** `pmass[j]*w`（与 CPU 的累积式一致）。
+    var sum_bf = 0.0;
     // 与 CPU 同序：dz 外层、dy 中层、dx 内层；格内按 items 序。
     for (var dz = -1; dz <= 1; dz = dz + 1) {
         let z = az + dz;
@@ -87,7 +92,11 @@ fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
                         let w = P.k6 * t * t * t;
                         if (j < P.n_fluid) {
                             sum = sum + w;
-                        } else {
+                            sum_bf = sum_bf + pmass[j] * w;
+                        } else if (i < P.n_fluid) {
+                            // 只有**流体** i 吃边界贡献；边界 i 不吃边界-边界对（Akinci 口径，
+                            // 见 CPU `fluid_density.rs`：让边界互相供密度 ⇒ ρ_b 爆抬 ⇒ p_b 爆
+                            // ⇒ 反作用整片失真）。
                             sum_b = sum_b + pmass[j] * w;
                         }
                     }
@@ -95,5 +104,10 @@ fn density(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
         }
     }
-    dens[i] = P.mass * sum + sum_b;
+    if (i < P.n_fluid) {
+        dens[i] = P.mass * sum + sum_b;
+    } else {
+        // 边界：自身项用**自己的** `pmass`、流体项**逐项** `pmass[j]*w`（与 CPU 同累积式）。
+        dens[i] = pmass[i] * P.w0 + sum_bf;
+    }
 }

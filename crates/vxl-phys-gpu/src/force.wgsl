@@ -28,7 +28,8 @@ struct Params {
     nx: u32,
     ny: u32,
     nz: u32,
-    _pad: u32,
+    /// 总粒子数（与 `density.wgsl` 同布局；本核只用 `n_fluid`——边界粒子的**力**属"反应读回"那一步）。
+    n_total: u32,
 };
 
 @group(0) @binding(0) var<uniform> P: Params;
