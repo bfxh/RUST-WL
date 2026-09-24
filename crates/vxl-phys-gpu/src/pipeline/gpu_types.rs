@@ -82,6 +82,8 @@ pub struct Packet {
     pub(crate) phase_params_b: wgpu::Buffer,
     /// 常驻的包围盒归约阶段（`cfg.recompute_box` 时每子步用一次）。
     pub(crate) bbox: crate::bbox::BboxStage,
+    /// 力/积分相位的输出缓冲（每粒 6 个 f32：`(加速度或反作用力, XSPH)`）——"反作用回读"从它取边界段。
+    pub(crate) out_b: wgpu::Buffer,
     pub(crate) p_bin: wgpu::ComputePipeline,
     pub(crate) p_scan: wgpu::ComputePipeline,
     pub(crate) p_place: wgpu::ComputePipeline,

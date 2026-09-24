@@ -477,6 +477,7 @@ impl Packet {
             grid_params_b: prm.grid_params_b,
             phase_params_b: prm.phase_params_b,
             bbox,
+            out_b: bufs.out_b,
             p_bin: pipes.p_bin,
             p_scan: pipes.p_scan,
             p_place: pipes.p_place,
@@ -691,6 +692,48 @@ impl Packet {
     pub fn restore(&self, pos: &[f32], vel: &[f32]) {
         self.queue.write_buffer(&self.pos_b, 0, &f32_bytes(pos));
         self.queue.write_buffer(&self.vel_b, 0, &f32_bytes(vel));
+    }
+
+    /// **回读边界粒子的反作用力**（`out_b` 的后缀；末子步的值，每粒 6 个 f32：`(力, xsph)`）。
+    ///
+    /// 只回读边界段（`(n − n_fluid)` 粒）——这是"反作用回读"的最小代价形态，验收时与 CPU 的
+    /// `FluidSystem::boundary_forces()` 对拍（见 `PLAN-gpu.md` §13.2）。
+    pub fn read_boundary_forces(&self, n_fluid: u32) -> Vec<f32> {
+        let off = (n_fluid as u64) * 24;
+        let bytes = ((self.n - n_fluid) as u64) * 24;
+        if bytes == 0 {
+            return Vec::new();
+        }
+        let rb = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("p.bforce_rb"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("p.bforce.enc"),
+            });
+        enc.copy_buffer_to_buffer(&self.out_b, off, &rb, 0, bytes);
+        self.queue.submit(Some(enc.finish()));
+        self.poll_wait().ok();
+        let slice = rb.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).ok();
+        });
+        self.poll_wait().ok();
+        rx.recv().ok();
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity((bytes / 4) as usize);
+        for ch in data.chunks_exact(4) {
+            out.push(f32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]));
+        }
+        // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
+        drop(data);
+        rb.unmap();
+        out
     }
 
     /// 格表句柄（诊断/复核用）：`(start, cursor, 活的格数)`。

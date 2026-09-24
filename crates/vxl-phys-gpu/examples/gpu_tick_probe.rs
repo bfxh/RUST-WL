@@ -239,6 +239,29 @@ fn main() {
             }
         }
     }
+    // ③b **反作用回读**验收（`--tank`）：GPU 的边界受力 vs CPU 的 `boundary_forces()`——
+    // 同一末态、同一子步（两边都停在末子步边界）⇒ 只该差浮点累加序（`PLAN-gpu.md` §13.2）。
+    if tank {
+        let gf = pk.read_boundary_forces(n_fluid as u32);
+        let cf = f.boundary_forces();
+        let (mut mx, mut scale) = (0.0f32, 0.0f32);
+        let (mut sc, mut sg) = (Vec3::ZERO, Vec3::ZERO);
+        for (k, b) in cf.iter().enumerate() {
+            let g = Vec3::new(gf[k * 6], gf[k * 6 + 1], gf[k * 6 + 2]);
+            mx = mx.max((*b - g).length());
+            scale += b.length();
+            sc += *b;
+            sg += g;
+        }
+        println!(
+            "  ├ 反作用（{} 粒边界）：max |ΔF| = {mx:.3e} N（相对 Σ|F_cpu| = {:.2e}）| ΣF：CPU {:.4e} N vs GPU {:.4e} N（差 {:.2e}）",
+            cf.len(),
+            mx / scale.max(1e-30),
+            sc.length(),
+            sg.length(),
+            (sc - sg).length()
+        );
+    }
     // ④ CPU 引擎的相位计时（**放在漂移表之后**：它会把状态推进，放在前面会让对照组错位一个 tick
     //    ——踩过：那样 GPU 全程滞后一 tick，漂移表里表现为"刚性平移 + 精确 g·Δt"的假信号；
     //    同一类坑还有一次：`Packet::run` 内部曾自带"预热一个 tick" ⇒ 每次调用都多推一 tick。

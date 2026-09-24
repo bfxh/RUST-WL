@@ -56,9 +56,12 @@ fn axis_idx(o: f32, v: f32, inv: f32, n: u32) -> i32 {
 @compute @workgroup_size(64)
 fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
-    if i >= P.n_fluid {
+    // **全部粒子**：流体支 = 加速度（+ XSPH）；边界支 = **反作用**（作用在边界粒子上的成对力，
+    // 供"反作用回读"用——`PLAN-gpu.md` §13.2）。
+    if i >= P.n_total {
         return;
     }
+    let boundary = i >= P.n_fluid;
     let pi = p3(i);
     let vi = v3(i);
     let rho_i = dens[i];
@@ -68,7 +71,9 @@ fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
     let az = axis_idx(P.gmin.z, pi.z, P.inv, P.nz);
     let ny = i32(P.ny);
     let nz = i32(P.nz);
-    var a = P.gvec;
+    // 流体：以重力起手（加速度口径）；边界：从 0 起（反作用只含成对力——CPU 的 `bforce` 同此，
+    // 且每子步清零重累）。
+    var a = select(P.gvec, vec3<f32>(0.0, 0.0, 0.0), boundary);
     var xs = vec3<f32>(0.0, 0.0, 0.0);
     for (var dz = -1; dz <= 1; dz = dz + 1) {
         let z = az + dz;
@@ -85,6 +90,8 @@ fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
                 for (var k = a0; k < b0; k = k + 1u) {
                     let j = cell_items[k];
                     if (j == i) { continue; }
+                    // 边界-边界不成对（Akinci 口径，与密度核一致；CPU 的 `bforce` 只从流体侧累加）。
+                    if (boundary && j >= P.n_fluid) { continue; }
                     let pj = p3(j);
                     let d = pi - pj;
                     let r2 = d.x * d.x + d.y * d.y + d.z * d.z;
@@ -96,19 +103,26 @@ fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
                     let mj = pmass[j];
                     let coef = mj * (P.ks * t * t) * (ci2 + cj2);
                     let denom = max(r, 1e-9);
-                    a = a + d * (coef / denom);
+                    // **成对质量因子**：流体支 = 1（`coef` 里已含 `m_j` ⇒ 与 CPU 的 `acc +=` 同式）；
+                    // 边界支 = `m_i`（⇒ `m_i·m_j·…` = CPU 的 `bforce[j] -= d·(mi·coef/…)`）。
+                    // 符号：核里的 `d = p_i − p_j`，而 CPU 的 `d = p_流体 − p_边界` **反向** ⇒
+                    // 边界支的 `-=` 在这里正好回到同样的 `+d`（两处符号都翻）。
+                    let mfac = select(1.0, pmass[i], boundary);
+                    a = a + d * (mfac * coef / denom);
                     // Monaghan 人工黏度（仅接近对）：v_dn = −(v_i−v_j)·d（展开同序）
                     let vij = vi - v3(j);
                     let vdn = -(vij.x * d.x + vij.y * d.y + vij.z * d.z);
                     if (vdn > 0.0) {
                         let mu = vdn * P.h / (r2 + 0.01 * P.h2);
                         let cc = mj * (P.alpha_c * mu / (0.5 * (rho_i + rho_j))) * (P.ks * t * t);
-                        a = a + d * (cc / denom);
+                        a = a + d * (mfac * cc / denom);
                     }
-                    // XSPH：Σ m·2/(ρ_i+ρ_j)·W·(v_j − v_i)
-                    let tt = P.h2 - r2;
-                    let w = P.k6 * tt * tt * tt;
-                    xs = xs + (v3(j) - vi) * (mj * 2.0 / (rho_i + rho_j) * w);
+                    if (!boundary) {
+                        // XSPH：Σ m·2/(ρ_i+ρ_j)·W·(v_j − v_i)（只有流体被积分 ⇒ 只有流体需要它）
+                        let tt = P.h2 - r2;
+                        let w = P.k6 * tt * tt * tt;
+                        xs = xs + (v3(j) - vi) * (mj * 2.0 / (rho_i + rho_j) * w);
+                    }
                 }
             }
         }
