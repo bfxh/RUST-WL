@@ -26,7 +26,7 @@ use vxl_phys_gpu::pipeline::{GpuFluidStepper, Packet, PacketCfg, WallSide, WallS
 // `examples/diag.rs` 而与其它示例撞名）。文件名与主档同名目录并列 ⇒ 一眼看出归属。
 #[path = "gpu_walls_probe/diag.rs"]
 mod diag;
-use diag::{band_profile, bottom_mean_y, chain_sim, chain_sim_dens, sim_2b, Sim};
+use diag::{band_profile, bottom_mean_y, chain_sim, chain_sim_full, sim_2b, Sim};
 
 const SPACING: f32 = 0.05;
 
@@ -161,7 +161,9 @@ fn onestep_ab(
     let init = flat(&cpu);
     let cfg = make_cfg(&cpu);
     cpu.step(1.0 / 60.0, prov); // 一整个 tick = 一个子步
-    let (ca, cd) = (cpu.positions().to_vec(), cpu.densities().to_vec());
+    let ca = cpu.positions().to_vec();
+    let cd = cpu.densities().to_vec();
+    let cacc = cpu.accelerations().to_vec(); // 力相输出 ⇒ 与卡上 `read_out` 同时点
     let sim = Sim {
         init: &init,
         cfg,
@@ -173,9 +175,10 @@ fn onestep_ab(
         h,
         adapter,
     };
-    let Some((gb, gd)) = chain_sim_dens(&sim, prov) else {
+    let Some(out) = chain_sim_full(&sim, prov) else {
         return;
     };
+    let (gb, gd, gacc) = (out.pos, out.dens, out.acc);
     let mut mpos = 0.0f32;
     for (p, q) in ca.iter().zip(gb.iter()) {
         mpos = mpos.max((*p - *q).length());
@@ -189,15 +192,27 @@ fn onestep_ab(
         }
     }
     let tag = match (ghost, project) {
-        (false, _) => "无壁面档",
-        (true, true) => "镜像+投影",
-        (true, false) => "只镜像（**表新鲜** ⇒ 隔离镜像）",
+        (false, _) => "无壁面档（两侧同关 ✅）",
+        (true, true) => "镜像+投影（两侧同开 ✅）",
+        // ⚠️ 这一档**不是**可判读的对照：CPU 侧镜像与投影**共用一个 `boundaries` 开关** ⇒ 关不掉
+        // 单侧的投影 ⇒ 它测到的是"投影那一推 + 法向速度归零"的**作用量**（≈ 40 mm = `vmax·dt`），
+        // 不是"镜像的差"。留着只为演示那个量级；判读用它 = 混变量的对照（比没有对照更坏）。
+        (true, false) => "⚠️ 只镜像=**非对称消融**（CPU 投影仍开 ⇒ 只看作用量，**不作判读**）",
     };
+    let (mut ma, mut acnt) = (0.0f32, 0usize);
+    for (x, y) in cacc.iter().zip(gacc.iter()) {
+        let d = (*x - *y).length();
+        ma = ma.max(d);
+        if d > 1.0 {
+            acnt += 1; // >1 m/s²（近壁压力梯度是几百 m/s² 量级）
+        }
+    }
     println!(
-        "  ── ②k 单子步 A/B（substeps=1；{tag}）── max|Δpos| **{mpos:.2e} m** | max|Δρ| **{mrho:.3e} kg/m³** | |Δρ|>0.1 的粒数 {cnt}/{}",
+        "  ── ②k 单子步 A/B（substeps=1；{tag}）── max|Δpos| **{mpos:.2e} m** | max|Δρ| **{mrho:.3e} kg/m³**（>0.1 的粒数 {cnt}/{}）| **max|Δacc| {ma:.3e} m/s²**（>1 的粒数 {acnt}/{}）",
+        cd.len(),
         cd.len()
     );
-    // 逐粒定位：最差 3 粒的**位移**（= 该链这一步的速度 × dt；`vmax·dt` 就是限速天花板）+ 两侧密度。
+    // 逐粒定位：最差 3 粒的**位移**（= 该链这一步的速度 × dt；`vmax·dt` 就是限速天花板）+ 密度 + 加速度。
     let dt = 1.0 / 60.0;
     let ip = |i: usize| Vec3::new(init.0[i * 3], init.0[i * 3 + 1], init.0[i * 3 + 2]);
     let mut worst: Vec<(usize, f32)> = (0..ca.len())
@@ -207,11 +222,13 @@ fn onestep_ab(
     for &(i, d) in worst.iter().take(3) {
         let (da, db) = ((ca[i] - ip(i)).length(), (gb[i] - ip(i)).length());
         println!(
-            "        #{i}：差 {d:.2e} m | A 位移 {da:.2e} / B 位移 {db:.2e} m（|v| {:.2} / {:.2} m/s）| ρ A {:.3} / B {:.3}",
+            "        #{i}：差 {d:.2e} m | A 位移 {da:.2e} / B 位移 {db:.2e} m（|v| {:.2} / {:.2} m/s）| ρ A {:.3} / B {:.3} | |a| A {:.4e} / B {:.4e} m/s²",
             da / dt,
             db / dt,
             cd[i],
-            gd[i]
+            gd[i],
+            cacc[i].length(),
+            gacc[i].length()
         );
     }
 }
@@ -241,9 +258,10 @@ fn dens_split(
         h,
         adapter,
     };
-    let Some((_, gd)) = chain_sim_dens(&sim, prov) else {
+    let Some(out) = chain_sim_full(&sim, prov) else {
         return;
     };
+    let gd = out.dens;
     let (mut mx, mut mxs, mut cnt, mut mean) = (0.0f32, 0.0f32, 0usize, 0.0f32);
     for (x, y) in cd.iter().zip(gd.iter()) {
         let d = x - y;

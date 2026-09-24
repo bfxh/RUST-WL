@@ -132,41 +132,7 @@ impl WallTable {
     /// **读回密度**（前 `n` 粒；诊断/验收用）：与 CPU 的 `densities()` 逐粒对拍。
     /// 走的是建包时转交的 `dens` 句柄（`Packet` 自己不持有它，见 `new_with_walls` 注）。
     pub(crate) fn read_dens(&self, pkt: &Packet, n: usize) -> Vec<f32> {
-        let bytes = (n as u64) * 4;
-        let rb = pkt.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wall.dens_rb"),
-            size: bytes.max(4),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut enc = pkt
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(&self.dens_b, 0, &rb, 0, bytes);
-        pkt.queue.submit(Some(enc.finish()));
-        pkt.poll_wait().ok();
-        let slice = rb.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            tx.send(r).ok();
-        });
-        pkt.poll_wait().ok();
-        rx.recv().ok();
-        let data = slice.get_mapped_range();
-        // 按索引解码（**别用 `chunks_exact`**：CI 的 clippy 比本机新，会判"constant chunk size"）。
-        let mut out = Vec::with_capacity(n);
-        for k in 0..n {
-            let o = k * 4;
-            out.push(f32::from_le_bytes([
-                data[o],
-                data[o + 1],
-                data[o + 2],
-                data[o + 3],
-            ]));
-        }
-        drop(data);
-        rb.unmap();
-        out
+        pkt.read_f32_head(&self.dens_b, n)
     }
 
     /// 分派这趟（`pipe` = 要跑的入口；条目为 0 ⇒ 空操作）。

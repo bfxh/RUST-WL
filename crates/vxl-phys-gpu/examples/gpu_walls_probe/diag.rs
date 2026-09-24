@@ -145,12 +145,20 @@ pub struct Sim<'a> {
 
 /// 跑一条**卡上仿真链**：每 tick 收平面表 → 上传 → 推进一个 tick（可带鬼影/投影）。
 pub fn chain_sim(s: &Sim, prov: &dyn ProviderColliders) -> Option<Vec<Vec3>> {
-    chain_sim_dens(s, prov).map(|(p, _)| p)
+    chain_sim_full(s, prov).map(|o| o.pos)
 }
 
-/// 与 [`chain_sim`] 同体，只是**多回读一次卡上密度**（分相定位用：密度同而位置不同 ⇒ 差在力/积分相；
-/// 密度就不同 ⇒ 密度/镜像相）。多出的那次回读只在链末发生一次 ⇒ 对读数无影响。
-pub fn chain_sim_dens(s: &Sim, prov: &dyn ProviderColliders) -> Option<(Vec<Vec3>, Vec<f32>)> {
+/// 卡上链的**三个回读量**（分相定位用）：位置、密度（镜像之后）、**力相输出**（`acc`，积分的直接输入）。
+/// 三个都取**最后一个子步**的产物 ⇒ 与 CPU 的 `positions()/densities()/accelerations()` 同时点。
+pub struct ChainOut {
+    pub pos: Vec<Vec3>,
+    pub dens: Vec<f32>,
+    pub acc: Vec<Vec3>,
+}
+
+/// 与 [`chain_sim`] 同体，只是**多回读密度与力相输出**（分相定位：密度同而力相输出不同 ⇒ 力相本身；
+/// 力相输出同而位移不同 ⇒ 积分相）。多出的两次回读只在链末发生一次 ⇒ 对读数无影响。
+pub fn chain_sim_full(s: &Sim, prov: &dyn ProviderColliders) -> Option<ChainOut> {
     let (init_pos, init_vel, init_mass) = s.init;
     let (mut pk, mut walls) =
         Packet::new_with_walls(s.adapter, s.cfg, init_pos, init_vel, init_mass).ok()?;
@@ -176,7 +184,12 @@ pub fn chain_sim_dens(s: &Sim, prov: &dyn ProviderColliders) -> Option<(Vec<Vec3
     let pos = (0..n)
         .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
         .collect();
-    // 卡上密度 = **最后一个子步**密度相位的产物（与 CPU `densities()` 同一时点口径）。
-    let dens = walls.read_dens(&pk, s.cfg.n_fluid as usize);
-    Some((pos, dens))
+    let nf = s.cfg.n_fluid as usize;
+    let dens = walls.read_dens(&pk, nf);
+    // 力相输出：`(acc.xyz, xsph.xyz)` 交错，回读全体（`from = 0`）。
+    let out = pk.read_out(0);
+    let acc = (0..nf)
+        .map(|i| Vec3::new(out[i * 6], out[i * 6 + 1], out[i * 6 + 2]))
+        .collect();
+    Some(ChainOut { pos, dens, acc })
 }

@@ -8,12 +8,17 @@ use super::*;
 
 impl Packet {
     /// **回读边界粒子的反作用力**（`out_b` 的后缀；末子步的值，每粒 6 个 f32：`(力, xsph)`）。
-    ///
-    /// 只回读边界段（`(n − n_fluid)` 粒）——这是"反作用回读"的最小代价形态，验收时与 CPU 的
-    /// `FluidSystem::boundary_forces()` 对拍（见 `PLAN-gpu.md` §13.2）。
     pub fn read_boundary_forces(&self, n_fluid: u32) -> Vec<f32> {
-        let off = (n_fluid as u64) * 24;
-        let bytes = ((self.n - n_fluid) as u64) * 24;
+        self.read_out(n_fluid)
+    }
+
+    /// **读回 `out`（力相输出）的第 `from` 粒起直到末尾**（每粒 6 个 f32：`(acc.xyz, xsph.xyz)` 交错）。
+    ///
+    /// `from = 0` ⇒ **全体**：分相定位用——力相输出是积分的**直接输入**，所以"密度逐粒同、位移却不同"
+    /// 这条矛盾要么卡在它身上，要么卡在它下游的积分上；`from = n_fluid` ⇒ 边界段（反作用回读）。
+    pub fn read_out(&self, from: u32) -> Vec<f32> {
+        let off = (from as u64) * 24;
+        let bytes = ((self.n - from) as u64) * 24;
         if bytes == 0 {
             return Vec::new();
         }
@@ -53,6 +58,45 @@ impl Packet {
             ]));
         }
         // 映射出的范围要在 `unmap` 前先释放（顺序不能反）。
+        drop(data);
+        rb.unmap();
+        out
+    }
+
+    /// **通用回读**：把 `buf` 的前 `n` 个 f32 读回来（`read_dens` 用；
+    /// 按索引解码——**别用 `chunks_exact`**：CI 的 clippy 比本机新，会判"constant chunk size"）。
+    pub(crate) fn read_f32_head(&self, buf: &wgpu::Buffer, n: usize) -> Vec<f32> {
+        let bytes = (n as u64) * 4;
+        let rb = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("p.head_rb"),
+            size: bytes.max(4),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut enc = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        enc.copy_buffer_to_buffer(buf, 0, &rb, 0, bytes);
+        self.queue.submit(Some(enc.finish()));
+        self.poll_wait().ok();
+        let slice = rb.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).ok();
+        });
+        self.poll_wait().ok();
+        rx.recv().ok();
+        let data = slice.get_mapped_range();
+        let mut out = Vec::with_capacity(n);
+        for k in 0..n {
+            let o = k * 4;
+            out.push(f32::from_le_bytes([
+                data[o],
+                data[o + 1],
+                data[o + 2],
+                data[o + 3],
+            ]));
+        }
         drop(data);
         rb.unmap();
         out
