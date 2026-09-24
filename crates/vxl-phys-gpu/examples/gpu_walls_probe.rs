@@ -401,6 +401,7 @@ fn main() {
     cpu_self_sensitivity(&[v], prov, n, ticks);
     early_series(&mk(true, true), prov, n);
     noclamp_early(adapter, substeps, h, &[v], prov);
+    settled_early(adapter, substeps, h, &[v], prov);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }
@@ -506,6 +507,63 @@ fn noclamp_early(
     );
 }
 
+/// **②h 静置初值上的 k=1**（把"暴力坍落"这个自变量去掉——补记八定的两个判别里信息量高的那个）。
+///
+/// 做法：先让 CPU 链**静置** `SETTLE` tick，拿那时的状态**同时**当 A 的新起点（再推 1 tick）与 B 的
+/// 建包初值（推 1 tick）。判读：
+/// - 差仍 ~1e-3 级 ⇒ **结构性**逐 tick 差（坍落不是成因）⇒ 回去分相读码；
+/// - 塌到 ~1e-9 级 ⇒ k=1 那条差归给**坍落本身**（初始那几 tick 的暴烈自由面把显微镜级差异放大到
+///   mm 级——那时它与 ②e 自敏感是同一族现象，不必再当"待查的错"）。
+fn settled_early(
+    adapter: usize,
+    substeps: usize,
+    h: f32,
+    ids: &[u32],
+    prov: &dyn ProviderColliders,
+) {
+    const SETTLE: usize = 300;
+    let mut f = water();
+    f.set_boundaries(ids);
+    for _ in 0..SETTLE {
+        f.step(1.0 / 60.0, prov);
+    }
+    // **按静置后的粒子集/网格**算 cfg 与初值（新场景必须用自己那份 `cfg`——实栽过）。
+    let init = flat(&f);
+    let cfg = make_cfg(&f);
+    let n = cfg.n_fluid as usize;
+    f.step(1.0 / 60.0, prov); // A：静置态再推 1 tick
+    let a = f.positions().to_vec();
+    let sim = Sim {
+        init: &init,
+        cfg,
+        substeps,
+        ticks: 1,
+        ghost: true,
+        project: true,
+        ids: ids.to_vec(),
+        h,
+        adapter,
+    };
+    let Some(b) = chain_sim(&sim, prov) else {
+        return;
+    };
+    let mut mx = 0.0f32;
+    for (p, q) in a.iter().zip(b.iter()) {
+        mx = mx.max((*p - *q).length());
+    }
+    let (ya, yb) = (bottom_mean_y(&a, n), bottom_mean_y(&b, n));
+    // **吃到跳变的粒数**（|Δpos| > 5 mm）：投影那一推 ≈ 15 mm ⇒ 这个计数就是"本 tick 有几粒的
+    // `pen > 0` 分支在两链间翻了面"。它是判"离散事件主导"还是"连续相位差"的分水岭。
+    let jumped = (0..a.len())
+        .filter(|&i| (a[i] - b[i]).length() > 5e-3)
+        .count();
+    println!(
+        "  ── ②h **静置初值上的 k=1**（先静置 {SETTLE} tick）── 底层均高差 {:.2e} m | max|Δpos| **{mx:.2e} m** | 吃到跳变的粒数 {jumped}/{}（对照 ②f 坍落初值：1.72e-4 / 3.38e-3）",
+        (ya - yb).abs(),
+        a.len()
+    );
+}
+
 /// **②e CPU 自敏感**（把"差多少算大"标定出来）：同一初值，只把 0 号粒速度扰动 `eps` ⇒
 /// 同一 150 tick 之后看底层差与分箱差。**扫多个 `eps`**：投影是"跳变"机制（`pen > 0` 才推、
 /// 一推就是 `pen + skin` ≈ 15 mm）⇒ 任何**显微镜级**差异都可能翻转这个分支 ⇒ 若小扰动也能
@@ -573,6 +631,8 @@ fn early_series(base: &Sim, prov: &dyn ProviderColliders, n: usize) {
             let mut worst: Vec<(usize, f32)> =
                 (0..a.len()).map(|i| (i, (a[i] - b[i]).length())).collect();
             worst.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+            let jumped = worst.iter().filter(|x| x.1 > 5e-3).count();
+            println!("        吃到跳变的粒数（>5 mm）：{jumped}/{}", a.len());
             for &(i, d) in worst.iter().take(3) {
                 println!(
                     "        #{i}：差 {d:.2e} m | A ({:.3},{:.3},{:.3}) | B ({:.3},{:.3},{:.3})",
