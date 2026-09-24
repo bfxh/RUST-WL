@@ -22,6 +22,7 @@
 use wgpu::util::DeviceExt;
 
 // ── 按域拆出的子模块（子目录 pipeline/）
+mod coupling;
 mod gpu_setup;
 mod gpu_types;
 mod reaction;
