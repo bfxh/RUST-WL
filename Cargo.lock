@@ -1078,6 +1078,7 @@ name = "vxl-phys-gpu"
 version = "0.1.0"
 dependencies = [
  "vxl-phys",
+ "vxl-phys-broad",
  "vxl-phys-core",
  "vxl-phys-fluid",
  "vxl-phys-terrain",
