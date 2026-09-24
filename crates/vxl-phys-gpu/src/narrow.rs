@@ -28,10 +28,14 @@ pub const BODY_KIND_AT: usize = 7;
 pub const BODY_P0_AT: usize = 8;
 /// `count` 哨兵：本档不接手该对 ⇒ 调用方按**主机回填**处理（别当成"无流形"）。
 pub const NOT_HANDLED: u32 = u32::MAX;
-/// 体种类：球（`p0` = 半径）。其余形状/复合体一律 0 = 不接手（留给后续族按分派表补）。
+/// 体种类：球（`p0` = 半径）。其余形状一律 0 = 不接手（留给后续族按分派表补）。
 pub const KIND_SPHERE: u32 = 1;
+/// 体种类：盒（`p0..p2` = `half.xyz`；`rot` 走记录里的四元数）。
+pub const KIND_BOX: u32 = 2;
 /// 护栏：体数/对数上限（超了直接报错，让调用方回退 CPU）。
 const MAX_ITEMS: u32 = 1 << 22;
+/// 诊断字个数（`[0]` = 裁剪多边形越界次数）。
+pub const DIAG_WORDS: usize = 2;
 
 /// 逐对槽（主机侧视图 = 卡上 26 字的**逐字镜像** ⇒ 比较与装配都在同一份数据上做）。
 #[derive(Clone, Copy, Debug)]
@@ -82,13 +86,28 @@ pub struct NarrowTier {
     queue: wgpu::Queue,
     bg: wgpu::BindGroup,
     pipe: wgpu::ComputePipeline,
-    params_b: wgpu::Buffer,
-    bodies_b: wgpu::Buffer,
-    pairs_b: wgpu::Buffer,
-    slots_b: wgpu::Buffer,
-    rb: wgpu::Buffer,
+    bufs: Buffers,
     cap_bodies: u32,
     cap_pairs: u32,
+    skin: f32,
+    /// 选点去重间距（与 CPU `DefaultNarrowPhase::new` 同式：`max(skin*2, 0.01)`）。
+    min_sep: f32,
+}
+
+/// 常驻缓冲清单（体表/对表按**容量**开 ⇒ 每 tick 只重写前缀）。
+struct Buffers {
+    params: wgpu::Buffer,
+    bodies: wgpu::Buffer,
+    pairs: wgpu::Buffer,
+    slots: wgpu::Buffer,
+    rb: wgpu::Buffer,
+    diag: wgpu::Buffer,
+}
+
+/// 一趟读数：对序槽表 + 诊断字（`[0]` = 裁剪多边形越界次数，**必须 0**）。
+pub struct NarrowRun {
+    pub slots: Vec<Slot>,
+    pub diag: [u32; DIAG_WORDS],
 }
 
 /// u32 表 → 小端字节（`write_buffer` 要 `&[u8]`）。
@@ -97,17 +116,7 @@ fn words_to_bytes(w: &[u32]) -> Vec<u8> {
 }
 
 /// 建全部缓冲（体表/对表按**容量**开 ⇒ 每 tick 只重写前缀）。
-fn make_bufs(
-    device: &wgpu::Device,
-    cap_bodies: u32,
-    cap_pairs: u32,
-) -> (
-    wgpu::Buffer,
-    wgpu::Buffer,
-    wgpu::Buffer,
-    wgpu::Buffer,
-    wgpu::Buffer,
-) {
+fn make_bufs(device: &wgpu::Device, cap_bodies: u32, cap_pairs: u32) -> Buffers {
     let mk = |label: &str, size: u64| {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
@@ -119,41 +128,41 @@ fn make_bufs(
         })
     };
     let slots_bytes = (cap_pairs as u64) * (SLOT_BYTES as u64);
-    (
-        device.create_buffer(&wgpu::BufferDescriptor {
+    Buffers {
+        params: device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("narrow.params"),
             size: 16,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }),
-        mk(
+        bodies: mk(
             "narrow.bodies",
             (cap_bodies as u64) * (BODY_WORDS as u64) * 4,
         ),
-        mk("narrow.pairs", (cap_pairs as u64) * 8),
-        mk("narrow.slots", slots_bytes),
+        pairs: mk("narrow.pairs", (cap_pairs as u64) * 8),
+        slots: mk("narrow.slots", slots_bytes),
         // ⚠️ 回读缓冲**单独建**：`MAP_READ` 只能与 `COPY_DST` 组合（把它当 `mk` 的附加位塞进去
         // ⇒ wgpu 校验当场报错：`MAP` usage can only be combined with the opposite `COPY`）。
-        device.create_buffer(&wgpu::BufferDescriptor {
+        rb: device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("narrow.rb"),
-            size: slots_bytes.max(4),
+            // 尾部留 DIAG_WORDS 个字的槽给诊断（跟槽表同一次回读，省一趟同步）。
+            size: (slots_bytes + (DIAG_WORDS as u64) * 4).max(4),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         }),
-    )
+        // 诊断（原子累加）：`[0]` = 裁剪多边形越界次数 —— 每趟在 `run` 里清零。
+        diag: mk("narrow.diag", (DIAG_WORDS as u64) * 4),
+    }
 }
 
 /// 布局 + 管线 + bind group。
 fn build_pipeline(
     device: &wgpu::Device,
-    params_b: &wgpu::Buffer,
-    bodies_b: &wgpu::Buffer,
-    pairs_b: &wgpu::Buffer,
-    slots_b: &wgpu::Buffer,
+    bufs: &Buffers,
 ) -> (wgpu::BindGroup, wgpu::ComputePipeline) {
     let ro = wgpu::BufferBindingType::Storage { read_only: true };
     let rw = wgpu::BufferBindingType::Storage { read_only: false };
-    let types = [wgpu::BufferBindingType::Uniform, ro, ro, rw];
+    let types = [wgpu::BufferBindingType::Uniform, ro, ro, rw, rw];
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("narrow.bgl"),
         entries: &types
@@ -200,7 +209,13 @@ fn build_pipeline(
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("narrow.bg"),
             layout: &layout,
-            entries: &[e(0, params_b), e(1, bodies_b), e(2, pairs_b), e(3, slots_b)],
+            entries: &[
+                e(0, &bufs.params),
+                e(1, &bufs.bodies),
+                e(2, &bufs.pairs),
+                e(3, &bufs.slots),
+                e(4, &bufs.diag),
+            ],
         })
     };
     (bg, pipe)
@@ -208,28 +223,33 @@ fn build_pipeline(
 
 impl NarrowTier {
     /// 在**指定适配器序号**上建档（`cap_bodies`/`cap_pairs` = 缓冲容量，必须 ≥ 后续每次 `run` 的规模）。
-    pub fn new(adapter_index: usize, cap_bodies: u32, cap_pairs: u32) -> Result<Self, String> {
+    /// `skin` = 接触投机带（与 CPU `DefaultNarrowPhase::new(skin)` **同一个值**，否则两侧判据不同源）。
+    pub fn new(
+        adapter_index: usize,
+        cap_bodies: u32,
+        cap_pairs: u32,
+        skin: f32,
+    ) -> Result<Self, String> {
         if cap_bodies == 0 || cap_pairs == 0 || cap_bodies > MAX_ITEMS || cap_pairs > MAX_ITEMS {
             return Err(format!(
                 "容量不合法：cap_bodies={cap_bodies}、cap_pairs={cap_pairs}（要 1..={MAX_ITEMS}）"
             ));
         }
         let (adapter, device, queue) = device_for(adapter_index)?;
-        let (params_b, bodies_b, pairs_b, slots_b, rb) = make_bufs(&device, cap_bodies, cap_pairs);
-        let (bg, pipe) = build_pipeline(&device, &params_b, &bodies_b, &pairs_b, &slots_b);
+        let bufs = make_bufs(&device, cap_bodies, cap_pairs);
+        let (bg, pipe) = build_pipeline(&device, &bufs);
         Ok(Self {
             adapter,
             device,
             queue,
             bg,
             pipe,
-            params_b,
-            bodies_b,
-            pairs_b,
-            slots_b,
-            rb,
+            bufs,
             cap_bodies,
             cap_pairs,
+            skin,
+            // 与 CPU `DefaultNarrowPhase::new` 同式。
+            min_sep: (skin * 2.0).max(0.01),
         })
     }
 
@@ -238,10 +258,10 @@ impl NarrowTier {
         &self.adapter
     }
 
-    /// 一趟：写体表/对表 → 派发 → 回读槽。返回**对序**的槽表（长度 = 对数）。
+    /// 一趟：写体表/对表 → 派发 → 回读槽 + 诊断。返回**对序**的槽表（长度 = 对数）。
     ///
     /// `bodies` = 逐体 12 字（`BODY_WORDS`）、`pairs` = 逐对 2 字（`(a, b)` 裸 u32）。
-    pub fn run(&self, bodies: &[u32], pairs: &[u32]) -> Result<Vec<Slot>, String> {
+    pub fn run(&self, bodies: &[u32], pairs: &[u32]) -> Result<NarrowRun, String> {
         if !bodies.len().is_multiple_of(BODY_WORDS) || !pairs.len().is_multiple_of(2) {
             return Err(format!(
                 "输入长度不是整条：bodies={}（{} 字/体）、pairs={}（2 字/对）",
@@ -262,23 +282,30 @@ impl NarrowTier {
         // 空对表直接返回：**别去映射 0 字节**（`map_async` 对零长区间不保证成立），
         // 且真实 tick 里"一只都没碰"是常态（不必为它冒一次校验风险）。
         if n_pairs == 0 {
-            return Ok(Vec::new());
+            return Ok(NarrowRun {
+                slots: Vec::new(),
+                diag: [0; DIAG_WORDS],
+            });
         }
-        // 每 tick 重写参数与两张表（容量不变 ⇒ 缓冲不重建）。
+        // 每 tick 重写参数与两张表（容量不变 ⇒ 缓冲不重建）。参数 = `n_bodies|n_pairs|skin|min_sep`
+        // （后两个是 f32 位模式：两者都进几何判定 ⇒ 必须是**同一份** CPU 侧值的位）。
         let mut prm: Vec<u8> = Vec::with_capacity(16);
         prm.extend_from_slice(&n_bodies.to_le_bytes());
         prm.extend_from_slice(&n_pairs.to_le_bytes());
-        prm.extend_from_slice(&[0u8; 8]);
-        self.queue.write_buffer(&self.params_b, 0, &prm);
+        prm.extend_from_slice(&self.skin.to_bits().to_le_bytes());
+        prm.extend_from_slice(&self.min_sep.to_bits().to_le_bytes());
+        self.queue.write_buffer(&self.bufs.params, 0, &prm);
         self.queue
-            .write_buffer(&self.bodies_b, 0, &words_to_bytes(bodies));
+            .write_buffer(&self.bufs.bodies, 0, &words_to_bytes(bodies));
         self.queue
-            .write_buffer(&self.pairs_b, 0, &words_to_bytes(pairs));
+            .write_buffer(&self.bufs.pairs, 0, &words_to_bytes(pairs));
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("narrow.enc"),
             });
+        // 诊断字每趟清零（原子累加 ⇒ 不清就会跨趟累计，读数失去"本趟"含义）。
+        enc.clear_buffer(&self.bufs.diag, 0, None);
         {
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
@@ -289,11 +316,19 @@ impl NarrowTier {
             cp.dispatch_workgroups(n_pairs.div_ceil(WG).max(1), 1, 1);
         }
         let used = (n_pairs as u64) * (SLOT_BYTES as u64);
+        let diag_at = used;
         if used > 0 {
-            enc.copy_buffer_to_buffer(&self.slots_b, 0, &self.rb, 0, used);
+            enc.copy_buffer_to_buffer(&self.bufs.slots, 0, &self.bufs.rb, 0, used);
         }
+        enc.copy_buffer_to_buffer(
+            &self.bufs.diag,
+            0,
+            &self.bufs.rb,
+            diag_at,
+            (DIAG_WORDS as u64) * 4,
+        );
         self.queue.submit(Some(enc.finish()));
-        let slice = self.rb.slice(..used);
+        let slice = self.bufs.rb.slice(..used + (DIAG_WORDS as u64) * 4);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).ok();
@@ -317,8 +352,13 @@ impl NarrowTier {
                 Slot { words }
             })
             .collect();
+        let rd = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        let mut diag = [0u32; DIAG_WORDS];
+        for (k, d) in diag.iter_mut().enumerate() {
+            *d = rd(diag_at as usize + k * 4);
+        }
         drop(data);
-        self.rb.unmap();
-        Ok(out)
+        self.bufs.rb.unmap();
+        Ok(NarrowRun { slots: out, diag })
     }
 }

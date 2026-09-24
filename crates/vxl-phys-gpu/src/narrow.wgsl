@@ -7,11 +7,14 @@
 //   调用方按**主机回填**处理并写进同一槽位）。
 //
 // 逐体输入 = 12 个 u32（48 B）：`pos.xyz | rot.xyzw | kind | p0 | p1 | p2 | pad`
-//   —— 浮点走 f32 位模式（`as_f32`），`kind` 是**裸整数**（1 = 球，`p0` = 半径；0 = 不接手）。
-//   `rot` / `p1` / `p2` 本片不用，为后续族（盒的轴向与半长）预留 ⇒ 布局不动、只加分派。
+//   —— 浮点走 f32 位模式（`as_f32`），`kind` 是**裸整数**（1 = 球、2 = 盒；0 = 不接手）。
 //
-// **本片只接球×球**（`PLAN-gpu.md` §17.5 的落地顺序：先用约定最简的一族把槽位/回读/判据
-// 三件事跑通），几何**逐字照抄** CPU `pair_shaped.rs` 的球×球臂（含同心球那条特殊分支）。
+// **已接的族**（几何都**逐字照抄** CPU `pair_shaped.rs` / `sat.rs` 对应分支）：
+//   ① 球×球（含同心球 `dist < 1e-9` 特殊分支）；
+//   ② 盒×盒：21 轴 SAT（6+6 面轴 + 9 棱叉积，**压缩序照抄**）→ 参考/入射面 → 4 次侧平面裁剪
+//      → 主平面过滤 → 稳定排序 + 去重选 ≤4 点。`feature` 位域与 CPU 逐位同源。
+// **不实现 `predict_inflate`**（CPU 那条 `inflate` 只在 `predict_dt > 0` 时非零，默认档 = 0）——
+//   这是**前提**：接线时若 `World` 给窄相设了 `predict_dt > 0`，卡上路径必须让位或补这一项。
 
 const SLOT_WORDS: u32 = 26u;
 const PT_BASE: u32 = 6u;
@@ -24,18 +27,46 @@ const BODY_WORDS: u32 = 12u;
 const KIND_AT: u32 = 7u;
 const P0_AT: u32 = 8u;
 const KIND_SPHERE: u32 = 1u;
+const KIND_BOX: u32 = 2u;
+
+/// 特征位（与 CPU `types.rs` 同值）：bit31 = 入射侧 B、bit30 = 裁剪交点。
+const FEAT_SIDE_B: u32 = 0x80000000u;
+const FEAT_CLIPPED: u32 = 0x40000000u;
+
+/// 分离轴来源（与 CPU `AxisSrc` 同序）。
+const SRC_FACE_A: u32 = 0u;
+const SRC_FACE_B: u32 = 1u;
+const SRC_EDGE: u32 = 2u;
+
+/// `f32::MIN` / `f32::MAX`（CPU 那边用的哨兵）。
+const F32_MIN: f32 = -3.402823466e38;
+const F32_MAX: f32 = 3.402823466e38;
+
+/// 裁剪多边形上限：凸多边形被半平面裁一次至多 +1 顶点 ⇒ 4 → 5 → 6 → 7 → 8，取 16（一倍余量）。
+/// 超了不静默截断：`atomicAdd(&diag[0], 1)`（主机侧断言它必须是 0）。
+const CLIP_MAX: u32 = 16u;
+
+/// 6 张面 × 4 顶点：把 CPU `BOX_FACES` 的「顶点符号三元组」压成整数
+/// （bit0 = sx>0、bit1 = sy>0、bit2 = sz>0；4 顶点 × 3 bit 打包）。**面序与面内顶点序都照抄**：
+/// +X [1,3,7,5] / −X [0,4,6,2] / +Y [2,6,7,3] / −Y [0,1,5,4] / +Z [4,5,7,6] / −Z [0,2,3,1]。
+/// 面法线由面号直接给：`axis = f / 2`、`f & 1` = 该轴取负（+X,−X,+Y,−Y,+Z,−Z）。
+const FACE_V: array<u32, 6> = array<u32, 6>(3033u, 1440u, 2034u, 2376u, 3564u, 720u);
 
 struct Params {
     n_bodies: u32,
     n_pairs: u32,
-    pad0: u32,
-    pad1: u32,
+    /// 接触 skin（§4.3 投机带）——SAT 的分离阈与主平面过滤都用它。
+    skin: f32,
+    /// 选点去重间距（CPU `min_point_sep` = `max(skin*2, 0.01)`）。
+    min_sep: f32,
 };
 
 @group(0) @binding(0) var<uniform> prm: Params;
 @group(0) @binding(1) var<storage, read> bodies: array<u32>;
 @group(0) @binding(2) var<storage, read> pairs: array<u32>;
 @group(0) @binding(3) var<storage, read_write> slots: array<u32>;
+/// 诊断（主机侧断言全 0）：`[0]` = 裁剪多边形越界次数。
+@group(0) @binding(4) var<storage, read_write> diag: array<atomic<u32>>;
 
 fn as_f32(w: u32) -> f32 {
     return bitcast<f32>(w);
@@ -47,6 +78,71 @@ fn body_pos(base: u32) -> vec3<f32> {
         as_f32(bodies[base + 1u]),
         as_f32(bodies[base + 2u]),
     );
+}
+
+fn body_quat(base: u32) -> vec4<f32> {
+    return vec4<f32>(
+        as_f32(bodies[base + 3u]),
+        as_f32(bodies[base + 4u]),
+        as_f32(bodies[base + 5u]),
+        as_f32(bodies[base + 6u]),
+    );
+}
+
+fn body_half(base: u32) -> vec3<f32> {
+    return vec3<f32>(
+        as_f32(bodies[base + P0_AT]),
+        as_f32(bodies[base + P0_AT + 1u]),
+        as_f32(bodies[base + P0_AT + 2u]),
+    );
+}
+
+/// 体轴 `[R·X, R·Y, R·Z]`：与 CPU `Quat::rotate_vec3` **同式**
+/// （`t = qv×v·2`、`v + qv×t + t·w`，结合序也照抄）。
+fn rotate_axis(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let qv = q.xyz;
+    let t = cross(qv, v) * 2.0;
+    return v + cross(qv, t) + t * q.w;
+}
+
+fn box_axes_of(base: u32) -> array<vec3<f32>, 3> {
+    let q = body_quat(base);
+    return array<vec3<f32>, 3>(
+        rotate_axis(q, vec3<f32>(1.0, 0.0, 0.0)),
+        rotate_axis(q, vec3<f32>(0.0, 1.0, 0.0)),
+        rotate_axis(q, vec3<f32>(0.0, 0.0, 1.0)),
+    );
+}
+
+/// 面法线：`axis = f/2`、`f & 1` = 取负（与 CPU `face_normal_of` 逐位同源：±v 是精确运算）。
+fn face_normal(ax: array<vec3<f32>, 3>, f: u32) -> vec3<f32> {
+    let v = ax[f / 2u];
+    return select(v, -v, (f & 1u) != 0u);
+}
+
+/// 面顶点：`pos + (t0 + t1) + t2`（展开式与结合序都照抄 CPU `face_vertex`）。
+fn face_vertex(
+    pos: vec3<f32>,
+    ax: array<vec3<f32>, 3>,
+    half: vec3<f32>,
+    f: u32,
+    i: u32,
+) -> vec3<f32> {
+    let bits = (FACE_V[f] >> (i * 3u)) & 7u;
+    let sx = select(-1.0, 1.0, (bits & 1u) != 0u);
+    let sy = select(-1.0, 1.0, (bits & 2u) != 0u);
+    let sz = select(-1.0, 1.0, (bits & 4u) != 0u);
+    let t0 = ax[0] * (half.x * sx);
+    let t1 = ax[1] * (half.y * sy);
+    let t2 = ax[2] * (half.z * sz);
+    return pos + (t0 + t1) + t2;
+}
+
+/// 裁剪交点特征 = 入射棱 (fa→fb) × 参考侧平面 k 的确定性混合（与 CPU `feat_intersect` 同式；
+/// u32 乘在 WGSL 里就是**回绕**乘 ⇒ 无需 wrapping 前缀）。
+fn feat_intersect(fa: u32, fb: u32, k: u32) -> u32 {
+    let h = (fa * 73856093u) ^ (fb * 19349663u) ^ (k * 83492791u);
+    return FEAT_CLIPPED | (h & 0x3fffffffu);
 }
 
 fn put_normal(base: u32, n: vec3<f32>) {
@@ -64,8 +160,9 @@ fn put_point(base: u32, k: u32, p: vec3<f32>, depth: f32, feature: u32) {
     slots[o + 4u] = feature;
 }
 
-// 球×球：与 CPU 同式（`d = pb − pa`、`dist = √(d·d)`、`rr = ra + rb`、
-// `n = d·(1/dist)`、`point = pa + n·(ra − (rr − dist)·0.5)`、`depth = rr − dist`）。
+// ===== ① 球×球 =====
+// 与 CPU 同式（`d = pb − pa`、`dist = √(d·d)`、`rr = ra + rb`、`n = d·(1/dist)`、
+// `point = pa + n·(ra − (rr − dist)·0.5)`、`depth = rr − dist`）。
 // 分支序也照抄：`dist ≥ rr` 先返（槽留 0 = 无流形），再判同心（`dist < 1e-9`）。
 fn sphere_pair(base: u32, ba: u32, bb: u32) {
     let pa = body_pos(ba);
@@ -93,6 +190,330 @@ fn sphere_pair(base: u32, ba: u32, bb: u32) {
     slots[base + W_CNT] = 1u;
 }
 
+// ===== ② 盒×盒：SAT =====
+
+struct Sat {
+    /// 0 = 分离（无接触）。
+    ok: u32,
+    sep: f32,
+    n: vec3<f32>,
+    src: u32,
+};
+
+/// 21 轴扫描（6 面轴 A + 6 面轴 B + 9 棱叉积）。**语义逐条照抄 CPU `sat_scan_scalar`**：
+/// ① 棱叉积只收 `l2 > 1e-8` 的（**压缩后的下标序**决定平局时谁先到 ⇒ 影响 `src`）；
+/// ② 逐轴跳过 `|n|² < 0.5`；③ 双侧测分离取较大者；④ **任一轴 `sep > skin` 立即返回分离**；
+/// ⑤ `sep > best` 是**严格大于** ⇒ 平局保留**先到的轴**。
+fn sat_boxes(
+    pa: vec3<f32>,
+    ha: vec3<f32>,
+    axa: array<vec3<f32>, 3>,
+    pb: vec3<f32>,
+    hb: vec3<f32>,
+    axb: array<vec3<f32>, 3>,
+    skin: f32,
+) -> Sat {
+    var axes: array<vec3<f32>, 21>;
+    var n_ax = 0u;
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        axes[n_ax] = face_normal(axa, f);
+        n_ax = n_ax + 1u;
+    }
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        axes[n_ax] = face_normal(axb, f);
+        n_ax = n_ax + 1u;
+    }
+    // 棱序照抄 CPU：`ea = [ax1, ax2, ax0]`（× eb 同构），双层循环下标序也照抄。
+    let ea = array<vec3<f32>, 3>(axa[1], axa[2], axa[0]);
+    let eb = array<vec3<f32>, 3>(axb[1], axb[2], axb[0]);
+    for (var i = 0u; i < 3u; i = i + 1u) {
+        for (var j = 0u; j < 3u; j = j + 1u) {
+            let c = cross(ea[i], eb[j]);
+            let l2 = dot(c, c);
+            if (l2 > 1e-8) {
+                axes[n_ax] = c * (1.0 / sqrt(l2));
+                n_ax = n_ax + 1u;
+            }
+        }
+    }
+    var best = F32_MIN;
+    var best_n = vec3<f32>(0.0, 0.0, 0.0);
+    var best_src = SRC_EDGE;
+    var out: Sat;
+    for (var idx = 0u; idx < n_ax; idx = idx + 1u) {
+        let n0 = axes[idx];
+        if (dot(n0, n0) < 0.5) {
+            continue;
+        }
+        let ra = ha.x * abs(dot(axa[0], n0)) + ha.y * abs(dot(axa[1], n0))
+            + ha.z * abs(dot(axa[2], n0));
+        let rb = hb.x * abs(dot(axb[0], n0)) + hb.y * abs(dot(axb[1], n0))
+            + hb.z * abs(dot(axb[2], n0));
+        let ca = dot(pa, n0);
+        let cb = dot(pb, n0);
+        let sep1 = (cb - rb) - (ca + ra);
+        let sep2 = (ca - ra) - (cb + rb);
+        var sep = sep2;
+        var n = -n0;
+        if (sep1 >= sep2) {
+            sep = sep1;
+            n = n0;
+        }
+        if (sep > skin) {
+            out.ok = 0u;
+            out.sep = 0.0;
+            out.n = vec3<f32>(0.0, 0.0, 0.0);
+            out.src = SRC_EDGE;
+            return out;
+        }
+        if (sep > best) {
+            best = sep;
+            best_n = n;
+            best_src = SRC_EDGE;
+            if (idx < 6u) {
+                best_src = SRC_FACE_A;
+            } else if (idx < 12u) {
+                best_src = SRC_FACE_B;
+            }
+        }
+    }
+    out.ok = select(0u, 1u, best != F32_MIN);
+    out.sep = best;
+    out.n = best_n;
+    out.src = best_src;
+    return out;
+}
+
+/// 参考面裁剪 → 接触点（≤4）→ 写槽。**逐条照抄 CPU `clip()`**：
+/// 参考盒按 `src` 选（FaceB ⇒ B，否则 A）、参考面按「ref → incident」方向重选（严格大于 ⇒ 平局取面序在前）、
+/// 入射面取与 `n_ref` 最逆平行（严格小于）、4 次侧平面裁剪（`|s|² < 1e-16` 的平面**整条跳过**）、
+/// 主平面过滤 `d <= skin`（`depth = −d`）、稳定排序 + 去重选 ≤4。
+fn boxes_pair(
+    base: u32,
+    ba: u32,
+    bb: u32,
+    pa: vec3<f32>,
+    ha: vec3<f32>,
+    axa: array<vec3<f32>, 3>,
+    pb: vec3<f32>,
+    hb: vec3<f32>,
+    axb: array<vec3<f32>, 3>,
+) {
+    let sat = sat_boxes(pa, ha, axa, pb, hb, axb, prm.skin);
+    if (sat.ok == 0u) {
+        return;
+    }
+    let ref_is_a = sat.src != SRC_FACE_B;
+    // 参考盒 / 入射盒（数组不能 select ⇒ 用分支赋值）。
+    var rax: array<vec3<f32>, 3>;
+    var iax: array<vec3<f32>, 3>;
+    var rpos: vec3<f32>;
+    var rhalf: vec3<f32>;
+    var ipos: vec3<f32>;
+    var ihalf: vec3<f32>;
+    if (ref_is_a) {
+        rax = axa;
+        iax = axb;
+        rpos = pa;
+        rhalf = ha;
+        ipos = pb;
+        ihalf = hb;
+    } else {
+        rax = axb;
+        iax = axa;
+        rpos = pb;
+        rhalf = hb;
+        ipos = pa;
+        ihalf = ha;
+    }
+    let dir = select(-sat.n, sat.n, ref_is_a);
+    // 参考面：与 dir 最对齐（面序 0..5，严格大于 ⇒ 平局取先）。
+    var ref_face = 0u;
+    var bd = F32_MIN;
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        let d = dot(face_normal(rax, f), dir);
+        if (d > bd) {
+            bd = d;
+            ref_face = f;
+        }
+    }
+    let n_ref = face_normal(rax, ref_face);
+    let ref_base = ref_face * 4u;
+    var ref_v: array<vec3<f32>, 4>;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        ref_v[i] = face_vertex(rpos, rax, rhalf, ref_face, i);
+    }
+    // 入射面：与 n_ref 最逆平行（严格小于 ⇒ 平局取先）。
+    var inc_face = 0u;
+    var inc_dot = F32_MAX;
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        let d = dot(face_normal(iax, f), n_ref);
+        if (d < inc_dot) {
+            inc_dot = d;
+            inc_face = f;
+        }
+    }
+    let side_bit = select(0u, FEAT_SIDE_B, ref_is_a);
+    var clip_pt: array<vec3<f32>, CLIP_MAX>;
+    var clip_ft: array<u32, CLIP_MAX>;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        clip_pt[i] = face_vertex(ipos, iax, ihalf, inc_face, i);
+        clip_ft[i] = side_bit | (inc_face * 4u + i);
+    }
+    var m = 4u;
+    var o_pt: array<vec3<f32>, CLIP_MAX>;
+    var o_ft: array<u32, CLIP_MAX>;
+    var centroid = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < 4u; i = i + 1u) {
+        centroid = centroid + ref_v[i];
+    }
+    centroid = centroid * (1.0 / 4.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+        var k1 = k + 1u;
+        if (k1 == 4u) {
+            k1 = 0u;
+        }
+        let w0 = ref_v[k];
+        let e = ref_v[k1] - w0;
+        var s = cross(e, n_ref);
+        if (dot(s, s) < 1e-16) {
+            continue;
+        }
+        if (dot(s, centroid - w0) > 0.0) {
+            s = -s;
+        }
+        var o = 0u;
+        for (var i = 0u; i < m; i = i + 1u) {
+            let j = (i + 1u) % m;
+            let va = clip_pt[i];
+            let vb = clip_pt[j];
+            let da = dot(va - w0, s);
+            let db = dot(vb - w0, s);
+            if (da <= 0.0) {
+                if (o < CLIP_MAX) {
+                    o_pt[o] = va;
+                    o_ft[o] = clip_ft[i];
+                    o = o + 1u;
+                } else {
+                    atomicAdd(&diag[0], 1u);
+                }
+            }
+            if (da * db < 0.0) {
+                let t = da / (da - db);
+                if (o < CLIP_MAX) {
+                    o_pt[o] = va + (vb - va) * t;
+                    o_ft[o] = feat_intersect(clip_ft[i], clip_ft[j], ref_base + k);
+                    o = o + 1u;
+                } else {
+                    atomicAdd(&diag[0], 1u);
+                }
+            }
+        }
+        m = o;
+        for (var i = 0u; i < o; i = i + 1u) {
+            clip_pt[i] = o_pt[i];
+            clip_ft[i] = o_ft[i];
+        }
+        if (m == 0u) {
+            return; // 裁空 ⇒ 无流形（槽留 0）
+        }
+    }
+    // 主平面过滤（`depth = −d`；`inflate` 恒 0 —— 见档头那条前提）。
+    let p0 = ref_v[0];
+    var c_pt: array<vec3<f32>, CLIP_MAX>;
+    var c_dep: array<f32, CLIP_MAX>;
+    var c_ft: array<u32, CLIP_MAX>;
+    var cn = 0u;
+    for (var i = 0u; i < m; i = i + 1u) {
+        let d = dot(clip_pt[i] - p0, n_ref);
+        if (d <= prm.skin) {
+            c_pt[cn] = clip_pt[i];
+            c_dep[cn] = -d;
+            c_ft[cn] = clip_ft[i];
+            cn = cn + 1u;
+        }
+    }
+    if (cn == 0u) {
+        return;
+    }
+    select_and_emit(base, sat.n, c_pt, c_dep, c_ft, cn);
+}
+
+/// 选点：**稳定**插入排序（深度降序 → x → y → z 升序，与 CPU 的 `sort_by` 同键同序）
+/// + 贪心去重（`min_sep` 内视为同点）+ 截断 ≤4 —— 与 CPU `select_contacts` 逐条对应。
+/// ⚠️ 比较用普通 `<`（非 `total_cmp`）：两者只在 NaN 与 ±0.0 上不同，而这里的量都是有限非零差异；
+/// 真出现 ±0.0 平局时会落到下一个键，判据（逐对容差比 CPU）会立刻暴露。
+fn select_and_emit(
+    base: u32,
+    n_ab: vec3<f32>,
+    c_pt: array<vec3<f32>, CLIP_MAX>,
+    c_dep: array<f32, CLIP_MAX>,
+    c_ft: array<u32, CLIP_MAX>,
+    cn: u32,
+) {
+    var pt = c_pt;
+    var dep = c_dep;
+    var ft = c_ft;
+    for (var i = 1u; i < cn; i = i + 1u) {
+        let kp = pt[i];
+        let kd = dep[i];
+        let kf = ft[i];
+        var j = i;
+        loop {
+            if (j == 0u) {
+                break;
+            }
+            let pd = dep[j - 1u];
+            let pp = pt[j - 1u];
+            let before = (kd > pd)
+                || (kd == pd && kp.x < pp.x)
+                || (kd == pd && kp.x == pp.x && kp.y < pp.y)
+                || (kd == pd && kp.x == pp.x && kp.y == pp.y && kp.z < pp.z);
+            if (!before) {
+                break;
+            }
+            pt[j] = pp;
+            dep[j] = pd;
+            ft[j] = ft[j - 1u];
+            j = j - 1u;
+        }
+        pt[j] = kp;
+        dep[j] = kd;
+        ft[j] = kf;
+    }
+    var kept_pt: array<vec3<f32>, 4>;
+    var kept_dep: array<f32, 4>;
+    var kept_ft: array<u32, 4>;
+    let min2 = prm.min_sep * prm.min_sep;
+    var kn = 0u;
+    for (var i = 0u; i < cn; i = i + 1u) {
+        if (kn >= 4u) {
+            break;
+        }
+        var dup = false;
+        for (var j = 0u; j < kn; j = j + 1u) {
+            let dd = kept_pt[j] - pt[i];
+            if (dot(dd, dd) < min2) {
+                dup = true;
+            }
+        }
+        if (!dup) {
+            kept_pt[kn] = pt[i];
+            kept_dep[kn] = dep[i];
+            kept_ft[kn] = ft[i];
+            kn = kn + 1u;
+        }
+    }
+    if (kn == 0u) {
+        return;
+    }
+    put_normal(base, n_ab);
+    for (var k = 0u; k < kn; k = k + 1u) {
+        put_point(base, k, kept_pt[k], kept_dep[k], kept_ft[k]);
+    }
+    slots[base + W_CNT] = kn;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -114,9 +535,25 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let ba = a * BODY_WORDS;
     let bb = b * BODY_WORDS;
-    if (bodies[ba + KIND_AT] != KIND_SPHERE || bodies[bb + KIND_AT] != KIND_SPHERE) {
-        slots[base + W_CNT] = NOT_HANDLED;
+    let ka = bodies[ba + KIND_AT];
+    let kb = bodies[bb + KIND_AT];
+    if (ka == KIND_SPHERE && kb == KIND_SPHERE) {
+        sphere_pair(base, ba, bb);
         return;
     }
-    sphere_pair(base, ba, bb);
+    if (ka == KIND_BOX && kb == KIND_BOX) {
+        boxes_pair(
+            base,
+            ba,
+            bb,
+            body_pos(ba),
+            body_half(ba),
+            box_axes_of(ba),
+            body_pos(bb),
+            body_half(bb),
+            box_axes_of(bb),
+        );
+        return;
+    }
+    slots[base + W_CNT] = NOT_HANDLED;
 }
