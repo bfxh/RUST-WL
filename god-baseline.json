@@ -190,9 +190,9 @@
   "max_type_members": 14
  },
  "crates/vxl-phys-fluid/src/fluid_access.rs": {
-  "file_lines": 176,
+  "file_lines": 188,
   "max_fn_lines": 70,
-  "max_type_members": 18
+  "max_type_members": 20
  },
  "crates/vxl-phys-fluid/src/fluid_boundary.rs": {
   "file_lines": 116,
@@ -248,6 +248,11 @@
   "file_lines": 227,
   "max_fn_lines": 70,
   "max_type_members": 7
+ },
+ "crates/vxl-phys-fluid/tests/boundary_reaction_balance.rs": {
+  "file_lines": 76,
+  "max_fn_lines": 61,
+  "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_density_probe.rs": {
   "file_lines": 291,

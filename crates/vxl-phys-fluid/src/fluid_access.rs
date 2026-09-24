@@ -146,6 +146,18 @@ impl FluidSystem {
         (&self.pos, &self.vel, &self.pmass, self.n_fluid)
     }
 
+    /// 流体粒子的**加速度**（前缀；不含重力以外的外力）——`Σ m·a` 与 `boundary_forces()` 一起
+    /// 构成 2b 的"成对力等大反向"判据（见 `tests/boundary_reaction_balance.rs`）。
+    pub fn accelerations(&self) -> &[Vec3] {
+        &self.acc[..self.n_fluid]
+    }
+
+    /// **边界粒子受的反作用**（后缀；每子步由流体侧成对累加，见 `fluid_force.rs`）——
+    /// 聚合到体上就是 `breact`（`boundary_reactions()`）。空 = 无边界粒子。
+    pub fn boundary_forces(&self) -> &[Vec3] {
+        &self.bforce[self.n_fluid..]
+    }
+
     pub fn velocities(&self) -> &[Vec3] {
         &self.vel[..self.n_fluid]
     }
