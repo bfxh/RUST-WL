@@ -125,8 +125,13 @@ impl FluidStepper for GpuFluidStepper {
         let ps: Vec<Vec3> = (0..nf)
             .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
             .collect();
+        // **两张表**（§15 补记五/六）：镜像 ← 普通口径（与 CPU `wall_planes_in` 同款）、
+        // 投影 ← 边界口径（穿透鲁棒）。两份各查一次、各上一次（代价 = 每 tick 两次查询 + 两次上传）。
         let (ids, start, planes) = gather_wall_contacts(&self.boundaries, h, &ps, providers);
-        w.upload(&self.pk, &ids, &start, &planes);
+        w.upload(&self.pk, WallSide::Mirror, &ids, &start, &planes);
+        let (ids, start, planes) =
+            gather_wall_project_contacts(&self.boundaries, h, &ps, providers);
+        w.upload(&self.pk, WallSide::Project, &ids, &start, &planes);
     }
 
     fn bounds(&self) -> Option<(Vec3, Vec3)> {

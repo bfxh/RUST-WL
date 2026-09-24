@@ -29,6 +29,7 @@ mod gpu_types;
 mod reaction;
 mod readback;
 mod stepper;
+mod wall_table;
 mod walls;
 pub use self::bodies::*;
 pub(crate) use self::gpu_setup::*;

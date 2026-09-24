@@ -20,7 +20,7 @@
 use vxl_phys::{PhysConfig, Quat, Shape, Vec3, World};
 use vxl_phys_core::interop::ProviderColliders;
 use vxl_phys_fluid::{FluidConfig, FluidSystem};
-use vxl_phys_gpu::pipeline::{GpuFluidStepper, Packet, PacketCfg, WallStage};
+use vxl_phys_gpu::pipeline::{GpuFluidStepper, Packet, PacketCfg, WallSide, WallStage};
 
 const SPACING: f32 = 0.05;
 
@@ -103,7 +103,7 @@ fn dens_on_gpu(
         Packet::new_with_walls(adapter, cfg, pos_flat, vel_flat, pmass).ok()?;
     let mut w_arg: Option<&WallStage> = None;
     if let Some((i2, st, pl)) = planes {
-        walls.upload(&pk, i2, st, pl);
+        walls.upload(&pk, WallSide::Mirror, i2, st, pl);
         w_arg = Some(&walls);
     }
     // 位掩码 0b000_1111 = 分箱 / 扫描+占位 / 规范化 / **密度**（不跑 EOS、力、积分 ⇒ 位置不动）。
@@ -251,6 +251,7 @@ fn sim_2b(adapter: usize, substeps: usize, h: f32, ticks: usize) {
 }
 
 /// 静置仿真的参数（避免长参数表）。
+#[derive(Clone)]
 struct Sim<'a> {
     init: &'a (Vec<f32>, Vec<f32>, Vec<f32>),
     cfg: PacketCfg,
@@ -258,7 +259,7 @@ struct Sim<'a> {
     ticks: usize,
     /// 喂平面表并跑**鬼影**（密度侧）。
     ghost: bool,
-    /// 跑**投影**（穿透侧）；只有 `ghost` 打开才有意义（两者共用同一张表）。
+    /// 跑**投影**（穿透侧）；只有 `ghost` 打开才有意义（两侧**各有各的表**：口径不同，见 §15 补记六）。
     project: bool,
     ids: Vec<u32>,
     h: f32,
@@ -279,7 +280,10 @@ fn chain_sim(s: &Sim, prov: &dyn ProviderColliders) -> Option<Vec<Vec3>> {
                 .map(|k| Vec3::new(gp[k * 3], gp[k * 3 + 1], gp[k * 3 + 2]))
                 .collect();
             let (i2, st, pl) = FluidSystem::gather_wall_contacts(&s.ids, s.h, &ps, prov);
-            walls.upload(&pk, &i2, &st, &pl);
+            walls.upload(&pk, WallSide::Mirror, &i2, &st, &pl);
+            // **投影侧另有一张表**（口径不同：`contacts_point_boundary` + 含穿透）。
+            let (i3, st3, pl3) = FluidSystem::gather_wall_project_contacts(&s.ids, s.h, &ps, prov);
+            walls.upload(&pk, WallSide::Project, &i3, &st3, &pl3);
             w_arg = Some(&walls);
         }
         pk.run_stages_with(&s.cfg, 0b111_1111, 1, s.substeps, false, w_arg);
@@ -390,24 +394,12 @@ fn main() {
     };
     sim_report(&a, &b, &c, n, ticks);
     // **定位**：那 2.8 mm 落在哪些带？近壁为主 ⇒ 投影/镜像的局部效应；全箱均匀 ⇒ 鬼影的全局补偿偏差。
-    let (ba, bb) = (band_profile(&a, n), band_profile(&b, n));
-    println!("  ── ②c 水位的**按到壁面水平距离分箱**（provider 容器，{ticks} tick）──");
-    for (name, x, y) in [
-        ("近壁 <1cm", ba[0], bb[0]),
-        ("中 1–5cm", ba[1], bb[1]),
-        ("内 >5cm ", ba[2], bb[2]),
-    ] {
-        println!(
-            "     {name}：CPU {:.5}（{:>4} 粒）vs 卡上 {:.5}（{:>4} 粒）⇒ 差 **{:.2e} m**",
-            x.0,
-            x.1,
-            y.0,
-            y.1,
-            (x.0 - y.0).abs()
-        );
-    }
+    band_report(&a, &b, n, ticks);
     // ②b 决定性对照：同一场景换 2b 容器（无 provider）⇒ 看那 2.77e-3 是不是口径 B 的宏观噪声底。
     sim_2b(adapter, substeps, h, ticks);
+    // ②e/②f 标定与走势：那 2.9 mm 是**系统性真差**（→ 接着查近似）还是**混沌量**（→ 该换判据）。
+    cpu_self_sensitivity(&[v], prov, n, ticks);
+    early_series(&mk(true, true), prov, n);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }
@@ -437,6 +429,107 @@ fn sim_report(a: &[Vec3], b: &[Vec3], c: &[Vec3], n: usize, ticks: usize) {
             "也站住了（异常：投影该是必需的）"
         }
     );
+}
+
+/// ②c **按"到最近壁面的水平距离"分箱**的水位对照（provider 容器）。
+///
+/// ⚠️ **判据警告（2026-09-24 实测）**：本表是**混沌量**——CPU 与"自己 +1e-8 扰动"（②e）给出的
+/// 箱差与 CPU/GPU 的箱差**同量级**（近壁 1.58e-2 vs 3.97e-3）。**别拿它当"系统性误差"读**；
+/// 要用它得先看 ②e 的自敏感读数。
+fn band_report(a: &[Vec3], b: &[Vec3], n: usize, ticks: usize) {
+    let (ba, bb) = (band_profile(a, n), band_profile(b, n));
+    println!("  ── ②c 水位的**按到壁面水平距离分箱**（provider 容器，{ticks} tick）──");
+    for (name, x, y) in [
+        ("近壁 <1cm", ba[0], bb[0]),
+        ("中 1–5cm", ba[1], bb[1]),
+        ("内 >5cm ", ba[2], bb[2]),
+    ] {
+        println!(
+            "     {name}：CPU {:.5}（{:>4} 粒）vs 卡上 {:.5}（{:>4} 粒）⇒ 差 **{:.2e} m**",
+            x.0,
+            x.1,
+            y.0,
+            y.1,
+            (x.0 - y.0).abs()
+        );
+    }
+}
+
+/// **②e CPU 自敏感**（把"差多少算大"标定出来）：同一初值，只把 0 号粒速度扰动 `eps` ⇒
+/// 同一 150 tick 之后看底层差与分箱差。**扫多个 `eps`**：投影是"跳变"机制（`pen > 0` 才推、
+/// 一推就是 `pen + skin` ≈ 15 mm）⇒ 任何**显微镜级**差异都可能翻转这个分支 ⇒ 若小扰动也能
+/// 给出 mm 级差，那 provider 路径的 2.9 mm 就不能记成"GPU 实现的系统性误差"。
+fn cpu_self_sensitivity(ids: &[u32], prov: &dyn ProviderColliders, n: usize, ticks: usize) {
+    println!("  ── ②e **CPU 自敏感**（同一初值，0 号粒 vx +eps；{ticks} tick）──");
+    for eps in [1e-8f32, 1e-6, 1e-4, 1e-2] {
+        let mk = || {
+            let mut f = water();
+            f.set_boundaries(ids);
+            f
+        };
+        let (mut a, mut b) = (mk(), mk());
+        let mut vs = b.velocities().to_vec();
+        vs[0].x += eps;
+        b.set_velocities(&vs);
+        for _ in 0..ticks {
+            a.step(1.0 / 60.0, prov);
+            b.step(1.0 / 60.0, prov);
+        }
+        let (pa, pb) = (a.positions().to_vec(), b.positions().to_vec());
+        let (ya, yb) = (bottom_mean_y(&pa, n), bottom_mean_y(&pb, n));
+        let mut mx = 0.0f32;
+        for (p, q) in pa.iter().zip(pb.iter()) {
+            mx = mx.max((*p - *q).length());
+        }
+        let (ba, bb) = (band_profile(&pa, n), band_profile(&pb, n));
+        println!(
+            "     eps={eps:.0e}：底层平均 y 差 **{:.2e} m** | max|Δpos| {mx:.2e} m | 近壁 {:.2e} / 中 {:.2e} / 内 {:.2e}",
+            (ya - yb).abs(),
+            (ba[0].0 - bb[0].0).abs(),
+            (ba[1].0 - bb[1].0).abs(),
+            (ba[2].0 - bb[2].0).abs()
+        );
+    }
+}
+
+/// **②f 早期时间序列**（本仓纪律："第 1 个 tick 就大 ⇒ 接线错；随漂移一起长 ⇒ 口径 B 混沌"）：
+/// A/B 各跑 k tick，看底层平均 y 差与 max|Δpos| 随 k 的走势。`base` 只当模板（其中 `ticks` 被覆盖）。
+fn early_series(base: &Sim, prov: &dyn ProviderColliders, n: usize) {
+    println!("  ── ②f **早期时间序列**（同一初值、A/B 各跑 k tick）──");
+    for k in [1usize, 2, 5, 10, 25, 60, 150] {
+        let mut cpu = water();
+        cpu.set_boundaries(&base.ids);
+        for _ in 0..k {
+            cpu.step(1.0 / 60.0, prov);
+        }
+        let a = cpu.positions().to_vec();
+        let mut sim = base.clone();
+        sim.ticks = k;
+        let Some(b) = chain_sim(&sim, prov) else {
+            return;
+        };
+        let mut mx = 0.0f32;
+        for (p, q) in a.iter().zip(b.iter()) {
+            mx = mx.max((*p - *q).length());
+        }
+        let (ya, yb) = (bottom_mean_y(&a, n), bottom_mean_y(&b, n));
+        println!(
+            "     k={k:>3}：底层平均 y 差 {:.2e} m | max|Δpos| {mx:.2e} m",
+            (ya - yb).abs()
+        );
+        if k == 1 {
+            // k=1 的差**不可能**是混沌（1e-8 的扰动在 1 tick 里只走 1e-10 m）⇒ 逐粒定位。
+            let mut worst: Vec<(usize, f32)> =
+                (0..a.len()).map(|i| (i, (a[i] - b[i]).length())).collect();
+            worst.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
+            for &(i, d) in worst.iter().take(3) {
+                println!(
+                    "        #{i}：差 {d:.2e} m | A ({:.3},{:.3},{:.3}) | B ({:.3},{:.3},{:.3})",
+                    a[i].x, a[i].y, a[i].z, b[i].x, b[i].y, b[i].z
+                );
+            }
+        }
+    }
 }
 
 /// ③ **facade 路径**：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）。
