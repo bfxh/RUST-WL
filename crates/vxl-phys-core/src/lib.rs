@@ -14,6 +14,7 @@
 pub mod aabb;
 pub mod body;
 pub mod config;
+pub mod grid;
 pub mod interop;
 pub mod mass;
 pub mod material;

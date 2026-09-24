@@ -104,13 +104,18 @@
   "max_fn_lines": 42,
   "max_type_members": 31
  },
+ "crates/vxl-phys-core/src/grid.rs": {
+  "file_lines": 100,
+  "max_fn_lines": 17,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-core/src/interop.rs": {
   "file_lines": 354,
   "max_fn_lines": 38,
   "max_type_members": 5
  },
  "crates/vxl-phys-core/src/lib.rs": {
-  "file_lines": 35,
+  "file_lines": 36,
   "max_fn_lines": 0,
   "max_type_members": 0
  },
@@ -215,8 +220,8 @@
   "max_type_members": 7
  },
  "crates/vxl-phys-fluid/src/grid.rs": {
-  "file_lines": 179,
-  "max_fn_lines": 59,
+  "file_lines": 210,
+  "max_fn_lines": 48,
   "max_type_members": 5
  },
  "crates/vxl-phys-fluid/src/lib.rs": {

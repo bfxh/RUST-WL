@@ -43,23 +43,12 @@ impl UniformGrid {
             lo = lo.min(*p);
             hi = hi.max(*p);
         }
-        // 两端覆盖全部粒子；格边从 h 起，超预算则加倍粗化。
-        let mut bin = h.max(1e-6);
-        let ext = hi - lo;
-        let exts = [ext.x, ext.y, ext.z];
-        let mut dims = [1u32; 3];
-        loop {
-            for a in 0..3 {
-                dims[a] = (((exts[a] / bin).floor() as usize + 1).clamp(1, 1 << 14)) as u32;
-            }
-            if dims[0] as usize * dims[1] as usize * dims[2] as usize <= GRID_MAX_BINS {
-                break;
-            }
-            bin *= 2.0;
-        }
+        // 箱子三件套走**单一来源**（`vxl_phys_core::grid::grid_box`）：GPU 常驻管线用同一条
+        // 规则，保证两侧 `(min, bin, dims)` 逐位相同（规则的注释与边界用例在同名模块）。
+        let (min, bin, dims) = vxl_phys_core::grid::grid_box(lo, hi, h, GRID_MAX_BINS);
         self.bin = bin;
         self.inv = 1.0 / bin;
-        self.min = lo;
+        self.min = min;
         self.nx = dims[0];
         self.ny = dims[1];
         self.nz = dims[2];
@@ -175,4 +164,46 @@ pub struct NeighborGrid<'a> {
     pub dims: (u32, u32, u32),
     pub start: &'a [u32],
     pub items: &'a [u32],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 箱子规则的**单一来源**由这条测试锁住：`rebuild` 算出的箱子必须与
+    /// `vxl_phys_core::grid::grid_box` **逐位相同**（GPU 常驻管线的每 tick 重算走的就是后者）。
+    /// 一旦有人在任一侧改规则，这条会红。
+    #[test]
+    fn rebuild_box_matches_core_grid_box() {
+        let sets: Vec<Vec<Vec3>> = vec![
+            // 单粒子：ext = 0 ⇒ 每维 1 格
+            vec![Vec3::new(0.05, 0.05, 0.05)],
+            // 常规散布（含负坐标）
+            (0..500)
+                .map(|k| {
+                    let f = k as f32 * 0.037;
+                    Vec3::new(f.sin() * 0.3, 0.1 + f.cos() * 0.2, f * 0.001)
+                })
+                .collect(),
+            // 超预算档：范围极大 ⇒ 必然发生翻倍
+            vec![Vec3::new(-40.0, 0.0, -40.0), Vec3::new(40.0, 30.0, 40.0)],
+        ];
+        for h in [0.05f32, 0.1] {
+            for pos in &sets {
+                let mut g = UniformGrid::default();
+                g.rebuild(pos, h);
+                let mut lo = pos[0];
+                let mut hi = pos[0];
+                for p in &pos[1..] {
+                    lo = lo.min(*p);
+                    hi = hi.max(*p);
+                }
+                let (min, bin, dims) = vxl_phys_core::grid::grid_box(lo, hi, h, GRID_MAX_BINS);
+                assert_eq!(g.min, min, "min 角不同（h={h}）");
+                assert_eq!(g.bin, bin, "bin 不同（h={h}）");
+                assert_eq!(g.inv, 1.0 / bin, "inv 必须逐位相同（h={h}）");
+                assert_eq!([g.nx, g.ny, g.nz], dims, "dims 不同（h={h}）");
+            }
+        }
+    }
 }
