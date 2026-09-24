@@ -400,6 +400,7 @@ fn main() {
     // ②e/②f 标定与走势：那 2.9 mm 是**系统性真差**（→ 接着查近似）还是**混沌量**（→ 该换判据）。
     cpu_self_sensitivity(&[v], prov, n, ticks);
     early_series(&mk(true, true), prov, n);
+    noclamp_early(adapter, substeps, h, &[v], prov);
     // ── ③ facade 路径：provider 壁面 + 卡上步进（壁面档经 `FluidStepper` 接线）──
     facade_path(adapter);
 }
@@ -453,6 +454,56 @@ fn band_report(a: &[Vec3], b: &[Vec3], n: usize, ticks: usize) {
             (x.0 - y.0).abs()
         );
     }
+}
+
+/// **②g 夹断分支消融**：把 CPU/卡的 `clamp_neg`（张力不稳定抑制＝`P < 0 ⇒ 0` 这条**跳变分支**）
+/// 两侧一起关掉，再看 **k=1** 的差。
+///
+/// ⚠️ **这不是干净的隔离（本仓纪律：混变量的对照比没有对照更坏）**——关掉夹断会**改变流场本身**
+/// （张力不稳定 ⇒ 更暴烈的自由面），所以读数只能当"**不是它**"的排除用。
+/// 实测：关掉后 k=1 的 `max|Δpos|` **1.50e-2 m >（开着时的）3.38e-3 m** ⇒ 夹断**不是** k=1 那条差的成因。
+/// 目的（保留）：②f 显示 A/B 从 k=1 就有 3.38e-3 m 的逐粒差，而 1e-8 的扰动 1 tick 只走 1e-10 m
+/// ⇒ 那个量**不是混沌** ⇒ 要找出它的成因（夹断已排除；分箱候选被 ① 削弱——① 的密度对拍是在
+/// **卡上自算盒子**的前提下做到 4.88e-7 ρ0 的，若分箱不同，密度会出离散跳变）。
+fn noclamp_early(
+    adapter: usize,
+    substeps: usize,
+    h: f32,
+    ids: &[u32],
+    prov: &dyn ProviderColliders,
+) {
+    let cfg_f = FluidConfig {
+        tensile_instability_suppression: false,
+        ..FluidConfig::default()
+    };
+    let mut cpu = FluidSystem::new(cfg_f, Vec3::new(-0.2, 0.99, -0.2), [8, 8, 8], SPACING);
+    cpu.set_boundaries(ids);
+    let init = flat(&cpu);
+    let mut cfg = make_cfg(&cpu);
+    cfg.clamp_neg = false; // 与 CPU 同档（make_cfg 本来就跟着配置走；显式写一遍免得将来漂）
+    cpu.step(1.0 / 60.0, prov);
+    let a = cpu.positions().to_vec();
+    let sim = Sim {
+        init: &init,
+        cfg,
+        substeps,
+        ticks: 1,
+        ghost: true,
+        project: true,
+        ids: ids.to_vec(),
+        h,
+        adapter,
+    };
+    let Some(b) = chain_sim(&sim, prov) else {
+        return;
+    };
+    let mut mx = 0.0f32;
+    for (p, q) in a.iter().zip(b.iter()) {
+        mx = mx.max((*p - *q).length());
+    }
+    println!(
+        "  ── ②g 夹断分支消融（两侧 `clamp_neg = false`，k=1）── max|Δpos| **{mx:.2e} m**（对照 ②f 的 3.38e-3 m）"
+    );
 }
 
 /// **②e CPU 自敏感**（把"差多少算大"标定出来）：同一初值，只把 0 号粒速度扰动 `eps` ⇒
