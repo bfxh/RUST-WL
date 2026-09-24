@@ -264,13 +264,18 @@
   "max_fn_lines": 266,
   "max_type_members": 0
  },
+ "crates/vxl-phys-gpu/src/bbox.rs": {
+  "file_lines": 392,
+  "max_fn_lines": 107,
+  "max_type_members": 9
+ },
  "crates/vxl-phys-gpu/src/grid.rs": {
   "file_lines": 429,
   "max_fn_lines": 89,
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/src/lib.rs": {
-  "file_lines": 52,
+  "file_lines": 53,
   "max_fn_lines": 8,
   "max_type_members": 3
  },
