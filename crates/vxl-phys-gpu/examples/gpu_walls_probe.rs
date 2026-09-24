@@ -321,13 +321,15 @@ fn facade_path(adapter: usize) {
     let mut wa = World::new(PhysConfig::default());
     let ka = tank(&mut wa);
     wa.add_fluid_with_boundary_coupling(water(), &[ka]);
+    // **重物**（ρ=3000 ⇒ 沉底静置）：**不起伏** ⇒ 去掉"起伏相位差"这一项，剩下的差才是系统性的
+    // （每 tick 一张平面表 vs CPU 逐子步重查、不做同位坍缩消解）。
     wa.add_dynamic(
         Shape::Box {
             half: Vec3::splat(0.1),
         },
         Vec3::new(0.0, 1.5, 0.0),
         Quat::IDENTITY,
-        400.0,
+        3000.0,
     );
     let mut wb = World::new(PhysConfig::default());
     let kb = tank(&mut wb);
@@ -338,7 +340,7 @@ fn facade_path(adapter: usize) {
         },
         Vec3::new(0.0, 1.5, 0.0),
         Quat::IDENTITY,
-        400.0,
+        3000.0,
     );
     wa.step();
     wb.step();
@@ -369,9 +371,11 @@ fn facade_path(adapter: usize) {
     }
     let (ya, va) = box_yv(&wa);
     let (yb, vb) = box_yv(&wb);
-    println!("  ── ③ **facade 路径**（provider 壁面 + 卡上步进，{TICKS} tick）──");
     println!(
-        "     浮盒 y {ya:.5} vs {yb:.5}（差 {:.2e} m）| vy {va:.5} vs {vb:.5}（差 {:.2e} m/s）",
+        "  ── ③ **facade 路径**（provider 壁面 + 卡上步进，{TICKS} tick、下沉重物 ⇒ 静置对比）──"
+    );
+    println!(
+        "     重物 y {ya:.5} vs {yb:.5}（差 {:.2e} m）| vy {va:.5} vs {vb:.5}（差 {:.2e} m/s，静置应 ≈0）",
         (ya - yb).abs(),
         (va - vb).abs()
     );
