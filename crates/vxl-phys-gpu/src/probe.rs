@@ -94,11 +94,10 @@ pub struct PhasesOut {
     pub error: Option<String>,
 }
 
-/// 取第 `adapter_index` 个适配器并建设备（**两探针共用**的选卡路径）。
+/// 取第 `adapter_index` 个适配器并建设备（**探针/示例共用**的选卡路径；`BodyStage` 这类
+/// 独立阶段也用它建卡）。
 /// 返回 `(适配器名字, device, queue)`；不可用时给中文错误串（调用方原样报出）。
-pub(crate) fn device_for(
-    adapter_index: usize,
-) -> Result<(String, wgpu::Device, wgpu::Queue), String> {
+pub fn device_for(adapter_index: usize) -> Result<(String, wgpu::Device, wgpu::Queue), String> {
     let instance = wgpu::Instance::default();
     let list = instance.enumerate_adapters(wgpu::Backends::all());
     let Some(adapter) = list.into_iter().nth(adapter_index) else {
