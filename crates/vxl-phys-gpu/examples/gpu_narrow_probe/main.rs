@@ -176,6 +176,26 @@ fn box_skin_cases(w: &mut World) -> BoxEdge {
     }
 }
 
+/// 圆柱簇（**卡上未接的族** ⇒ 全部走主机回填）。它的用处是：球×盒上卡之后，场景里若只剩复合体
+/// 需要回填，回填路径就近乎空转 ⇒ 用一簇"真接触的未接族"把它**钉在覆盖面上**。
+fn cyls_of(w: &mut World, n: usize) -> u32 {
+    let first = w.bodies.len() as u32;
+    for k in 0..n {
+        let x = 10.0 + (k % 4) as f32 * 0.7;
+        let z = -8.0 + (k / 4) as f32 * 0.7;
+        w.add_dynamic(
+            Shape::Cylinder {
+                half_height: 0.4,
+                radius: 0.35,
+            },
+            Vec3::new(x, 0.7, z),
+            Quat::IDENTITY,
+            1000.0,
+        );
+    }
+    first
+}
+
 /// 边角簇（搬到地板格之外 ⇒ 只与彼此成对）：同心（`dist < 1e-9` 特殊分支）/
 /// 恰好接触（`dist == rr` ⇒ **无流形**）/ 擦边（深度 1e-3）。
 fn edge_of(w: &mut World) -> Edge {
@@ -201,6 +221,7 @@ fn scene() -> Scene {
     let first_ball = balls_of(&mut w, 12, 3);
     boxes_of(&mut w, 48);
     tilted_boxes_of(&mut w, 24);
+    cyls_of(&mut w, 24);
     let box_edge = box_skin_cases(&mut w);
     let edge = edge_of(&mut w);
     let kids = vec![
@@ -348,6 +369,8 @@ struct Cover {
     gpu_hits: u32,
     gpu_empty: u32,
     gpu_sphere_sphere: u32,
+    gpu_sphere_box: u32,
+    gpu_sphere_box_hits: u32,
     gpu_box_box: u32,
     /// 盒×盒里出了流形的对数（**盒族自己的**"有接触"计数 ⇒ 单看总数会被球族掩盖）。
     gpu_box_hits: u32,
@@ -366,12 +389,19 @@ fn cover(pairs: &[(u32, u32)], slots: &[Slot], w: &World) -> Cover {
         } else {
             c.gpu_hits += 1;
         }
-        let ba = &w.bodies.shape[a as usize];
-        let bb = &w.bodies.shape[b as usize];
-        if matches!(ba, Shape::Sphere { .. }) && matches!(bb, Shape::Sphere { .. }) {
+        let (sa, sb) = (&w.bodies.shape[a as usize], &w.bodies.shape[b as usize]);
+        let ball = |s: &Shape| matches!(s, Shape::Sphere { .. });
+        let cube = |s: &Shape| matches!(s, Shape::Box { .. });
+        if ball(sa) && ball(sb) {
             c.gpu_sphere_sphere += 1;
         }
-        if matches!(ba, Shape::Box { .. }) && matches!(bb, Shape::Box { .. }) {
+        if (ball(sa) && cube(sb)) || (cube(sa) && ball(sb)) {
+            c.gpu_sphere_box += 1;
+            if cnt > 0 {
+                c.gpu_sphere_box_hits += 1;
+            }
+        }
+        if cube(sa) && cube(sb) {
             c.gpu_box_box += 1;
             if cnt > 0 {
                 c.gpu_box_hits += 1;
@@ -418,8 +448,10 @@ fn report(
         .count();
     print_row(
         &format!(
-            "覆盖面：球×球对 {} | 盒×盒对 {}（出流形 {}）| 同心 count={} | 球恰好接触 count={} | 球擦边 count={} | 盒阈 触/带内/超带 count={}/{}/{}（带内 depth {:+.4}）| 复合体流形 {} | 回填段剩余 {} | 裁剪越界 {}",
+            "覆盖面：球×球对 {} | 球×盒对 {}（出流形 {}）| 盒×盒对 {}（出流形 {}）| 同心 count={} | 球恰好接触 count={} | 球擦边 count={} | 盒阈 触/带内/超带 count={}/{}/{}（带内 depth {:+.4}）| 复合体流形 {} | 回填段剩余 {} | 裁剪越界 {}",
             c.gpu_sphere_sphere,
+            c.gpu_sphere_box,
+            c.gpu_sphere_box_hits,
             c.gpu_box_box,
             c.gpu_box_hits,
             cnt_of(edge.concentric),
@@ -480,8 +512,8 @@ fn report(
 fn self_check(c: &Cover, st: &Asm, sl: &Slate, cpu: &[Manifold], asm: &[Manifold], w: &World) {
     let fam = per_family(cpu, asm, w);
     println!(
-        "     分族逐位相同率（流形）：球×球 {}/{} | 盒×盒·不转 {}/{} | 盒×盒·有转 {}/{}",
-        fam[0].0, fam[0].1, fam[1].0, fam[1].1, fam[2].0, fam[2].1
+        "     分族逐位相同率（流形）：球×球 {}/{} | 球×盒 {}/{} | 盒×盒·不转 {}/{} | 盒×盒·有转 {}/{}",
+        fam[0].0, fam[0].1, fam[1].0, fam[1].1, fam[2].0, fam[2].1, fam[3].0, fam[3].1
     );
     let idx = |p: (u32, u32)| sl.pairs.iter().position(|q| *q == p || (*q == (p.1, p.0)));
     let cnt_of = |p: (u32, u32)| idx(p).map(|i| sl.slots[i].count()).unwrap_or(u32::MAX);
@@ -494,6 +526,8 @@ fn self_check(c: &Cover, st: &Asm, sl: &Slate, cpu: &[Manifold], asm: &[Manifold
         || c.gpu_hits == 0
         || c.gpu_empty == 0
         || c.gpu_sphere_sphere == 0
+        || c.gpu_sphere_box == 0
+        || c.gpu_sphere_box_hits == 0
         || c.gpu_box_box == 0
         || c.gpu_box_hits == 0
         || sl.diag0 != 0

@@ -36,20 +36,23 @@ pub(super) fn tol_of(w: &World) -> Tol {
     }
 }
 
-/// 分族统计「逐位相同 / 总数」的流形数：`[球×球, 盒×盒(两者都不转), 盒×盒(有转)]`。
+/// 分族统计「逐位相同 / 总数」的流形数：`[球×球, 球×盒, 盒×盒(都不转), 盒×盒(有转)]`。
 /// **证据用途**：对齐盒的坐标全可精确表示（整数/半整数），若那一族 100% 逐位相同 ⇒ 公式链本身
 /// 没错，剩下的差只可能来自**旋转带来的舍入/收缩**（口径 B）——比"总残差小"更有说服力。
-pub(super) fn per_family(cpu: &[Manifold], gpu: &[Manifold], w: &World) -> [(u32, u32); 3] {
-    let mut out = [(0u32, 0u32); 3];
+pub(super) fn per_family(cpu: &[Manifold], gpu: &[Manifold], w: &World) -> [(u32, u32); 4] {
+    let mut out = [(0u32, 0u32); 4];
     let idq = |i: u32| w.bodies.rot(i as usize) == Quat::IDENTITY;
+    let ball = |s: &Shape| matches!(s, Shape::Sphere { .. });
     for (c, g) in cpu.iter().zip(gpu.iter()) {
         let (sa, sb) = (w.bodies.shape[c.a as usize], w.bodies.shape[c.b as usize]);
-        let k = if matches!(sa, Shape::Sphere { .. }) && matches!(sb, Shape::Sphere { .. }) {
+        let k = if ball(&sa) && ball(&sb) {
             0
-        } else if idq(c.a) && idq(c.b) {
+        } else if ball(&sa) || ball(&sb) {
             1
-        } else {
+        } else if idq(c.a) && idq(c.b) {
             2
+        } else {
+            3
         };
         out[k].1 += 1;
         if point_multiset_bits_eq(c, g) && order_same(c, g) {

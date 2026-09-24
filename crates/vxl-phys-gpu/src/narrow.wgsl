@@ -514,6 +514,185 @@ fn select_and_emit(
     slots[base + W_CNT] = kn;
 }
 
+// ===== ③ 球×盒（CPU 走 `sphere_convex_ab` + `closest_point_on_poly`）=====
+//
+// ⚠️ **顶点算法与盒×盒不同源，别混**：盒×盒那条路用 `face_vertex`（由**体轴 × 半长**拼世界顶点），
+// 而球×凸体这条路用 `WorldPoly::fill`（`rotate_vec3(局部顶点) + pos`）——两者在浮点上**不等价**
+// （`R·(a+b+c) ≠ R·a+R·b+R·c` 的末位）。这里必须照抄后者。
+//
+// 局部顶点按 `BoxPolytope::box_polytope` 的位约定：bit0=+x、bit1=+y、bit2=+z ⇒ 三比特就是
+// `FACE_V` 里的那三组（面序/面内序都与 `BOX_FACES` 一致）。面法线 = 局部 ±X/±Y/±Z（axis=f/2）。
+
+struct Closest {
+    pt: vec3<f32>,
+    d2: f32,
+    inside: bool,
+    in_n: vec3<f32>,
+};
+
+fn face_normal_local(f: u32) -> vec3<f32> {
+    let a = f / 2u;
+    var v = vec3<f32>(0.0, 0.0, 1.0);
+    if (a == 0u) {
+        v = vec3<f32>(1.0, 0.0, 0.0);
+    } else if (a == 1u) {
+        v = vec3<f32>(0.0, 1.0, 0.0);
+    }
+    return select(v, -v, (f & 1u) != 0u);
+}
+
+fn local_vert(half: vec3<f32>, f: u32, k: u32) -> vec3<f32> {
+    let bits = (FACE_V[f] >> (k * 3u)) & 7u;
+    let sx = select(-half.x, half.x, (bits & 1u) != 0u);
+    let sy = select(-half.y, half.y, (bits & 2u) != 0u);
+    let sz = select(-half.z, half.z, (bits & 4u) != 0u);
+    return vec3<f32>(sx, sy, sz);
+}
+
+/// 世界顶点 = `rotate_vec3(局部顶点) + pos`（与 `WorldPoly::fill` 逐字同源）。
+fn world_vert(q: vec4<f32>, pos: vec3<f32>, half: vec3<f32>, f: u32, k: u32) -> vec3<f32> {
+    return rotate_axis(q, local_vert(half, f, k)) + pos;
+}
+
+/// 点到三角形最近点（标准区域分解；与 CPU `closest_point_on_triangle` 逐分支照抄）。
+fn tri_closest(p: vec3<f32>, a: vec3<f32>, b: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
+    let ab = b - a;
+    let ac = c - a;
+    let ap = p - a;
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if (d1 <= 0.0 && d2 <= 0.0) {
+        return a;
+    }
+    let bp = p - b;
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if (d3 >= 0.0 && d4 <= d3) {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) {
+        let denom = d1 - d3;
+        if (abs(denom) > 1e-12) {
+            return a + ab * (d1 / denom);
+        }
+        return a;
+    }
+    let cp = p - c;
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if (d6 >= 0.0 && d5 <= d6) {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) {
+        let denom = d2 - d6;
+        if (abs(denom) > 1e-12) {
+            return a + ac * (d2 / denom);
+        }
+        return a;
+    }
+    let va = d3 * d6 - d5 * d4;
+    if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0) {
+        let denom = (d4 - d3) + (d5 - d6);
+        if (abs(denom) > 1e-12) {
+            return b + (c - b) * ((d4 - d3) / denom);
+        }
+        return b;
+    }
+    let denom = va + vb + vc;
+    if (abs(denom) > 1e-12) {
+        let inv = 1.0 / denom;
+        return a + ab * (vb * inv) + ac * (vc * inv);
+    }
+    return a;
+}
+
+/// 凸体（**只做盒**）最近点查询：与 CPU `closest_point_on_poly` 同序 —— 逐面判内外 + 记最大平面距，
+/// 并按**扇形三角化** `(v0,v1,v2)`/`(v0,v2,v3)` 取最近点（严格 `<` ⇒ 平局取先到的面）。
+fn closest_on_box(q: vec4<f32>, pos: vec3<f32>, half: vec3<f32>, p: vec3<f32>) -> Closest {
+    var out: Closest;
+    out.pt = vec3<f32>(0.0, 0.0, 0.0);
+    out.d2 = F32_MAX;
+    out.inside = true;
+    out.in_n = vec3<f32>(0.0, 1.0, 0.0);
+    var max_plane_d = F32_MIN;
+    for (var f = 0u; f < 6u; f = f + 1u) {
+        let n = rotate_axis(q, face_normal_local(f));
+        let v0 = world_vert(q, pos, half, f, 0u);
+        let d = dot(p - v0, n);
+        if (d > 0.0) {
+            out.inside = false;
+        } else if (d > max_plane_d) {
+            max_plane_d = d;
+            out.in_n = n;
+        }
+        for (var k = 1u; k < 3u; k = k + 1u) {
+            let tri = tri_closest(
+                p,
+                v0,
+                world_vert(q, pos, half, f, k),
+                world_vert(q, pos, half, f, k + 1u),
+            );
+            let dd = tri - p;
+            let d2 = dot(dd, dd);
+            if (d2 < out.d2) {
+                out.d2 = d2;
+                out.pt = tri;
+            }
+        }
+    }
+    return out;
+}
+
+/// 球×盒：与 CPU `sphere_convex_ab` 同分支（内部走 `max_plane_d`、外部走"最近点距离 < 半径"）。
+/// 流形只有 1 点、`feature = 0`；`sphere_is_a` = false 时法线取反（CPU 的 `(convex, Sphere)` 臂）。
+fn sphere_box(base: u32, sb: u32, bb: u32, sphere_is_a: bool) {
+    let radius = as_f32(bodies[sb + P0_AT]);
+    let center = body_pos(sb);
+    let bq = body_quat(bb);
+    let bpos = body_pos(bb);
+    let bhalf = body_half(bb);
+    let cl = closest_on_box(bq, bpos, bhalf, center);
+    var n: vec3<f32>;
+    var depth: f32;
+    var point: vec3<f32>;
+    if (cl.inside) {
+        // 球心在盒内：max_plane_d < 0、表面距 = −max_plane_d。
+        // ⚠️ CPU 在 `inside` 分支里**再算一次** `max_plane_d_of`（独立的一遍循环，顺序/平局规则同）。
+        var max_d = F32_MIN;
+        var in_n = vec3<f32>(0.0, 1.0, 0.0);
+        for (var f = 0u; f < 6u; f = f + 1u) {
+            let nf = rotate_axis(bq, face_normal_local(f));
+            let d = dot(center - world_vert(bq, bpos, bhalf, f, 0u), nf);
+            if (d > max_d) {
+                max_d = d;
+                in_n = nf;
+            }
+        }
+        depth = radius + max_d;
+        if (depth <= 0.0) {
+            return; // 无流形
+        }
+        n = -in_n;
+        point = center - in_n * max_d;
+    } else {
+        let dist = sqrt(cl.d2);
+        if (dist >= radius) {
+            return;
+        }
+        n = select((cl.pt - center) * (1.0 / dist), vec3<f32>(0.0, 1.0, 0.0), dist <= 1e-9);
+        depth = radius - dist;
+        point = cl.pt;
+    }
+    if (!sphere_is_a) {
+        n = -n; // CPU 的 `(convex, Sphere)` 臂用同一路径后**翻转法线**
+    }
+    put_normal(base, n);
+    put_point(base, 0u, point, depth, 0u);
+    slots[base + W_CNT] = 1u;
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -553,6 +732,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             body_half(bb),
             box_axes_of(bb),
         );
+        return;
+    }
+    // 球×盒 / 盒×球（CPU 都走 `sphere_convex_ab`；盒×球那条臂算完再翻转法线）。
+    if (ka == KIND_SPHERE && kb == KIND_BOX) {
+        sphere_box(base, ba, bb, true);
+        return;
+    }
+    if (ka == KIND_BOX && kb == KIND_SPHERE) {
+        sphere_box(base, bb, ba, false);
         return;
     }
     slots[base + W_CNT] = NOT_HANDLED;
