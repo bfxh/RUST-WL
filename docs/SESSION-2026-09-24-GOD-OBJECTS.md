@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 2 个**（`process_pair_shaped` 663 / `solve_phase` 551；**其余全清**——示例 main、脚本、broad 与 solver 侧均已达标，B18–B25 共十七件；实测口径见 §3）。
+> 一句话：**文件级已清零**；**函数级门面内剩 1 个**（`process_pair_shaped` 663，narrow 侧——**最后一个**；solver 侧 `solve_phase` 551→74 已在 B26 清掉；**其余全清**——示例 main、脚本、broad 与 solver 侧均已达标，B18–B26 共十八件；实测口径见 §3）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -35,7 +35,8 @@
 | `3b9e252` | **B22**：arena_bench 两件（**示例 main 到此全清**）—— `probes_a::bench` 224→**109**（`measure_steps`/`track_exits`/`collect_stats`/`report_spread`/`report` + `Stats` 记录）、`probes_b::scene_joint_chains` 131→**8**（`hinge_chain`/`hanging_tower` 两段各一 fn）；判据=`norm_arena.py`（wall）/ `norm_jc.py`（joint_chains）——均 IDENTICAL |
 | `ce695d0` | **B23**：`scripts/render_demo.py` 241→**60**（**脚本类清零**）—— `parse_args`/`load_fonts`/`voxel_faces`（含面表缓存）/`add_{voxel,mesh,splat,fluid,body,shadow}_prims`/`draw_background`/`paint`/`overlay`（逐域一函数）；判据=**渲染产物逐位相同**（GIF sha256 + 50 张 PNG 合集 sha256 两侧一致） |
 | `a5a1665` | **B24**：`compute_pairs` 256→**76**（`broad` 的 trait 方法；**是 Mode M 而不是 Mode F**——五段都只访问 `self` 上的缓冲、无逃逸控制流 ⇒ 各提一个私有方法：`detect_sleep_flip`/`update_aabbs`/`update_proxies`/`query_chunks`/`refresh_candidates`/`collect_pairs`/`compact_arena`；顺带把两段重复的块数计算收成 `query_chunks`）；判据=`m1_scale` 掩计时对拍 **89 行 IDENTICAL**（tree_h/候选列全等）+ `cargo test -p vxl-phys-broad` **33 项全绿**（含 `bvh_matches_grid_across_frames` 跨帧配对集合一致） |
-| `本批`（哈希下批回填） | **B25**：`build_constraint` 340→**104**（solver 侧；**同样是 Mode M**——逐点循环各段只依赖循环内局部量 ⇒ 提 `material_pair`/`match_warm_point`/`resolve_anchor`（+`AnchorGeom`）/`contact_masses`/`soft_contact`/`tangential_drift` 六个 helper）；判据=`arena_bench wall` 掩计时对拍 **0 行差异**（**warm 匹配行逐字相同**：精确特征 557060 / 近邻回退 27711 / 未匹配 134467）+ `cargo test -p vxl-phys-solver` 12 项绿 |
+| `566c239` | **B25**：`build_constraint` 340→**104**（solver 侧；**同样是 Mode M**——逐点循环各段只依赖循环内局部量 ⇒ 提 `material_pair`/`match_warm_point`/`resolve_anchor`（+`AnchorGeom`）/`contact_masses`/`soft_contact`/`tangential_drift` 六个 helper）；判据=`arena_bench wall` 掩计时对拍 **0 行差异**（**warm 匹配行逐字相同**：精确特征 557060 / 近邻回退 27711 / 未匹配 134467）+ `cargo test -p vxl-phys-solver` 12 项绿 |
+| `本批`（哈希下批回填） | **B26**：`solve_phase` 551→**74**（**solver 侧清零**；**先结构打包再拆段**——`PhaseParams`（8 字段）/`GroupBufs`（7 字段，`take`/`restore`）/`Groups`（2 字段）三个记录 + 12 个 helper，最长的 `solve_groups_parallel` **93** 行、文件 615→812 行；见 §5 第 14 条）；判据=`gate_all.sh` 全绿（determinism 三哈希 / m0 压力哈希 / m1 串并行逐位一致 / 规模档门 / **金样门读数逐项相同**）+ **token 级零丢失**（去注释 + 去空白 + 改名映射后 token 计数全同，见 §5 第 15 条） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -54,7 +55,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 2 个**函数 >120 行（`process_pair_shaped` 663 与 `solve_phase` 551——narrow 与 solver 的两个最大分发；**其余全清**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 1 个**函数 >120 行（`process_pair_shaped` 663——narrow 侧，**最后一个**；solver 侧 `solve_phase` 551→74 已在 B26 清掉；**其余全清**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -72,7 +73,7 @@ PY
 
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
-| 库内**大分发** | 2 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver） | **先按 Mode M 试**（B24/B25 的实测教训）：`compute_pairs` 256→76 与 `build_constraint` 340→104 **都不是 Mode F**——只依赖 `self`/循环内局部量、无逃逸 ⇒ 提私有方法或模块级 helper 即可。**只有确认有逃逸控制流**（`break`/`continue`/`return` 指向被搬区间之外的循环）才上 `cf_census.py` + `Step` 枚举（Mode F 配方：arm/段提同型 helper，调用点 `if helper(..) { return; }`；**多段累加器改值进值出**，B12 的 `max_dv` 范例） |
+| 库内**大分发** | 1 | `process_pair_shaped` 663（narrow） | **先按 Mode M 试**（B24–B26 的实测教训）：`compute_pairs` 256→76、`build_constraint` 340→104、`solve_phase` 551→74 **都不是 Mode F**——只依赖 `self`/循环内局部量、无逃逸 ⇒ 提私有方法或模块级 helper 即可（`solve_phase` 另需**先做结构打包**，见 §5 第 14 条）。**只有确认有逃逸控制流**（`break`/`continue`/`return` 指向被搬区间之外的循环）才上 `cf_census.py` + `Step` 枚举（Mode F 配方：arm/段提同型 helper，调用点 `if helper(..) { return; }`；**多段累加器改值进值出**，B12 的 `max_dv` 范例） |
 | **示例 main** | **0** | — | **已全清**：B11/B13–B15 六件 + B18 两件 + B19 三件 + B20 四件 + B21 三件 + B22 两件 = 二十件（含探针/示例目录式与 arena_bench 的子模块函数）。配方与判据见 §3 第 4 条 |
 | 测试 + 脚本 | **0** | — | **已清零**（B23：`render_demo.py::main` 241→**60**；配方 = 按域提 `add_*_prims` + `voxel_faces`/`paint`/`overlay`，判据 = **渲染产物 sha256**（GIF 与 PNG 帧合集）——比打印读数更强） |
 
@@ -197,26 +198,42 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
    所有 `norm_*.py` 里了**）。
    另：`Stats` 这类**含 `Vec` 的记录不能按值解构**（`let Stats { .. } = *s;` 会 move 报错）
    ⇒ 要么逐字段拷（`let p50 = s.p50;`），要么把 `Vec` 字段拆成独立参数。
-14. **`solve_phase`（551，最后两个之一）的拆分设计 —— 2026-09-25 探查后未做完，已回滚留档**：
-    五段分界清楚（头 ~30 行参数推导 / 分岛 / 岛桶 / gather / 解算 / scatter+warm / 休眠判定），
-    但**不能按段直接提函数**——解算段要传 6 组"按组缓冲"（`group_lv`/`group_av`/`group_iw`/
-    `group_im`/`build_bufs`/`warm_outs`）**加** `local_of`，光参数列表就 18–24 行
-    ⇒ **辅助函数会因此自己超 120**（实测：把段 3–4c 整段提出去后 `solve_phase` 降到 200 行，
+14. **`solve_phase` 551→74（B26 已做完，2026-09-25）—— solver 侧清零，门面内只剩 `process_pair_shaped`**：
+    **为什么不能按段直接提函数**（上一版留档，仍是这条路线的判据）：解算段要传 6 组"按组缓冲"
+    （`group_lv`/`group_av`/`group_iw`/`group_im`/`build_bufs`/`warm_outs`）**加** `local_of`，
+    光参数列表就 18–24 行 ⇒ 辅助函数自己超 120（实测：整段提出去后主函数降到 200 行，
     而新方法仍有 ~130 行，仍不达标）。
-    **正解 = 先做结构打包**：`struct GroupBufs { lv, av, iw, im, build, warm_out, local_of }`
-    （7 字段；`island_*` 与 `warm_index` 可另设 `WarmTables`）——把 take/restore 与传参都收成
-    一个参数，各段方法才装得下。两条硬约束：
-    ① **四个计时点（`t_island`/`t_fill`/`t_solve`/`t_sleep`）必须留在 `solve_phase`**
-    （`fill_us`/`island_build_us`/`scope_us`/`scatter_us` 的分界依赖它们；B24 已踩过同型——
-    `t_fill` 夹在"分岛"与"填桶"之间，把两段合成一个函数就会丢分界）；
-    ② `islands` 来自 `self.island_pool` ⇒ 只能 `mem::take` 出来用（才能与 `&mut self` 的其它
-    字段共存），所以"整段解算"要由**一个方法**持有 take/restore，而不是散在各段里。
-    已试过且可编译/god 门放行的两块（回滚前状态）：`build_union_find` + `fill_island_buckets`
-    （分岛与填桶，中间夹 `t_fill`）、`gather_groups`/`solve_groups`/`scatter_groups`/
-    `commit_warm_slots`/`sleep_pass`(+`_island`/`_subisland`)——**下个会话从 `GroupBufs` 起步即可**。
-    ⚠️ 另记一条操作教训：本件折腾中出现过一次"Edit 误把 `sleep_pass_island` 的
+    **正解 = 先做结构打包（已落地）**：`PhaseParams`（8 字段，头部参数推导，含 cleanup 档的
+    `max_corr = 0`）+ `GroupBufs`（7 字段，`take`/`restore` 由 `solve_phase` 持有）+
+    `Groups`（awake 表 + 组区间）⇒ 段间只传 `&mut bufs` 与 `&PhaseParams`；12 个 helper 里最长的
+    `solve_groups_parallel` 也只有 93 行，文件 615→812 行（净账为负，god 门放行）。
+    三条硬约束（都照做）：
+    ① **四个计时点（`t_island`/`t_fill`/`t_solve`/`t_sleep`）留在 `solve_phase`**——`t_fill` 仍覆盖
+    「建岛 + gather」、`t_solve` 仍在 gather 之后起（否则 `scatter_us = d_solve − scope_us` 的口径就变了）；
+    ② `pool` 由 `solve_phase` take 成局部量、`islands = &pool[..]` 借的是**局部量** ⇒
+    **各 helper 可自由用 `&mut self`**，不必让"整段解算"由一个方法独占（比原计划的 `WarmTables` 更省：
+    warm 表在解算段只读，`commit_warm_slots` 里 take/restore 就够）；
+    ③ **诊断字段的写入位置逐项对齐**（最易踩的三处）：空清醒岛帧（`g_count == 1` 且 awake 为空）
+    必须仍产出 `vec![0; 1]` 而不是空 vec（否则 `group_us` 长度变了）；`points` 在无分支时仍沿用上一帧
+    `last_points`（旧版不刷新）；`group_manifs` 提前到 gather 里写（该字段只有一处写 ⇒ 等价）。
+    ⚠️ **新坑（clippy 文档 lint）**：把 `//` 注释改写成 `///` 文档注释时，**列表项后面接普通段落**
+    会撞 `clippy::doc_lazy_continuation`（"doc list item without indentation"，`cargo check` 不报、
+    `clippy -D warnings` 才报）⇒ 段落前补一行空的 `///`（或干脆保留为函数内 `//` 注释）。
+    ⚠️ 操作教训（上一版留档，仍然有效）：本件曾出现"Edit 误把 `sleep_pass_island` 的
     `sleep_timer=0`/`sleep_resets+=1` 两行换成空调用"的**真实逻辑破坏**（被 diff/编译抓回）
     ⇒ **长会话里每步改完立刻编译 + 用 `rg` 复核关键行**，别攒到最后。
+
+15. **量"纯搬移有没有丢东西"的量法：token Counter 比对**（B26 起用；比"非空行逐行在成品里找得到"更强）：
+    去注释（`//` 到行尾）→ 去**所有**空白 → 按改名映射把新文件的名字还原成旧名
+    （`bufs.lv`→`group_lv`、`p.`→``、`gr.ranges`→`groups` …）→ 两侧取 `[A-Za-z_]\w*` token
+    **逐项计数比**。为什么强：**免疫改写/换行/缩进**（去空白后 `.zip(a.iter_mut())` 两侧逐字相同），
+    而"丢一条语句"必然表现为某个名字或某个**操作签名**的计数下降。
+    B26 实测读数：`probe::start` 7/7、`probe::us` 7/7、`push(` 16/16、`mem::take` 14/14、
+    `resize_with` 6/6、`sleep_timer` 9/9、`wake_streak` 6/6、`awake[` 17/17、`set_angvel_raw` 3/3、
+    `find_small_root` 4/4、`is_dynamic` 7/7 —— 全同；**减少**的条目逐条可解释（变成结构体字段的
+    `let`、被内联的 `islands_len`/`*_us_diag`）。
+    ⚠️ 反面：`SequenceMatcher` 的**按序** diff 在"整块搬家"场景几乎全是噪声（顺序全变）——
+    **按计数比，别按序比**。
 
 ### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
