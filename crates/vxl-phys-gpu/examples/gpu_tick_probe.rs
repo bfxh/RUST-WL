@@ -74,6 +74,10 @@ struct Args {
     /// `--tank`：给 2b **边界粒子**（地板 + 四壁的静态盒体）——用来验"边界粒子在 GPU 侧也跑得对"：
     /// 密度/力核里的 `sum_b`/`m_j = pmass[j]` 是 2b 的数学，积分则必须**只跑流体前缀**。
     tank: bool,
+    /// `--cpu-threads K`：**CPU 对照档**的线程数（默认 1 = 与历史读数同口径）。>1 走并行档——
+    /// 常驻测试 `parallel_equals_serial_bitwise` 已证两者**逐位相同** ⇒ 判据不受影响，
+    /// 但千万粒档的 CPU 对照从"十几分钟"降到"一两分钟"（大档验收的前提）。
+    cpu_threads: usize,
 }
 
 fn parse_args() -> Args {
@@ -92,6 +96,12 @@ fn parse_args() -> Args {
         follow_box: rest.iter().any(|a| a == "--box=follow"),
         gravity_on: rest.iter().any(|a| a == "--gravity"),
         tank: rest.iter().any(|a| a == "--tank"),
+        cpu_threads: rest
+            .iter()
+            .position(|a| a == "--cpu-threads")
+            .and_then(|k| rest.get(k + 1))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
     }
 }
 
@@ -108,12 +118,20 @@ struct FluidSetup {
 /// 相位成本量级）+ 可选 2b 边界粒子 + 剪切初速。
 fn build_fluid(a: &Args) -> FluidSetup {
     let spacing = 0.05f32;
+    // CPU 对照档可走并行（`--cpu-threads K`）：与串行**逐位相同**（常驻测试守），只是快 K×。
+    if a.cpu_threads > 1 {
+        println!(
+            "⚠️ CPU 对照档 threads={}（并行口径；与串行逐位相同）⇒ 下面的 CPU 读数与加速比按并行读",
+            a.cpu_threads
+        );
+    }
     let cfg0 = FluidConfig {
         gravity: if a.gravity_on {
             Vec3::new(0.0, -9.81 * 0.1, 0.0)
         } else {
             Vec3::ZERO
         },
+        threads: a.cpu_threads,
         ..FluidConfig::default()
     };
     let h = cfg0.smoothing_radius;

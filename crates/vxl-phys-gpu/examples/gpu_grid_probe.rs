@@ -153,18 +153,33 @@ fn report(s: &Scene, t: &TableCmp, out: &GridOut) {
     );
 }
 
+/// 命令行：`[n] [--adapter K] [--cap K] [--cpu-threads K]`（默认 40 / 0 / 512 / 1）。
+///
+/// `--cpu-threads K`：**CPU 对照档**的线程数，>1 走并行档——与串行**逐位相同**（常驻测试
+/// `parallel_equals_serial_bitwise` 守）⇒ 判据不受影响，只把千万粒档那 6 趟建场 CPU 步
+/// 从"十几分钟"降到"一两分钟"（大档验收的前提）。
+fn parse_args() -> (usize, usize, u32, usize) {
+    let mut it = std::env::args().skip(1);
+    let n: usize = it.next().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let rest: Vec<String> = it.collect();
+    let val = |key: &str| -> Option<&str> {
+        rest.iter()
+            .position(|a| a == key)
+            .and_then(|k| rest.get(k + 1))
+            .map(|s| s.as_str())
+    };
+    (
+        n,
+        val("--adapter").and_then(|v| v.parse().ok()).unwrap_or(0),
+        val("--cap").and_then(|v| v.parse().ok()).unwrap_or(512),
+        val("--cpu-threads")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1),
+    )
+}
+
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let n: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(40);
-    let rest: Vec<String> = args.collect();
-    let mut adapter_index = 0usize;
-    let mut cap = 512u32;
-    if let Some(k) = rest.iter().position(|a| a == "--adapter") {
-        adapter_index = rest.get(k + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
-    }
-    if let Some(k) = rest.iter().position(|a| a == "--cap") {
-        cap = rest.get(k + 1).and_then(|v| v.parse().ok()).unwrap_or(512);
-    }
+    let (n, adapter_index, cap, cpu_threads) = parse_args();
 
     println!("== 适配器清单（不绑厂商核对）==");
     for (i, a) in probe::adapters().iter().enumerate() {
@@ -172,7 +187,13 @@ fn main() {
     }
 
     let spacing = 0.05f32;
-    let cfg = FluidConfig::default();
+    if cpu_threads > 1 {
+        println!("⚠️ CPU 对照档 threads={cpu_threads}（并行口径；与串行逐位相同）");
+    }
+    let cfg = FluidConfig {
+        threads: cpu_threads,
+        ..FluidConfig::default()
+    };
     let substeps = cfg.substeps.max(1) as f64;
     let mut f = FluidSystem::new(
         cfg,

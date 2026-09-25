@@ -300,8 +300,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_grid_probe.rs": {
-  "file_lines": 267,
-  "max_fn_lines": 111,
+  "file_lines": 288,
+  "max_fn_lines": 107,
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/examples/gpu_narrow_probe/diag.rs": {
@@ -330,7 +330,7 @@
   "max_type_members": 8
  },
  "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
-  "file_lines": 528,
+  "file_lines": 546,
   "max_fn_lines": 74,
   "max_type_members": 12
  },
