@@ -400,7 +400,7 @@
   "max_type_members": 6
  },
  "crates/vxl-phys-gpu/src/pipeline/readback.rs": {
-  "file_lines": 248,
+  "file_lines": 264,
   "max_fn_lines": 46,
   "max_type_members": 8
  },

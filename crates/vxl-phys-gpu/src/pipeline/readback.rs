@@ -224,6 +224,8 @@ impl Packet {
     /// ⇒ 回读的等待被中间那段工作遮住。与 `read_state` 的区别：**不再新起一趟拷贝**（用
     /// `run_deferred` 已发起的那趟），且只回 `pos`（管线档的消费方只需要位置）。
     /// ⚠️ 拿到的就是**上一 tick** 的状态（见 `run_deferred` 注）——耦合解算要"本 tick"就别用本方法。
+    /// **拷出并行做**（`PLAN-gpu` §19.5.1 ①）：映射区是**未缓存**内存，单线程读它只有 ~2.4 GB/s
+    /// （千万粒档 ≈50 ms，比 GPU 那半还贵）⇒ 分块用 `thread::scope` 并行读；逐元素换算 ⇒ **逐位相同**。
     pub fn take_deferred_state(&self) -> Vec<f32> {
         self.poll_wait().ok();
         let slice = self.readback_b.slice(..(self.n as u64) * 12);
@@ -234,12 +236,26 @@ impl Packet {
         self.poll_wait().ok();
         rx.recv().ok();
         let data = slice.get_mapped_range();
-        let out = (0..self.n as usize * 3)
-            .map(|i| {
-                let c = &data[i * 4..i * 4 + 4];
-                f32::from_le_bytes([c[0], c[1], c[2], c[3]])
-            })
-            .collect();
+        let bytes: &[u8] = &data;
+        let n3 = self.n as usize * 3;
+        let mut out = vec![0f32; n3];
+        let threads = std::thread::available_parallelism()
+            .map(|v| v.get())
+            .unwrap_or(1)
+            .clamp(1, 8);
+        let chunk = n3.div_ceil(threads.max(1));
+        std::thread::scope(|s| {
+            for (t, o) in out.chunks_mut(chunk).enumerate() {
+                let base = t * chunk;
+                s.spawn(move || {
+                    for (k, v) in o.iter_mut().enumerate() {
+                        let i = base + k;
+                        let c = &bytes[i * 4..i * 4 + 4];
+                        *v = f32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+                    }
+                });
+            }
+        });
         drop(data);
         self.readback_b.unmap();
         out
