@@ -60,19 +60,22 @@ pub(crate) fn mk_pipe(
 }
 
 /// 一个 compute pass + 一次分派（**自由函数**：闭包会独占借用 `enc`，后续就没法再编码拷贝）。
+///
+/// 分派形状由 `split_2d` 决定（一维装不下时转二维；核里按同一步长展平 ⇒ 逐粒索引不变）。
 pub(crate) fn dispatch(
     enc: &mut wgpu::CommandEncoder,
     pipe: &wgpu::ComputePipeline,
     bg: &wgpu::BindGroup,
     groups: u32,
 ) {
+    let (gx, gy) = crate::probe::split_2d(groups);
     let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: None,
         timestamp_writes: None,
     });
     cp.set_pipeline(pipe);
     cp.set_bind_group(0, bg, &[]);
-    cp.dispatch_workgroups(groups.max(1), 1, 1);
+    cp.dispatch_workgroups(gx, gy, 1);
 }
 
 pub(crate) fn ent(binding: u32, b: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

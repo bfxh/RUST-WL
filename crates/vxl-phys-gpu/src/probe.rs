@@ -106,13 +106,43 @@ pub fn device_for(adapter_index: usize) -> Result<(String, wgpu::Device, wgpu::Q
         ));
     };
     let info = adapter.get_info();
+    // 按**适配器实际上限**申请（不是 WebGPU 默认档）：默认 `max_storage_buffer_binding_size`
+    // = 128 MiB，而千万粒档单张绑定就 238 MB（逐粒反作用 = 6×f32/粒）⇒ 默认档在
+    // `create_bind_group` 直接 Validation Error。原生档按 `adapter.limits()` 申请是正当的；
+    // 上限决定"能跑多大档"⇒ 与读数同帧自报（见 `name`）。限制不参与算术 ⇒ 结果逐位不变。
+    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .map_err(|e| format!("request_device 失败：{e:?}"))?;
+    let (bind_mib, buf_mib) = binding_limits(&device);
     let name = format!(
-        "{} | {:?} | {:?}",
+        "{} | {:?} | {:?} | 绑定 {bind_mib} MiB / 缓冲 {buf_mib} MiB",
         info.name, info.backend, info.device_type
     );
-    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
-        .map_err(|e| format!("request_device 失败：{e:?}"))?;
     Ok((name, device, queue))
+}
+
+/// 本设备 (存储缓冲绑定上限, 单缓冲上限)，单位 MiB（千万粒档"能不能跑"由第一条定）。
+pub fn binding_limits(device: &wgpu::Device) -> (u64, u64) {
+    let l = device.limits();
+    (
+        l.max_storage_buffer_binding_size as u64 / (1024 * 1024),
+        l.max_buffer_size / (1024 * 1024),
+    )
+}
+
+/// x 维**工作组数**上限（= 设备 `max_compute_workgroups_per_dimension` 的规范最小值；
+/// 本机实测也是 65535）⇒ 单维分派在 `n > 65535 × 64 ≈ 4.19M` 粒时 Validation Error。
+pub const WG_X_CAP: u32 = 65535;
+
+/// 一维分派的**二维展开**：核里按固定 x 步长 `WG_X_CAP * 64` 展平（见各 `.wgsl` 入口）
+/// ⇒ 一维与二维两种分派下**逐粒索引完全相同**（一维时 `gid.y == 0`）⇒ 结果逐位不变；
+/// 但核里那个 `65535u * 64u` 字面量必须与本常量**锁步**（`tests::dispatch_2d_lockstep` 守）。
+pub fn split_2d(groups: u32) -> (u32, u32) {
+    let g = groups.max(1);
+    let gx = g.min(WG_X_CAP);
+    (gx, g.div_ceil(gx))
 }
 
 /// 在**指定适配器序号**上跑「密度 + 力/黏度」两相位（缓冲/管线复用，`repeats` 轮）。

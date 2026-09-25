@@ -22,7 +22,8 @@ struct EosParams {
 
 @compute @workgroup_size(64)
 fn eos(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    // 二维分派展平（见 `probe::split_2d`）：一维时 gid.y == 0 ⇒ 逐粒索引与旧式同（逐位不变）。
+    let i = gid.x + gid.y * (65535u * 64u);
     if (i >= E.n) {
         return;
     }

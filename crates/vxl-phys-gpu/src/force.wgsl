@@ -55,7 +55,8 @@ fn axis_idx(o: f32, v: f32, inv: f32, n: u32) -> i32 {
 
 @compute @workgroup_size(64)
 fn force(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    // 二维分派展平（见 `probe::split_2d`）：一维时 gid.y == 0 ⇒ 逐粒索引与旧式同（逐位不变）。
+    let i = gid.x + gid.y * (65535u * 64u);
     // **全部粒子**：流体支 = 加速度（+ XSPH）；边界支 = **反作用**（作用在边界粒子上的成对力，
     // 供"反作用回读"用——`PLAN-gpu.md` §13.2）。
     if i >= P.n_total {

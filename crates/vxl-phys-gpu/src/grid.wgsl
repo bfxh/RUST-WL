@@ -56,7 +56,8 @@ fn axis_bin(o: f32, v: f32, n: u32) -> u32 {
 
 @compute @workgroup_size(64)
 fn bin_count(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    // 二维分派展平（见 `probe::split_2d`）：一维时 gid.y == 0 ⇒ 逐粒索引与旧式同（逐位不变）。
+    let i = gid.x + gid.y * (65535u * 64u);
     if (i >= P.n) {
         return;
     }
@@ -116,7 +117,8 @@ fn scan(@builtin(local_invocation_index) lid: u32) {
 
 @compute @workgroup_size(64)
 fn place(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
+    // 二维分派展平（同 `bin_count`）。
+    let i = gid.x + gid.y * (65535u * 64u);
     if (i >= P.n) {
         return;
     }
@@ -127,7 +129,8 @@ fn place(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 @compute @workgroup_size(64)
 fn canon(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let c = gid.x;
+    // 二维分派展平（本入口按**格**编号；格数破 65535×64 时同样需要）。
+    let c = gid.x + gid.y * (65535u * 64u);
     if (c >= P.total) {
         return;
     }

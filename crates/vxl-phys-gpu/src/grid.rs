@@ -297,7 +297,8 @@ fn submit_grid_pass(
         });
         cp.set_pipeline(&pipes.bin);
         cp.set_bind_group(0, &pipes.bg, &[]);
-        cp.dispatch_workgroups(groups_n, 1, 1);
+        let (gx, gy) = crate::probe::split_2d(groups_n);
+        cp.dispatch_workgroups(gx, gy, 1);
     }
     {
         let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -322,7 +323,8 @@ fn submit_grid_pass(
         });
         cp.set_pipeline(&pipes.place);
         cp.set_bind_group(0, &pipes.bg, &[]);
-        cp.dispatch_workgroups(groups_n, 1, 1);
+        let (gx, gy) = crate::probe::split_2d(groups_n);
+        cp.dispatch_workgroups(gx, gy, 1);
     }
     {
         let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -331,7 +333,8 @@ fn submit_grid_pass(
         });
         cp.set_pipeline(&pipes.canon);
         cp.set_bind_group(0, &pipes.bg, &[]);
-        cp.dispatch_workgroups(groups_total, 1, 1);
+        let (gx, gy) = crate::probe::split_2d(groups_total);
+        cp.dispatch_workgroups(gx, gy, 1);
     }
     queue.submit(Some(enc.finish()));
 }
