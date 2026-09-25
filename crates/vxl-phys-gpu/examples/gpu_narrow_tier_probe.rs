@@ -49,11 +49,12 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
         }
         max_dv = max_dv.max((a.bodies.linvel[i] - b.bodies.linvel[i]).length());
     }
-    // 几何不符的**细分**：多少个流形、是法线变了（⇒ 选了另一根 SAT 轴，接触面都换了一张）
-    // 还是只有点集/深度差（⇒ 同一张面上的裁剪差）。
+    // 几何不符的**细分**：多少个流形、法线变了几条（⇒ 换了 SAT 轴）、以及**最近点距**有多大
+    // （⇒ 是"同一批点换了代表"（≈ 去重间距 min_sep=0.04 量级）还是"点集真不同"）。
     let mut n_geom_bad = 0usize;
     let mut n_norm_bad = 0usize;
     let mut max_dn = 0.0f32;
+    let mut max_near = 0.0f32;
     for (x, y) in ma.iter().zip(mb.iter()) {
         let dn = (x.normal - y.normal).length();
         if dn > 1e-4 {
@@ -62,12 +63,21 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
         max_dn = max_dn.max(dn);
         if !geom_ok(x, y) {
             n_geom_bad += 1;
+            // 每个 CPU 点到**最近**卡上点的距离（对不上时用它判"换代表"还是"真不同"）。
+            for p in x.points.iter() {
+                let near = y
+                    .points
+                    .iter()
+                    .map(|q| (p.point - q.point).length())
+                    .fold(f32::MAX, f32::min);
+                max_near = max_near.max(near);
+            }
         }
     }
     let n_geom = n_geom_bad;
     (
         format!(
-            "流形 {} / {}（对号+点数 {}, 特征多重集 {}, **几何不符 {} 条**（其中法线变 {} 条、max|Δn| {:.2e}））| 动了 {} 体（>1e-7 m）| max|Δv| {:.3e} m/s",
+            "流形 {} / {}（对号+点数 {}, 特征多重集 {}, **几何不符 {} 条**（法线变 {}、max|Δn| {:.2e}、最近点距 max {:.2e} m））| 动了 {} 体（>1e-7 m）| max|Δv| {:.3e} m/s",
             ma.len(),
             mb.len(),
             yn(struct_ok),
@@ -75,6 +85,7 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
             n_geom_bad,
             n_norm_bad,
             max_dn,
+            max_near,
             n_moved,
             max_dv
         ),
@@ -90,8 +101,8 @@ fn yn(ok: bool) -> &'static str {
     }
 }
 
-/// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m）：用来区分 **"同一接触面换了命名"**
-/// （口径 B 刀刃，几何一致）与 **"真的算出不同接触"**（几何错，要查）。
+/// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m）—— 与"特征多重集"分开报，方能区分
+/// "同一接触面换了命名"（刀刃）与"真的算出不同接触"。
 fn geom_ok(x: &vxl_phys::Manifold, y: &vxl_phys::Manifold) -> bool {
     const TOL: f32 = 1e-4;
     if x.points.len() != y.points.len() || (x.normal - y.normal).length() > TOL {
@@ -538,8 +549,7 @@ fn selftest(tier: Option<&NarrowTier>) -> bool {
     all_ok
 }
 
-/// **卡上把这一对放在指定体号上**（`ia`/`ib`）的答案：先补占位体到该下标，再放真身 ⇒ 测"答案是否与
-/// **体号/表规模**有关"（§17.9 补记七：实测与 `(0,1)` 隔离逐位相同 ⇒ 无关）。
+/// **卡上把这一对放在指定体号上**（`ia`/`ib`）：补占位体到该下标再放真身 ⇒ 实测与 `(0,1)` 隔离逐位相同（§17.9 补记七）。
 #[allow(clippy::too_many_arguments)] // 一对盒 = 位置/姿态/半长 ×2 + 体号 ×2
 fn card_on_bodies(
     t: &NarrowTier,
@@ -591,9 +601,7 @@ fn card_pair_normal(
     card_on_bodies(t, pa, ra, ha, pb, rb, hb, 0, 1)
 }
 
-/// **前缀二分（最小形态）**：同一个两体世界、**同一对 (0,1)**，只让**对表长度 m**（因而目标对的**槽位号
-/// m−1**）变 —— 每次读**最后一个槽**的答案。判读：答案随 m 变 ⇒ 卡上依赖批次位置；恒定 ⇒ 不依赖
-/// （实测 m=1…4096 全对 ⇒ **与列表长度无关**，§17.9 补记六）。
+/// **前缀二分（最小形态）**：同一对 `(0,1)` 只变对表长度 m，每次读最后一个槽 ⇒ 答案与列表长度无关（m=1…4096 全对）。
 fn prefix_bisect(t: &NarrowTier, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) {
     let want = axes_host(pa, ra, ha, pb, rb, hb)[0].1; // 正确方向 = 复算表 #0
     let mut w = World::new(cfg());
@@ -687,9 +695,9 @@ fn axes_probe(
             // ③ **真实对表复现**：把世界重建到**快照体态** + 用**本 tick 的真对表**喂卡上 = 复刻那一趟的调用。
             // 它若复现全量跑的答案 ⇒ 差异就在"对的列表/其它体"；若给 #0 ⇒ 输入还有别的不同。
             let mut w3 = if big { scene_m1() } else { scene() };
-            for i in 0..w3.bodies.len() {
-                w3.bodies.position[i] = snap.0[i];
-                w3.bodies.set_rot(i, snap.1[i]);
+            for (i, (p, r)) in snap.0.iter().zip(snap.1.iter()).enumerate() {
+                w3.bodies.position[i] = *p;
+                w3.bodies.set_rot(i, *r);
             }
             let pr = a.pairs();
             let ti = pr.iter().position(|p| *p == (x.a, x.b)).unwrap_or(0);
@@ -701,17 +709,12 @@ fn axes_probe(
                     let n = s.normal();
                     let nv = Vec3::new(n[0], n[1], n[2]);
                     println!(
-                        "          ⌗ 真对表复现（{} 对，目标第 {} 位）：n={:?}(c{}) n·#0={:+.5}{}",
+                        "          ⌗ 真对表复现（{} 对，目标第 {ti} 位）：n={:?}(c{}) n·#0={:+.5}{}",
                         pr.len(),
-                        ti,
                         [nv.x, nv.y, nv.z],
                         s.count(),
                         nv.dot(table[0].1),
-                        if nv.dot(y.normal) > 0.9999 {
-                            " =全量卡上 ✓（复现）"
-                        } else {
-                            ""
-                        }
+                        if nv.dot(y.normal) > 0.9999 { " 复现✓" } else { "" }
                     );
                 }
                 Err(e) => println!("          ⌗ 真对表复现：跑不通（{e}）"),
@@ -724,8 +727,7 @@ fn axes_probe(
     }
 }
 
-/// **主机侧复算**该对的 21 条分离轴（镜像 `sat.rs::build_axes` + 标量 sep 公式，全用 core 数学）。
-/// 返回按 `sep` 降序的 `(sep, n_a→b, 轴类)`。**这只是诊断**：真值以 CPU 窄相自己算的流形为准。
+/// **主机侧复算**该对的 21 条分离轴（镜像 `sat.rs::build_axes` + 标量 sep），返回按 `sep` 降序的 `(sep, n, 轴类)`。
 fn axes_host(
     pa: Vec3,
     ra: Quat,
