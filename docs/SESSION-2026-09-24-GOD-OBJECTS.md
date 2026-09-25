@@ -197,6 +197,26 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
    所有 `norm_*.py` 里了**）。
    另：`Stats` 这类**含 `Vec` 的记录不能按值解构**（`let Stats { .. } = *s;` 会 move 报错）
    ⇒ 要么逐字段拷（`let p50 = s.p50;`），要么把 `Vec` 字段拆成独立参数。
+14. **`solve_phase`（551，最后两个之一）的拆分设计 —— 2026-09-25 探查后未做完，已回滚留档**：
+    五段分界清楚（头 ~30 行参数推导 / 分岛 / 岛桶 / gather / 解算 / scatter+warm / 休眠判定），
+    但**不能按段直接提函数**——解算段要传 6 组"按组缓冲"（`group_lv`/`group_av`/`group_iw`/
+    `group_im`/`build_bufs`/`warm_outs`）**加** `local_of`，光参数列表就 18–24 行
+    ⇒ **辅助函数会因此自己超 120**（实测：把段 3–4c 整段提出去后 `solve_phase` 降到 200 行，
+    而新方法仍有 ~130 行，仍不达标）。
+    **正解 = 先做结构打包**：`struct GroupBufs { lv, av, iw, im, build, warm_out, local_of }`
+    （7 字段；`island_*` 与 `warm_index` 可另设 `WarmTables`）——把 take/restore 与传参都收成
+    一个参数，各段方法才装得下。两条硬约束：
+    ① **四个计时点（`t_island`/`t_fill`/`t_solve`/`t_sleep`）必须留在 `solve_phase`**
+    （`fill_us`/`island_build_us`/`scope_us`/`scatter_us` 的分界依赖它们；B24 已踩过同型——
+    `t_fill` 夹在"分岛"与"填桶"之间，把两段合成一个函数就会丢分界）；
+    ② `islands` 来自 `self.island_pool` ⇒ 只能 `mem::take` 出来用（才能与 `&mut self` 的其它
+    字段共存），所以"整段解算"要由**一个方法**持有 take/restore，而不是散在各段里。
+    已试过且可编译/god 门放行的两块（回滚前状态）：`build_union_find` + `fill_island_buckets`
+    （分岛与填桶，中间夹 `t_fill`）、`gather_groups`/`solve_groups`/`scatter_groups`/
+    `commit_warm_slots`/`sleep_pass`(+`_island`/`_subisland`)——**下个会话从 `GroupBufs` 起步即可**。
+    ⚠️ 另记一条操作教训：本件折腾中出现过一次"Edit 误把 `sleep_pass_island` 的
+    `sleep_timer=0`/`sleep_resets+=1` 两行换成空调用"的**真实逻辑破坏**（被 diff/编译抓回）
+    ⇒ **长会话里每步改完立刻编译 + 用 `rg` 复核关键行**，别攒到最后。
 
 ### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
