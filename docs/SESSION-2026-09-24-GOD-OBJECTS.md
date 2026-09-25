@@ -28,7 +28,7 @@
 | `dbd21bb` | **B15**：`m1_islands` 178→**80**（99 行"岛并行拆分读数"整块提 `report_island_breakdown`） |
 | `5fa7f49` | **B16**：`diag_query_cost_across_tree_shapes` 137→**57**（三棵**嵌套 fn** 用 `hoist` 上提模块级） |
 | `b3ac4fd` | **B17**：`float_motion_vs_local_water_motion` 144→**114**（两档重复的"零冲击就位"⇒ `surface_height(couple)`） |
-| `本批` | **B18**：示例 main 前两件（最大的两个）—— `trimesh_rest_probe` 360→**60**（七段提纯为模块级 fn，`end_state_report` 顺手删死参数 `cfg`）、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包 + 转储拆 `write_header`/`write_body_records`/`write_voxel_bits`/`write_fluid_particles`/`write_frame`）；判据=**逐位 A/B 对拍**（见 §3 第 4 条） |
+| `402e2c0` | **B18**：示例 main 前两件（最大的两个）—— `trimesh_rest_probe` 360→**60**（七段提纯为模块级 fn，`end_state_report` 顺手删死参数 `cfg`）、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包 + 转储拆 `write_header`/`write_body_records`/`write_voxel_bits`/`write_fluid_particles`/`write_frame`）；判据=**逐位 A/B 对拍**（见 §3 第 4 条） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
