@@ -186,6 +186,12 @@ const CAP_PAIRS_M1: u32 = 1 << 20;
 fn cfg() -> PhysConfig {
     PhysConfig {
         threads: 8,
+        // ⚠️ **子步必须 = 1**：`step()` 按 `substeps` 逐个跑 `substep(dt, k == 0, reuse)`，而
+        // `detect = first || !reuse_manifolds` ⇒ 非准静态时**每个子步都重跑窄相**，于是 tick 末留在
+        // `manifolds` 里的是**最后一个子步**的表 —— 那一帧的输入已被上一子步的解算+积分推进过；
+        // 直接比它 = 比**两个不同的帧**（口径 B 的差被这一步放大成"36 条几何不符"）。
+        // 子步 = 1 ⇒ 窄相只在 tick 起点的位姿上跑一次 ⇒ 与"切档前快照"**同一帧**，判据才有定义。
+        substeps: 1,
         ..PhysConfig::default()
     }
 }
@@ -581,6 +587,24 @@ fn selftest() -> bool {
     all_ok
 }
 
+/// **引擎自己**对**单对**盒的答案（法线）：建一个两体世界跑一次 `collide` ⇒ 与全量跑同一条代码路径。
+/// 用来做"同一帧证明"：哪一帧的体态能复现全量跑的流形，就说明全量跑窄相看的是那一帧。
+fn engine_pair_normal(pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) -> Option<Vec3> {
+    let mut w = World::new(cfg());
+    w.add_static(Shape::Box { half: ha }, pa, ra);
+    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
+    let mut out = Vec::new();
+    w.narrow.collide(
+        &w.bodies,
+        &[(0, 1)],
+        &[],
+        &vxl_phys_core::interop::NoProviders,
+        &mut out,
+        &vxl_phys_core::schedule::SerialJobSystem,
+    );
+    out.first().map(|m| m.normal)
+}
+
 /// 对**几何不符**的前几对，打**主机侧复算的 21 条分离轴**（按 sep 降序）——判据是：
 /// 卡上选中的那条，是否就是这里的第一名。不是 ⇒ 卡上的轴集/择优**真差**（查核里棱轴的构建）；
 /// 前两名只差 ~1 ulp ⇒ 刀刃（口径 B），判据该放宽。
@@ -615,6 +639,41 @@ fn axes_probe(a: &World, b: &World, snap: &(Vec<Vec3>, Vec<Quat>), max_n: usize)
                 if cpu_hit { " ←CPU选中" } else { "" },
                 if gpu_hit { " ←卡上选中" } else { "" }
             );
+        }
+        // **同一帧证明**：把这一对分别按「切档前快照」与「事后（tick 末）体态」各喂一次**引擎自己**的
+        // 单对 `collide`，看哪一帧能复现全量跑里 CPU 那条流形 —— 这决定"两边比的是不是同一帧"。
+        let (pa2, pb2) = (
+            a.bodies.position[x.a as usize],
+            a.bodies.position[x.b as usize],
+        );
+        let (ra2, rb2) = (a.bodies.rot(x.a as usize), a.bodies.rot(x.b as usize));
+        println!(
+            "          ⌗ 同一帧证明：全量 CPU n={:?} | 全量卡上 n={:?}",
+            [x.normal.x, x.normal.y, x.normal.z],
+            [y.normal.x, y.normal.y, y.normal.z]
+        );
+        for (tag, qa, qb, ppos) in [
+            ("切档前快照", (ra, rb), (pa, pb), 0u8),
+            ("事后(tick末)", (ra2, rb2), (pa2, pb2), 1),
+        ] {
+            let _ = ppos;
+            match engine_pair_normal(qb.0, qa.0, ha, qb.1, qa.1, hb) {
+                Some(n) => println!(
+                    "             {tag}：引擎单对 n={:?}{}{}",
+                    [n.x, n.y, n.z],
+                    if n.dot(x.normal) > 0.999 {
+                        " =全量CPU ✓"
+                    } else {
+                        ""
+                    },
+                    if n.dot(y.normal) > 0.999 {
+                        " =全量卡上 ✓"
+                    } else {
+                        ""
+                    }
+                ),
+                None => println!("             {tag}：引擎单对=无接触"),
+            }
         }
         shown += 1;
         if shown >= max_n {
