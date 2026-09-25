@@ -118,6 +118,7 @@ python scripts/god_gate.py --root . --write-baseline       # 只准减；理由�
 bash scripts/gate_all.sh                                   # 全量（含金样门：读数必须逐项相同）
 git branch --show-current && git status --porcelain        # 漏 add 会出现"本地绿 CI 红"
 git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 分钟，别同步等）
+# ⚠️ 判据 =「最新 run 的 headSha == HEAD」且 success：连推两次会取消旧 run（见 §5 第 8 条）
 ```
 
 `gate_all.sh` 会自己抢**机器级锁**（`~/.rx/perf-gate.lock`）——它跑的时候**别并发别的 cargo 构建**
@@ -137,6 +138,12 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
 6. **基线类门按工作区记录**：`git add` 漏文件 ⇒ 基线错位 ⇒ 本地绿而 CI 红。
 7. **门的棘轮**：`--write-baseline` **之后不许再动文件**（哪怕只加一行 `///`）——probe.rs 482→483 实栽，
    要么先改完再写基线、要么改完重写一遍（**净账通道**会放行并打印"合法交换"）。
+8. **连推两次 ⇒ 旧 CI run 被取消**（B18/B19 实测）：concurrency 会取消**进行中**的同名 run
+   ⇒ 看到"前置门 cancelled + 汇总 failure"**不是真失败**，是自家后续 push 干的（`gh run view <id>`
+   里失败门名字是 `cancelled` 而不是 `failure`）。**核 CI 的正确判据**：`gh run list --limit 1` 的
+   `headSha` **必须等于当前 HEAD**、且该 run 绿——被取消的旧 run 只代表"当时那次 push"。
+   `--exit-status | tail` 管道会把退出码变成 `tail` 的 ⇒ **别用退出码判 CI**，看 run 的 conclusion。
+   **省一次 push**：文档里的提交哈希回填**随下一批提交**（滞后一拍），别为回填单独推一次。
 
 ### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
