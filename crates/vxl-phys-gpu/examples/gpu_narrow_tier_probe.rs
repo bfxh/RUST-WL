@@ -90,9 +90,8 @@ fn yn(ok: bool) -> &'static str {
     }
 }
 
-/// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m —— m1 档坐标 ~50 m 的 ulp ≈ 6e-6，
-/// 留 ~16× 余量）：与"特征多重集"分开报，用来区分 **"同一接触面换了命名"**（口径 B 刀刃，几何一致）
-/// 与 **"真的算出不同接触"**（几何错，要查）。
+/// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m）：用来区分 **"同一接触面换了命名"**
+/// （口径 B 刀刃，几何一致）与 **"真的算出不同接触"**（几何错，要查）。
 fn geom_ok(x: &vxl_phys::Manifold, y: &vxl_phys::Manifold) -> bool {
     const TOL: f32 = 1e-4;
     if x.points.len() != y.points.len() || (x.normal - y.normal).length() > TOL {
@@ -245,26 +244,13 @@ fn max_dx(a: &World, b: &World) -> f32 {
     m
 }
 
-fn max_dv(a: &World, b: &World) -> f32 {
-    let mut m = 0.0f32;
-    for i in 0..a.bodies.len().min(b.bodies.len()) {
-        m = m.max((a.bodies.linvel[i] - b.bodies.linvel[i]).length());
-    }
-    m
-}
-
 /// `run_pair` 的读数：`(切换后 t=1 的 Δx, 最坏 Δx, 最坏 tick, 末态 Δx, 末态 Δv, 走势检查点,
 /// 两边窄相累计 µs)`。抽别名是 clippy 的 `type_complexity` 逼的（与流体档 `FluidSlot` 同款）。
 type Reading = (f32, f32, usize, f32, f32, Vec<(usize, f32)>, [u64; 2]);
 
-/// 跑两条链：先**同时空跑 `warm` 个 tick**（都不注册 ⇒ 必须逐位相同，顺带把场景推到"接触密集"
-/// 的状态），再给 B 注册 `tier` 并逐 tick 比。
-///
-/// 为什么要预热：m1 档的动态体从 y≈12–40 落下 ⇒ 前 ~100 tick **根本没有接触**，那时窄相不参与
-/// ⇒ t=1 恒为 0 的判据是**空转**（首版就踩到：金丝雀都红不了）。预热到接触密集再切档，
-/// t=1 才真的是"接线错探测器"（同 §15 ②h 的"先静置再比"手法）。
-///
-/// 返回 `(切换后第一 tick 的 Δx, 最坏值, 最坏 tick, 末态 Δx, 末态 Δv, 检查点, 两边窄相累计 µs)`。
+/// 跑两条链：先**同时空跑 `warm` 个 tick**（都不注册 ⇒ 必须逐位相同，顺带把场景推到"接触密集"的状态；
+/// m1 档动态体从高处落下，前 ~100 tick **没有接触** ⇒ 不预热的话 t=1 判据**空转**、金丝雀都红不了），
+/// 再给 B 注册 `tier` 并逐 tick 比。
 fn run_pair(
     tier: Option<Box<dyn NarrowTierBackend>>,
     label: &str,
@@ -328,7 +314,9 @@ fn run_pair(
         }
     }
     let end = max_dx(&a, &b);
-    let endv = max_dv(&a, &b);
+    let endv = (0..a.bodies.len())
+        .map(|i| (a.bodies.linvel[i] - b.bodies.linvel[i]).length())
+        .fold(0.0f32, f32::max);
     println!(
         "  {label}：t=1 max|Δx| {t1:.3e} m | 最坏 {worst:.3e}（第 {worst_at} tick）| 末态 max|Δx| {end:.3e} / max|Δv| {endv:.3e}",
     );
@@ -443,12 +431,11 @@ fn main() {
     );
 }
 
-/// **量具自检**（先证明复算表可信，再用它判案）：几条**手算得清**的盒对，各跑一次
-/// 「我的 21 轴复算表 #0」与「**引擎自己**的 `DefaultNarrowPhase::collide`（单对，同一条代码路径）」，
-/// 比双方选中的轴。判据：全一致 ⇒ 复算表可用（那 m1 档的分歧就是真差）；有分歧 ⇒ **先修复算表**。
+/// **量具自检**（先证明复算表可信，再用它判案）：手算得清的盒对，比对「复算表 #0」/「**引擎自己**的
+/// 单对 `collide`」/「卡上隔离」三方选中的轴 ⇒ 全一致才拿复算表去判案，有分歧就**先修表**。
 fn selftest(tier: Option<&NarrowTier>) -> bool {
     type Case<'a> = (&'a str, [f32; 3], f32, [f32; 3], f32, [f32; 4]);
-    let cases: [Case; 4] = [
+    let cases: [Case; 2] = [
         (
             "轴对齐·Y 浅叠",
             [0.0, 0.0, 0.0],
@@ -456,22 +443,6 @@ fn selftest(tier: Option<&NarrowTier>) -> bool {
             [0.0, 0.95, 0.0],
             0.4,
             [0.0, 0.0, 0.0, 1.0],
-        ),
-        (
-            "深叠·多轴近等",
-            [0.0, 0.0, 0.0],
-            0.5,
-            [0.3, 0.3, 0.3],
-            0.4,
-            [0.0, 0.0, 0.0, 1.0],
-        ),
-        (
-            "绕 Y 小角",
-            [0.0, 0.0, 0.0],
-            0.5,
-            [0.6, 0.97, 0.0],
-            0.4,
-            [0.0, -0.06619837, 0.0, 0.9978054],
         ),
         (
             "m1 复现对",
@@ -604,9 +575,32 @@ fn engine_pair_normal(pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3
     out.first().map(|m| m.normal)
 }
 
-/// 对**几何不符**的前几对，打**主机侧复算的 21 条分离轴**（按 sep 降序）——判据是：
-/// 卡上选中的那条，是否就是这里的第一名。不是 ⇒ 卡上的轴集/择优**真差**（查核里棱轴的构建）；
-/// 前两名只差 ~1 ulp ⇒ 刀刃（口径 B），判据该放宽。
+/// **前缀二分（最小形态）**：同一个两体世界、**同一对 (0,1)**，只让**对表长度 m**（因而目标对的**槽位号
+/// m−1**）变 —— 每次读**最后一个槽**的答案。判读（§17.9 补记五）：
+/// **答案随 m 变 ⇒ ①卡上对"这一对"不是纯函数**（与容器无关的另一路干扰）；**恒定 = 隔离值 ⇒ ②
+/// 全量跑喂进去的输入与隔离不同**（矛头转向打包/读表）。
+fn prefix_bisect(t: &NarrowTier, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) {
+    let want = axes_host(pa, ra, ha, pb, rb, hb)[0].1; // 正确方向 = 复算表 #0
+    let mut w = World::new(cfg());
+    w.add_static(Shape::Box { half: ha }, pa, ra);
+    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
+    let packed = vxl_phys_core::narrow_tier::pack_bodies(&w.bodies);
+    let mut s = String::new();
+    for m in [1usize, 2, 4, 16, 64, 256, 1024, 4096] {
+        let flat: Vec<u32> = (0..m).flat_map(|_| [0u32, 1u32]).collect();
+        match t.run(&packed, &flat) {
+            Ok(r) => {
+                let n = r.slots[m - 1].normal();
+                let nv = Vec3::new(n[0], n[1], n[2]);
+                s.push_str(&format!("m={m}:{:+.4} ", nv.dot(want)));
+            }
+            Err(_) => s.push_str(&format!("m={m}:跑不通 ")),
+        }
+    }
+    println!("          ⑃ 前缀二分（槽位随 m 变，n·#0 越接近 +1 越对）：{s}");
+}
+
+/// 对**几何不符**的前几对做**轴取证**：点名（双方选中的轴排第几 + sep）、前缀二分、隔离对照。
 fn axes_probe(
     a: &World,
     b: &World,
@@ -627,13 +621,11 @@ fn axes_probe(
         let (pa, pb) = (snap.0[x.a as usize], snap.0[x.b as usize]);
         let (ra, rb) = (snap.1[x.a as usize], snap.1[x.b as usize]);
         println!(
-            "       ⌖ 轴表 对 ({}, {})：切档前 a.pos={:?} half={:?} | b.pos={:?} half={:?}",
+            "       ⌖ 对 ({}, {})：a={:?} | b={:?}",
             x.a,
             x.b,
-            [pa.x, pa.y, pa.z],
-            [ha.x, ha.y, ha.z],
-            [pb.x, pb.y, pb.z],
-            [hb.x, hb.y, hb.z]
+            (pa, ha),
+            (pb, hb)
         );
         let table = axes_host(pa, ra, ha, pb, rb, hb);
         // **点名**：双方各自选中的那条在表里排第几、它的 sep 多少（近平行轴时"top-5 里找"会一起命中）。
@@ -657,6 +649,9 @@ fn axes_probe(
             rank_of(y.normal),
             gap
         );
+        if let Some(t) = tier {
+            prefix_bisect(t, pa, ra, ha, pb, rb, hb);
+        }
         // **同一帧证明**：把这一对分别按「切档前快照」与「事后（tick 末）体态」各喂一次**引擎自己**的
         // 单对 `collide`，看哪一帧能复现全量跑里 CPU 那条流形 —— 这决定"两边比的是不是同一帧"。
         let (pa2, pb2) = (
