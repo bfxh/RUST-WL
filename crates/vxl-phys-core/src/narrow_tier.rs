@@ -72,6 +72,21 @@ impl NarrowSlots {
 /// 失败（无适配器 / 超容量 / 核跑不通）⇒ `Err`，调用方**回退 CPU**（不得静默用半张表）。
 pub trait NarrowTierBackend {
     fn narrow_run(&self, bodies: &[u32], pairs: &[u32]) -> Result<NarrowSlots, String>;
+
+    /// **常驻体表**（可选，性能档）：`bodies` = 当前整表；`changed` = **记录有变**的体号列表
+    /// （首帧或体数变化时调用方传**全部**体号）。返回 `Some(())` = 已同步且进入常驻模式 ⇒
+    /// 之后每趟走 `narrow_run_resident`（不再传整表）；`None` = 不支持 ⇒ 调用方每趟整表上传。
+    ///
+    /// 为什么要有它：整表每趟上传的代价随体数线性涨（11k 体 = **528 KB/tick**），在 m1 档实测
+    /// **比窄相本身还贵**；而每 tick 真正动的只有**清醒动体**那一小块 ⇒ 只传变动记录即可（§17.9）。
+    fn narrow_resident(&self, _bodies: &[u32], _changed: &[u32]) -> Option<()> {
+        None
+    }
+
+    /// 常驻模式下的一趟：体表已在后端手里 ⇒ 只吃对表。
+    fn narrow_run_resident(&self, _pairs: &[u32]) -> Result<NarrowSlots, String> {
+        Err("该后端不支持常驻体表".into())
+    }
 }
 
 /// 逐体打包为卡上布局：`pos.xyz | rot.xyzw | kind | p0 | p1 | p2 | pad`（浮点走 f32 位模式、

@@ -22,11 +22,21 @@ use super::*;
 pub struct NarrowSlot {
     pub host: DefaultNarrowPhase,
     pub(crate) tier: Option<Box<dyn vxl_phys_core::narrow_tier::NarrowTierBackend>>,
+    /// **上一份打包好的整表**（常驻档的 diff 基线）：每趟只把**变动记录**重传（§17.10）。
+    /// `None` / 行数不符 ⇒ 本趟按"全部变动"处理（首帧与体数变化）。
+    pub(crate) body_cache: Option<Vec<u32>>,
+    /// 上一趟后端是否进了**常驻模式**（决定了本趟走 `narrow_run_resident` 还是整表 `narrow_run`）。
+    pub(crate) resident: bool,
 }
 
 impl From<DefaultNarrowPhase> for NarrowSlot {
     fn from(host: DefaultNarrowPhase) -> Self {
-        Self { host, tier: None }
+        Self {
+            host,
+            tier: None,
+            body_cache: None,
+            resident: false,
+        }
     }
 }
 
@@ -81,10 +91,37 @@ impl World {
         let packed = vxl_phys_core::narrow_tier::pack_bodies(&self.bodies);
         dump_words_if_asked(&packed, pairs, self.tick);
         let flat = vxl_phys_core::narrow_tier::flat_pairs(pairs);
-        let slots = match tier.narrow_run(&packed, &flat) {
+        // **常驻体表**（§17.10）：与上一份缓存逐记录比，只把**变动**的记录交给后端；
+        // 缓存缺失或行数变了 ⇒ 本趟按"全部变动"（首帧/体数变化）。
+        const W: usize = vxl_phys_core::narrow_tier::BODY_WORDS;
+        let n_rec = packed.len() / W;
+        let mut changed: Vec<u32> = Vec::new();
+        match self.narrow.body_cache.as_mut() {
+            Some(c) if c.len() == packed.len() => {
+                for i in 0..n_rec {
+                    if c[i * W..(i + 1) * W] != packed[i * W..(i + 1) * W] {
+                        changed.push(i as u32);
+                        c[i * W..(i + 1) * W].copy_from_slice(&packed[i * W..(i + 1) * W]);
+                    }
+                }
+            }
+            _ => {
+                changed.extend(0..n_rec as u32);
+                self.narrow.body_cache = Some(packed.clone());
+            }
+        }
+        // 只有后端**确实收了**常驻表，本趟才走"体表已在卡上"的跑法。
+        let resident = self.narrow.resident && tier.narrow_resident(&packed, &changed).is_some();
+        self.narrow.resident = resident;
+        let slots = match if resident {
+            tier.narrow_run_resident(&flat)
+        } else {
+            tier.narrow_run(&packed, &flat)
+        } {
             Ok(s) => s,
             Err(_) => {
                 self.narrow.tier = Some(tier); // 卡上跑不通（无适配器/超容量）⇒ 回退 CPU，档还留着
+                self.narrow.resident = false;
                 return false;
             }
         };

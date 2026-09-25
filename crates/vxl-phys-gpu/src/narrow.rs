@@ -83,13 +83,18 @@ pub struct NarrowTier {
     device: wgpu::Device,
     queue: wgpu::Queue,
     bg: wgpu::BindGroup,
-    pipe: wgpu::ComputePipeline,
+    /// `[0]` = 主核（窄相）、`[1]` = `scatter_records`（常驻体表的变动散写）。
+    pipes: [wgpu::ComputePipeline; 2],
     bufs: Buffers,
     cap_bodies: u32,
     cap_pairs: u32,
     skin: f32,
     /// 选点去重间距（与 CPU `DefaultNarrowPhase::new` 同式：`max(skin*2, 0.01)`）。
     min_sep: f32,
+    /// **卡上体表的当前行数**（常驻档用：`run_resident` 不再传体表，行数从这里取）。
+    resident_n: std::sync::atomic::AtomicU32,
+    /// 待散写的**变动记录数**（`upload_records` 记账；下一趟在 `run_common` 里消费）。
+    resident_upd: std::sync::atomic::AtomicU32,
 }
 
 /// 常驻缓冲清单（体表/对表按**容量**开 ⇒ 每 tick 只重写前缀）。
@@ -100,6 +105,9 @@ struct Buffers {
     slots: wgpu::Buffer,
     rb: wgpu::Buffer,
     diag: wgpu::Buffer,
+    /// 变动记录（常驻体表的增量）：`upd_idx` = 体号、`upd_rec` = 12 字/条。
+    upd_idx: wgpu::Buffer,
+    upd_rec: wgpu::Buffer,
 }
 
 /// 一趟读数：对序槽表 + 诊断字（`[0]` = 裁剪多边形越界次数，**必须 0**）。
@@ -129,7 +137,7 @@ fn make_bufs(device: &wgpu::Device, cap_bodies: u32, cap_pairs: u32) -> Buffers 
     Buffers {
         params: device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("narrow.params"),
-            size: 16,
+            size: 32,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }),
@@ -139,6 +147,11 @@ fn make_bufs(device: &wgpu::Device, cap_bodies: u32, cap_pairs: u32) -> Buffers 
         ),
         pairs: mk("narrow.pairs", (cap_pairs as u64) * 8),
         slots: mk("narrow.slots", slots_bytes),
+        upd_idx: mk("narrow.upd_idx", (cap_bodies as u64) * 4),
+        upd_rec: mk(
+            "narrow.upd_rec",
+            (cap_bodies as u64) * (BODY_WORDS as u64) * 4,
+        ),
         // ⚠️ 回读缓冲**单独建**：`MAP_READ` 只能与 `COPY_DST` 组合（把它当 `mk` 的附加位塞进去
         // ⇒ wgpu 校验当场报错：`MAP` usage can only be combined with the opposite `COPY`）。
         rb: device.create_buffer(&wgpu::BufferDescriptor {
@@ -157,10 +170,10 @@ fn make_bufs(device: &wgpu::Device, cap_bodies: u32, cap_pairs: u32) -> Buffers 
 fn build_pipeline(
     device: &wgpu::Device,
     bufs: &Buffers,
-) -> (wgpu::BindGroup, wgpu::ComputePipeline) {
+) -> (wgpu::BindGroup, [wgpu::ComputePipeline; 2]) {
     let ro = wgpu::BufferBindingType::Storage { read_only: true };
     let rw = wgpu::BufferBindingType::Storage { read_only: false };
-    let types = [wgpu::BufferBindingType::Uniform, ro, ro, rw, rw];
+    let types = [wgpu::BufferBindingType::Uniform, rw, ro, rw, rw, ro, ro];
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("narrow.bgl"),
         entries: &types
@@ -189,14 +202,17 @@ fn build_pipeline(
         bind_group_layouts: &[&layout],
         push_constant_ranges: &[],
     });
-    let pipe = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("narrow.main"),
-        layout: Some(&pl),
-        module: &shader,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let mk_pipe = |entry: &str| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: Some(&pl),
+            module: &shader,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    let pipes = [mk_pipe("main"), mk_pipe("scatter_records")];
     let bg = {
         fn e<'a>(b: u32, bf: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
             wgpu::BindGroupEntry {
@@ -213,10 +229,12 @@ fn build_pipeline(
                 e(2, &bufs.pairs),
                 e(3, &bufs.slots),
                 e(4, &bufs.diag),
+                e(5, &bufs.upd_idx),
+                e(6, &bufs.upd_rec),
             ],
         })
     };
-    (bg, pipe)
+    (bg, pipes)
 }
 
 impl NarrowTier {
@@ -235,19 +253,21 @@ impl NarrowTier {
         }
         let (adapter, device, queue) = device_for(adapter_index)?;
         let bufs = make_bufs(&device, cap_bodies, cap_pairs);
-        let (bg, pipe) = build_pipeline(&device, &bufs);
+        let (bg, pipes) = build_pipeline(&device, &bufs);
         Ok(Self {
             adapter,
             device,
             queue,
             bg,
-            pipe,
+            pipes,
             bufs,
             cap_bodies,
             cap_pairs,
             skin,
             // 与 CPU `DefaultNarrowPhase::new` 同式。
             min_sep: (skin * 2.0).max(0.01),
+            resident_n: std::sync::atomic::AtomicU32::new(0),
+            resident_upd: std::sync::atomic::AtomicU32::new(0),
         })
     }
 
@@ -260,15 +280,73 @@ impl NarrowTier {
     ///
     /// `bodies` = 逐体 12 字（`BODY_WORDS`）、`pairs` = 逐对 2 字（`(a, b)` 裸 u32）。
     pub fn run(&self, bodies: &[u32], pairs: &[u32]) -> Result<NarrowRun, String> {
-        if !bodies.len().is_multiple_of(BODY_WORDS) || !pairs.len().is_multiple_of(2) {
+        if !bodies.len().is_multiple_of(BODY_WORDS) {
             return Err(format!(
-                "输入长度不是整条：bodies={}（{} 字/体）、pairs={}（2 字/对）",
+                "体表长度不是整条：bodies={}（{} 字/体）",
                 bodies.len(),
-                BODY_WORDS,
+                BODY_WORDS
+            ));
+        }
+        self.run_common((bodies.len() / BODY_WORDS) as u32, pairs, Some(bodies))
+    }
+
+    /// **常驻体表**：登记"哪些体的记录变了"，由下一趟**同一次提交**里的 `scatter_records` 散写进卡上
+    /// 常驻体表（体表此后不必整表上传）。
+    ///
+    /// 为什么要"一次大上传 + 卡上散写"而不是逐段 `write_buffer`：**代价按调用次数算**（实测 515 KB
+    /// 一次 ≈ 0.243 ms，而 35 KB 分多次 ≈ 0.176 ms ⇒ 只快 1.4×）——把变动折成 `(体号, 记录)` 两段
+    /// 连续数据、一次写完，散写在卡上是 µs 级（§17.10）。
+    pub fn upload_records(&self, bodies: &[u32], changed: &[u32]) -> Result<(), String> {
+        if !bodies.len().is_multiple_of(BODY_WORDS) {
+            return Err(format!("体表长度不是整条：bodies={}", bodies.len()));
+        }
+        let n_bodies = (bodies.len() / BODY_WORDS) as u32;
+        if n_bodies > self.cap_bodies || changed.len() as u32 > self.cap_bodies {
+            return Err(format!("超容量：体 {n_bodies}/{}", self.cap_bodies));
+        }
+        if changed.is_empty() {
+            self.resident_upd
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.resident_n
+                .store(n_bodies, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+        // 打包成两段**连续**数据：`idx`（体号）与 `rec`（12 字/条）⇒ 两次 `write_buffer`。
+        let mut idx: Vec<u8> = Vec::with_capacity(changed.len() * 4);
+        let mut rec: Vec<u8> = Vec::with_capacity(changed.len() * BODY_WORDS * 4);
+        for &i in changed {
+            idx.extend_from_slice(&i.to_le_bytes());
+            let a = (i as usize) * BODY_WORDS;
+            rec.extend_from_slice(&words_to_bytes(&bodies[a..a + BODY_WORDS]));
+        }
+        self.queue.write_buffer(&self.bufs.upd_idx, 0, &idx);
+        self.queue.write_buffer(&self.bufs.upd_rec, 0, &rec);
+        self.resident_upd
+            .store(changed.len() as u32, std::sync::atomic::Ordering::Relaxed);
+        self.resident_n
+            .store(n_bodies, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// **常驻模式的一趟**：体表已在卡上（见 `upload_records`）⇒ 只吃对表。
+    pub fn run_resident(&self, pairs: &[u32]) -> Result<NarrowRun, String> {
+        let n = self.resident_n.load(std::sync::atomic::Ordering::Relaxed);
+        self.run_common(n, pairs, None)
+    }
+
+    /// 公共体：校验 → 写参数/对表（体表**可选**）→ 派发 → 回读。
+    fn run_common(
+        &self,
+        n_bodies: u32,
+        pairs: &[u32],
+        bodies: Option<&[u32]>,
+    ) -> Result<NarrowRun, String> {
+        if !pairs.len().is_multiple_of(2) {
+            return Err(format!(
+                "对表长度不是整条：pairs={}（2 字/对）",
                 pairs.len()
             ));
         }
-        let n_bodies = (bodies.len() / BODY_WORDS) as u32;
         let n_pairs = (pairs.len() / 2) as u32;
         if n_bodies > self.cap_bodies || n_pairs > self.cap_pairs {
             return Err(format!(
@@ -286,15 +364,22 @@ impl NarrowTier {
             });
         }
         // 每 tick 重写参数与两张表（容量不变 ⇒ 缓冲不重建）。参数 = `n_bodies|n_pairs|skin|min_sep`
-        // （后两个是 f32 位模式：两者都进几何判定 ⇒ 必须是**同一份** CPU 侧值的位）。
-        let mut prm: Vec<u8> = Vec::with_capacity(16);
+        // （后两个是 f32 位模式：两者都进几何判定 ⇒ 必须是**同一份** CPU 侧值的位）；第 5 槽 = 本趟要
+        // 散写的**变动记录数**（0 = 跳过；由 `upload_records` 记账）。
+        let n_upd = self.resident_upd.load(std::sync::atomic::Ordering::Relaxed);
+        let mut prm: Vec<u8> = Vec::with_capacity(32);
         prm.extend_from_slice(&n_bodies.to_le_bytes());
         prm.extend_from_slice(&n_pairs.to_le_bytes());
         prm.extend_from_slice(&self.skin.to_bits().to_le_bytes());
         prm.extend_from_slice(&self.min_sep.to_bits().to_le_bytes());
+        prm.extend_from_slice(&n_upd.to_le_bytes());
+        prm.extend_from_slice(&[0u8; 12]);
         self.queue.write_buffer(&self.bufs.params, 0, &prm);
-        self.queue
-            .write_buffer(&self.bufs.bodies, 0, &words_to_bytes(bodies));
+        // 体表：常驻档**不写**（已在卡上，见 `upload_records`）。
+        if let Some(b) = bodies {
+            self.queue
+                .write_buffer(&self.bufs.bodies, 0, &words_to_bytes(b));
+        }
         self.queue
             .write_buffer(&self.bufs.pairs, 0, &words_to_bytes(pairs));
         let mut enc = self
@@ -304,12 +389,23 @@ impl NarrowTier {
             });
         // 诊断字每趟清零（原子累加 ⇒ 不清就会跨趟累计，读数失去"本趟"含义）。
         enc.clear_buffer(&self.bufs.diag, 0, None);
+        // **0) 变动记录散写**（常驻体表；`n_upd = 0` 时整趟跳过 ⇒ 非常驻档零影响）：
+        // 与主核**同一次提交**（省一趟同步），且在上传的同一编码器里、主核之前。
+        if n_upd > 0 {
+            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: None,
+                timestamp_writes: None,
+            });
+            cp.set_pipeline(&self.pipes[1]);
+            cp.set_bind_group(0, &self.bg, &[]);
+            cp.dispatch_workgroups(n_upd.div_ceil(WG).max(1), 1, 1);
+        }
         {
             let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: None,
                 timestamp_writes: None,
             });
-            cp.set_pipeline(&self.pipe);
+            cp.set_pipeline(&self.pipes[0]);
             cp.set_bind_group(0, &self.bg, &[]);
             cp.dispatch_workgroups(n_pairs.div_ceil(WG).max(1), 1, 1);
         }
@@ -370,13 +466,30 @@ impl vxl_phys_core::narrow_tier::NarrowTierBackend for NarrowTier {
         pairs: &[u32],
     ) -> Result<vxl_phys_core::narrow_tier::NarrowSlots, String> {
         let r = self.run(bodies, pairs)?;
-        let mut words = Vec::with_capacity(r.slots.len() * SLOT_WORDS);
-        for s in &r.slots {
-            words.extend_from_slice(&s.words);
-        }
-        Ok(vxl_phys_core::narrow_tier::NarrowSlots {
-            words,
-            diag: r.diag,
-        })
+        Ok(flatten(r))
+    }
+
+    /// 常驻体表：只写 `changed` 的记录（§17.10；整表 528 KB/tick 在 m1 档比窄相本身还贵）。
+    fn narrow_resident(&self, bodies: &[u32], changed: &[u32]) -> Option<()> {
+        self.upload_records(bodies, changed).ok()
+    }
+
+    fn narrow_run_resident(
+        &self,
+        pairs: &[u32],
+    ) -> Result<vxl_phys_core::narrow_tier::NarrowSlots, String> {
+        Ok(flatten(self.run_resident(pairs)?))
+    }
+}
+
+/// 逐槽 → 裸字表（门面只认字）。
+fn flatten(r: NarrowRun) -> vxl_phys_core::narrow_tier::NarrowSlots {
+    let mut words = Vec::with_capacity(r.slots.len() * SLOT_WORDS);
+    for s in &r.slots {
+        words.extend_from_slice(&s.words);
+    }
+    vxl_phys_core::narrow_tier::NarrowSlots {
+        words,
+        diag: r.diag,
     }
 }

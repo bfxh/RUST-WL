@@ -59,14 +59,38 @@ struct Params {
     skin: f32,
     /// 选点去重间距（CPU `min_point_sep` = `max(skin*2, 0.01)`）。
     min_sep: f32,
+    /// 本趟要先**散写**的变动记录数（0 = 跳过；见 `scatter_records`）。
+    n_upd: u32,
+    pad1: u32,
+    pad2: u32,
+    pad3: u32,
 };
 
 @group(0) @binding(0) var<uniform> prm: Params;
-@group(0) @binding(1) var<storage, read> bodies: array<u32>;
+@group(0) @binding(1) var<storage, read_write> bodies: array<u32>;
 @group(0) @binding(2) var<storage, read> pairs: array<u32>;
 @group(0) @binding(3) var<storage, read_write> slots: array<u32>;
 /// 诊断（主机侧断言全 0）：`[0]` = 裁剪多边形越界次数。
 @group(0) @binding(4) var<storage, read_write> diag: array<atomic<u32>>;
+/// 变动记录（常驻体表用）：`upd_idx` = 体号、`upd_rec` = 该体的 12 字。
+@group(0) @binding(5) var<storage, read> upd_idx: array<u32>;
+@group(0) @binding(6) var<storage, read> upd_rec: array<u32>;
+
+/// **散写变动记录**（常驻体表的增量上传）：主机一次调用把 `(体号, 记录)` 传上来，这里写进常驻体表。
+/// 为什么要它：`write_buffer` 的代价**按调用次数**算（实测 515 KB 一次 ≈ 0.243 ms，而 35 KB 分多次
+/// ≈ 0.176 ms ⇒ 只快 1.4×）⇒ 把"多次小写"换成"**一次大上传 + 卡上散写**"才真省（§17.10）。
+@compute @workgroup_size(64)
+fn scatter_records(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let g = gid.x;
+    if (g >= prm.n_upd) {
+        return;
+    }
+    let dst = upd_idx[g] * BODY_WORDS;
+    let src = g * BODY_WORDS;
+    for (var k = 0u; k < BODY_WORDS; k = k + 1u) {
+        bodies[dst + k] = upd_rec[src + k];
+    }
+}
 
 fn as_f32(w: u32) -> f32 {
     return bitcast<f32>(w);
