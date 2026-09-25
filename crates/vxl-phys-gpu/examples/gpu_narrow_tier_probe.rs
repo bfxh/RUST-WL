@@ -90,55 +90,6 @@ fn yn(ok: bool) -> &'static str {
     }
 }
 
-/// 打**前几处几何不符**的双方原文（对号 / 法线 / 点数 / 点的位模式 + 两体姿态）——用来判
-/// "选了另一根轴（真差）"还是"两侧都在合法解集里（刀刃）"。
-fn dump_diff(a: &World, b: &World, max_n: usize) {
-    let (ma, mb) = (a.manifolds(), b.manifolds());
-    let mut shown = 0usize;
-    for (x, y) in ma.iter().zip(mb.iter()) {
-        if geom_ok(x, y) {
-            continue;
-        }
-        println!(
-            "       ⚠️ 对 ({}, {})：CPU n={:?} 点数 {} | 卡上 n={:?} 点数 {}",
-            x.a,
-            x.b,
-            [x.normal.x, x.normal.y, x.normal.z],
-            x.points.len(),
-            [y.normal.x, y.normal.y, y.normal.z],
-            y.points.len()
-        );
-        for j in 0..x.points.len().min(y.points.len()) {
-            println!(
-                "          点{j} CPU {:?} d={:?} | 卡上 {:?} d={:?}",
-                [
-                    x.points[j].point.x,
-                    x.points[j].point.y,
-                    x.points[j].point.z
-                ],
-                x.points[j].depth,
-                [
-                    y.points[j].point.x,
-                    y.points[j].point.y,
-                    y.points[j].point.z
-                ],
-                y.points[j].depth
-            );
-        }
-        for (tag, i) in [("a", x.a), ("b", x.b)] {
-            println!(
-                "          体 {tag}={i} rot={:?} 形状={:?}",
-                a.bodies.rot(i as usize),
-                a.bodies.shape[i as usize]
-            );
-        }
-        shown += 1;
-        if shown >= max_n {
-            break;
-        }
-    }
-}
-
 /// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m —— m1 档坐标 ~50 m 的 ulp ≈ 6e-6，
 /// 留 ~16× 余量）：与"特征多重集"分开报，用来区分 **"同一接触面换了命名"**（口径 B 刀刃，几何一致）
 /// 与 **"真的算出不同接触"**（几何错，要查）。
@@ -320,7 +271,19 @@ fn run_pair(
     big: bool,
     warm: usize,
     want_dump: bool,
+    adapter: usize,
 ) -> Reading {
+    // 诊断用的**第二份**卡上档（`run` 只要 `&self`；正题那份要被移进 World ⇒ 不能共用）。
+    let diag = if want_dump {
+        let (cb, cp) = if big {
+            (CAP_BODIES_M1, CAP_PAIRS_M1)
+        } else {
+            (CAP_BODIES, CAP_PAIRS)
+        };
+        NarrowTier::new(adapter, cb, cp, cfg().contact_skin).ok()
+    } else {
+        None
+    };
     let mut a = if big { scene_m1() } else { scene() };
     let mut b = if big { scene_m1() } else { scene() };
     assert_eq!(a.bodies.len(), b.bodies.len());
@@ -372,8 +335,7 @@ fn run_pair(
     if !t1_diag.is_empty() {
         println!("     t=1 诊断：{t1_diag}");
         if want_dump && !t1_diag.contains("几何不符 0 条") {
-            dump_diff(&a, &b, 3);
-            axes_probe(&a, &b, &snap, 2);
+            axes_probe(&a, &b, &snap, 1, diag.as_ref());
         }
     }
     println!(
@@ -396,11 +358,6 @@ fn main() {
     }
     let big = rest.iter().any(|x| x == "--m1");
     println!("== 窄相卡上档接线 vs 默认 CPU 窄相：两条链只差「谁跑窄相」==");
-    // 0) **量具自检**：先把复算表拿到引擎面前对一次（不一致就先修表，别去动核）。
-    let gauge_ok = selftest();
-    if !gauge_ok {
-        println!("  ⚠️ 复算表不可信 ⇒ 下面的「轴」诊断只能当线索，不能当判据");
-    }
     println!(
         "  {TICKS} tick | threads=8 | 场景 = {} | 判据 t=1 ≤ {T1_MAX:.0e} m",
         if big {
@@ -421,8 +378,12 @@ fn main() {
         std::process::exit(2);
     };
     println!("  适配器：{}", tier.adapter());
+    // 0) **量具自检**：把复算表拿到「引擎」与「卡上」面前各对一次（不一致就先修表，别去动核）。
+    if !selftest(Some(&tier)) {
+        println!("  ⚠️ 三方不同轴 ⇒ 复算表或核有问题（上面已点名），下面的「轴」诊断只能当线索");
+    }
     // ① 自证：两条链都**不注册** ⇒ 应当逐位相同（证明比较器本身不引入差）；同时把场景预热。
-    let (t1_self, end_self, ..) = run_pair(None, "自证（都不注册）", big, WARM, false);
+    let (t1_self, end_self, ..) = run_pair(None, "自证（都不注册）", big, WARM, false, adapter);
     if t1_self != 0.0 || end_self != 0.0 {
         println!("     ⚠️ 自证不为零 ⇒ 比较器/场景有不确定性，下面的读数不可信");
     }
@@ -435,6 +396,7 @@ fn main() {
         big,
         WARM,
         true,
+        adapter,
     );
     // 走势检查点：**线性增长才是接线错**（指数/饱和 = 口径 B 混沌，§13.5 的判读法）。
     let trend: Vec<String> = cps
@@ -464,6 +426,7 @@ fn main() {
         big,
         WARM,
         false,
+        adapter,
     );
     println!(
         "  裁决：{}\n    （t=1：正题 {t1:.3e} / 金丝雀 {t1c:.3e} ⇒ {}）",
@@ -483,17 +446,9 @@ fn main() {
 /// **量具自检**（先证明复算表可信，再用它判案）：几条**手算得清**的盒对，各跑一次
 /// 「我的 21 轴复算表 #0」与「**引擎自己**的 `DefaultNarrowPhase::collide`（单对，同一条代码路径）」，
 /// 比双方选中的轴。判据：全一致 ⇒ 复算表可用（那 m1 档的分歧就是真差）；有分歧 ⇒ **先修复算表**。
-fn selftest() -> bool {
+fn selftest(tier: Option<&NarrowTier>) -> bool {
     type Case<'a> = (&'a str, [f32; 3], f32, [f32; 3], f32, [f32; 4]);
-    let cases: [Case; 5] = [
-        (
-            "轴对齐·X 浅叠",
-            [0.0, 0.0, 0.0],
-            0.5,
-            [0.9, 0.0, 0.0],
-            0.4,
-            [0.0, 0.0, 0.0, 1.0],
-        ),
+    let cases: [Case; 4] = [
         (
             "轴对齐·Y 浅叠",
             [0.0, 0.0, 0.0],
@@ -550,6 +505,28 @@ fn selftest() -> bool {
         );
         let table = axes_host(pa, ra, ha, pb, rb, hb);
         let (sep0, n0, kind0) = &table[0];
+        // ③ **卡上**也跑同一对（最小复现）：同一帧、同一个 2 体世界 ⇒ 卡上若与表 #0 不同轴，
+        //    就是一条**十行可复现**的核差异（而不是 m1 那种"场景 + 240 tick"的长链路）。
+        if let Some(t) = tier {
+            match card_pair_normal(t, pa, ra, ha, pb, rb, hb) {
+                Some((nv, cnt)) => {
+                    let d_eng = out.first().map(|m| m.normal.dot(nv)).unwrap_or(f32::NAN);
+                    let d_tab = nv.dot(*n0);
+                    println!(
+                        "        卡上：n={:?}（count {cnt}）| 与引擎 n·={d_eng:+.5} | 与表#0 [{kind0}] n·={d_tab:+.5} ⇒ {}",
+                        [nv.x, nv.y, nv.z],
+                        if cnt == 0 {
+                            "（卡上=无接触；与引擎一致即「一致 ✓」，不一致要查）"
+                        } else if d_tab > 0.999 && d_eng > 0.999 {
+                            "三方同轴 ✓"
+                        } else {
+                            "**卡上与表/引擎不同轴 ✗（最小复现！）**"
+                        }
+                    );
+                }
+                None => println!("        卡上：跑不通"),
+            }
+        }
         match out.first() {
             Some(m) => {
                 let d = m.normal.dot(*n0);
@@ -587,6 +564,28 @@ fn selftest() -> bool {
     all_ok
 }
 
+/// **卡上**对**这一对**（给定帧）的答案 = `(法线, 点数)`：建一个 2 体世界 → 打包 → 卡上跑一趟。
+/// 与 `engine_pair_normal` 配对，就是"同一对、同一帧：引擎 vs 卡上"的最小对照。
+fn card_pair_normal(
+    t: &NarrowTier,
+    pa: Vec3,
+    ra: Quat,
+    ha: Vec3,
+    pb: Vec3,
+    rb: Quat,
+    hb: Vec3,
+) -> Option<(Vec3, u32)> {
+    let mut w = World::new(cfg());
+    w.add_static(Shape::Box { half: ha }, pa, ra);
+    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
+    let packed = vxl_phys_core::narrow_tier::pack_bodies(&w.bodies);
+    let flat = vxl_phys_core::narrow_tier::flat_pairs(&[(0, 1)]);
+    let r = t.run(&packed, &flat).ok()?;
+    let s = &r.slots[0];
+    let n = s.normal();
+    Some((Vec3::new(n[0], n[1], n[2]), s.count()))
+}
+
 /// **引擎自己**对**单对**盒的答案（法线）：建一个两体世界跑一次 `collide` ⇒ 与全量跑同一条代码路径。
 /// 用来做"同一帧证明"：哪一帧的体态能复现全量跑的流形，就说明全量跑窄相看的是那一帧。
 fn engine_pair_normal(pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) -> Option<Vec3> {
@@ -608,7 +607,13 @@ fn engine_pair_normal(pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3
 /// 对**几何不符**的前几对，打**主机侧复算的 21 条分离轴**（按 sep 降序）——判据是：
 /// 卡上选中的那条，是否就是这里的第一名。不是 ⇒ 卡上的轴集/择优**真差**（查核里棱轴的构建）；
 /// 前两名只差 ~1 ulp ⇒ 刀刃（口径 B），判据该放宽。
-fn axes_probe(a: &World, b: &World, snap: &(Vec<Vec3>, Vec<Quat>), max_n: usize) {
+fn axes_probe(
+    a: &World,
+    b: &World,
+    snap: &(Vec<Vec3>, Vec<Quat>),
+    max_n: usize,
+    tier: Option<&NarrowTier>,
+) {
     let (ma, mb) = (a.manifolds(), b.manifolds());
     let mut shown = 0usize;
     for (x, y) in ma.iter().zip(mb.iter()) {
@@ -630,16 +635,28 @@ fn axes_probe(a: &World, b: &World, snap: &(Vec<Vec3>, Vec<Quat>), max_n: usize)
             [pb.x, pb.y, pb.z],
             [hb.x, hb.y, hb.z]
         );
-        for (k, (sep, n, kind)) in axes_host(pa, ra, ha, pb, rb, hb).iter().take(5).enumerate() {
-            let cpu_hit = (n.dot(x.normal) - 1.0).abs() < 1e-4;
-            let gpu_hit = (n.dot(y.normal) - 1.0).abs() < 1e-4;
-            println!(
-                "          轴#{k} sep={sep:+.8e} n={:?} [{kind}]{}{}",
-                [n.x, n.y, n.z],
-                if cpu_hit { " ←CPU选中" } else { "" },
-                if gpu_hit { " ←卡上选中" } else { "" }
-            );
-        }
+        let table = axes_host(pa, ra, ha, pb, rb, hb);
+        // **点名**：双方各自选中的那条在表里排第几、它的 sep 多少（近平行轴时"top-5 里找"会一起命中）。
+        let rank_of = |dir: Vec3| -> String {
+            let mut best = (0usize, f32::NAN, -2.0f32, String::new());
+            for (k, (sep, n, kind)) in table.iter().enumerate() {
+                let d = n.dot(dir);
+                if d > best.2 {
+                    best = (k, *sep, d, kind.clone());
+                }
+            }
+            format!(
+                "轴#{}[{}] sep={:+.6e} n·dir={:+.5}",
+                best.0, best.3, best.1, best.2
+            )
+        };
+        let gap = table.get(1).map(|v| v.0 - table[0].0).unwrap_or(f32::NAN);
+        println!(
+            "          ▸ 点名：CPU → {} | 卡上 → {} | 前两名 sep 差 {:.3e}",
+            rank_of(x.normal),
+            rank_of(y.normal),
+            gap
+        );
         // **同一帧证明**：把这一对分别按「切档前快照」与「事后（tick 末）体态」各喂一次**引擎自己**的
         // 单对 `collide`，看哪一帧能复现全量跑里 CPU 那条流形 —— 这决定"两边比的是不是同一帧"。
         let (pa2, pb2) = (
@@ -673,6 +690,32 @@ fn axes_probe(a: &World, b: &World, snap: &(Vec<Vec3>, Vec<Quat>), max_n: usize)
                     }
                 ),
                 None => println!("             {tag}：引擎单对=无接触"),
+            }
+            // **卡上也是同一对**：隔离跑一次卡上档 ⇒ 若它在隔离下选 #0（与引擎一致）而全量跑选 #3，
+            // 说明卡上的答案依赖"这一对在批次里的位置/邻居"，不是这一对本身的几何问题。
+            if let Some(t) = tier {
+                let mut w2 = World::new(cfg());
+                w2.add_static(Shape::Box { half: ha }, qb.0, qa.0);
+                w2.add_dynamic(Shape::Box { half: hb }, qb.1, qa.1, 1000.0);
+                let packed = vxl_phys_core::narrow_tier::pack_bodies(&w2.bodies);
+                let flat = vxl_phys_core::narrow_tier::flat_pairs(&[(0, 1)]);
+                if let Ok(r) = t.run(&packed, &flat) {
+                    let s = &r.slots[0];
+                    let n = s.normal();
+                    let nv = Vec3::new(n[0], n[1], n[2]);
+                    let n_tab = table[0].1;
+                    println!(
+                        "             {tag}：**卡上隔离** n={:?}（count {}）| 与表#0 n·={:+.5}{}",
+                        [nv.x, nv.y, nv.z],
+                        s.count(),
+                        nv.dot(n_tab),
+                        if nv.dot(n_tab) > 0.999 {
+                            " =表#0 ✓"
+                        } else {
+                            " **≠表#0 ✗**"
+                        }
+                    );
+                }
             }
         }
         shown += 1;
