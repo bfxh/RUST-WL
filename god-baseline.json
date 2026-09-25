@@ -510,9 +510,9 @@
   "max_type_members": 1
  },
  "crates/vxl-phys-narrow/src/pair_shaped.rs": {
-  "file_lines": 671,
-  "max_fn_lines": 663,
-  "max_type_members": 1
+  "file_lines": 876,
+  "max_fn_lines": 112,
+  "max_type_members": 10
  },
  "crates/vxl-phys-narrow/src/phase.rs": {
   "file_lines": 96,

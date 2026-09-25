@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 1 个**（`process_pair_shaped` 663，narrow 侧——**最后一个**；solver 侧 `solve_phase` 551→74 已在 B26 清掉；**其余全清**——示例 main、脚本、broad 与 solver 侧均已达标，B18–B26 共十八件；实测口径见 §3）。
+> 一句话：**文件级已清零**；**函数级门面内 0 个（全清）**——B18–B27 十九件：示例 main、脚本、以及 broad/solver/narrow 三侧的大分发（`compute_pairs` 256→76、`build_constraint` 340→104、`solve_phase` 551→74、`process_pair_shaped` 663→99）；实测口径见 §3。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -36,7 +36,8 @@
 | `ce695d0` | **B23**：`scripts/render_demo.py` 241→**60**（**脚本类清零**）—— `parse_args`/`load_fonts`/`voxel_faces`（含面表缓存）/`add_{voxel,mesh,splat,fluid,body,shadow}_prims`/`draw_background`/`paint`/`overlay`（逐域一函数）；判据=**渲染产物逐位相同**（GIF sha256 + 50 张 PNG 合集 sha256 两侧一致） |
 | `a5a1665` | **B24**：`compute_pairs` 256→**76**（`broad` 的 trait 方法；**是 Mode M 而不是 Mode F**——五段都只访问 `self` 上的缓冲、无逃逸控制流 ⇒ 各提一个私有方法：`detect_sleep_flip`/`update_aabbs`/`update_proxies`/`query_chunks`/`refresh_candidates`/`collect_pairs`/`compact_arena`；顺带把两段重复的块数计算收成 `query_chunks`）；判据=`m1_scale` 掩计时对拍 **89 行 IDENTICAL**（tree_h/候选列全等）+ `cargo test -p vxl-phys-broad` **33 项全绿**（含 `bvh_matches_grid_across_frames` 跨帧配对集合一致） |
 | `566c239` | **B25**：`build_constraint` 340→**104**（solver 侧；**同样是 Mode M**——逐点循环各段只依赖循环内局部量 ⇒ 提 `material_pair`/`match_warm_point`/`resolve_anchor`（+`AnchorGeom`）/`contact_masses`/`soft_contact`/`tangential_drift` 六个 helper）；判据=`arena_bench wall` 掩计时对拍 **0 行差异**（**warm 匹配行逐字相同**：精确特征 557060 / 近邻回退 27711 / 未匹配 134467）+ `cargo test -p vxl-phys-solver` 12 项绿 |
-| `本批`（哈希下批回填） | **B26**：`solve_phase` 551→**74**（**solver 侧清零**；**先结构打包再拆段**——`PhaseParams`（8 字段）/`GroupBufs`（7 字段，`take`/`restore`）/`Groups`（2 字段）三个记录 + 12 个 helper，最长的 `solve_groups_parallel` **93** 行、文件 615→812 行；见 §5 第 14 条）；判据=`gate_all.sh` 全绿（determinism 三哈希 / m0 压力哈希 / m1 串并行逐位一致 / 规模档门 / **金样门读数逐项相同**）+ **token 级零丢失**（去注释 + 去空白 + 改名映射后 token 计数全同，见 §5 第 15 条） |
+| `d7131e4` | **B26**：`solve_phase` 551→**74**（**solver 侧清零**；**先结构打包再拆段**——`PhaseParams`（8 字段）/`GroupBufs`（7 字段，`take`/`restore`）/`Groups`（2 字段）三个记录 + 12 个 helper，最长的 `solve_groups_parallel` **93** 行、文件 615→812 行；见 §5 第 14 条）；判据=`gate_all.sh` 全绿（determinism 三哈希 / m0 压力哈希 / m1 串并行逐位一致 / 规模档门 / **金样门读数逐项相同**）+ **token 级零丢失**（去注释 + 去空白 + 改名映射后 token 计数全同，见 §5 第 15 条） |
+| `本批`（哈希下批回填） | **B27**：`process_pair_shaped` 663→**99**（**narrow 侧清零 ⇒ 门面内全清**；形状对总分发按段拆成 10 个 helper——编排 99 / `provider_pair` 112 / `heightfield_pair` 82 / `pair_non_heightfield` 54 / `box_pair` 52 / `poly_pair` 57 / `capsule_ab` 94 / `capsule_ba` 88 / `sphere_convex_pair` 25 / `convex_sphere_pair` 25 + 4 个纯函数 `pick_dominant_normal` 62 / `four_corner_points` 21 / `sphere_sphere` 34 / `quant_normal` 7；文件 670→876 行；见 §5 第 16 条）；判据=`gate_all.sh` 全绿（金样门读数逐项相同）+ `cargo test -p vxl-phys-narrow` **37 项** + token 级零丢失（`out.push(` 10/10、`self.sat(` 2/2、`self.clip(` 2/2、`ContactPoints::from_slice` 6/6、`sort_by_key`/`total_cmp` 全同） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -55,7 +56,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 1 个**函数 >120 行（`process_pair_shaped` 663——narrow 侧，**最后一个**；solver 侧 `solve_phase` 551→74 已在 B26 清掉；**其余全清**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 0 个**函数 >120 行（**全清**，B18–B27 十九件）。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -73,7 +74,7 @@ PY
 
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
-| 库内**大分发** | 1 | `process_pair_shaped` 663（narrow） | **先按 Mode M 试**（B24–B26 的实测教训）：`compute_pairs` 256→76、`build_constraint` 340→104、`solve_phase` 551→74 **都不是 Mode F**——只依赖 `self`/循环内局部量、无逃逸 ⇒ 提私有方法或模块级 helper 即可（`solve_phase` 另需**先做结构打包**，见 §5 第 14 条）。**只有确认有逃逸控制流**（`break`/`continue`/`return` 指向被搬区间之外的循环）才上 `cf_census.py` + `Step` 枚举（Mode F 配方：arm/段提同型 helper，调用点 `if helper(..) { return; }`；**多段累加器改值进值出**，B12 的 `max_dv` 范例） |
+| 库内**大分发** | **0** | — | **已全清**（B24–B27：`compute_pairs` 256→76、`build_constraint` 340→104、`solve_phase` 551→74、`process_pair_shaped` 663→99）。**"先按 Mode M 试"的教训保留**：这四件**都不是 Mode F**——只依赖 `self`/循环内局部量、无逃逸 ⇒ 提私有方法或模块级 helper 即可（solver 那件另需**先结构打包**，见 §5 第 14 条；narrow 那件另需**段返回 bool**，见 §5 第 16 条）。**只有确认有逃逸控制流**（`break`/`continue`/`return` 指向被搬区间之外的循环）才上 `cf_census.py` + `Step` 枚举（Mode F 配方：arm/段提同型 helper，调用点 `if helper(..) { return; }`；**多段累加器改值进值出**，B12 的 `max_dv` 范例） |
 | **示例 main** | **0** | — | **已全清**：B11/B13–B15 六件 + B18 两件 + B19 三件 + B20 四件 + B21 三件 + B22 两件 = 二十件（含探针/示例目录式与 arena_bench 的子模块函数）。配方与判据见 §3 第 4 条 |
 | 测试 + 脚本 | **0** | — | **已清零**（B23：`render_demo.py::main` 241→**60**；配方 = 按域提 `add_*_prims` + `voxel_faces`/`paint`/`overlay`，判据 = **渲染产物 sha256**（GIF 与 PNG 帧合集）——比打印读数更强） |
 
@@ -234,6 +235,24 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
     `let`、被内联的 `islands_len`/`*_us_diag`）。
     ⚠️ 反面：`SequenceMatcher` 的**按序** diff 在"整块搬家"场景几乎全是噪声（顺序全变）——
     **按计数比，别按序比**。
+
+16. **`process_pair_shaped` 663→99（B27 收尾，2026-09-25）—— narrow 侧清零 ⇒ 门面内全清**：
+    形态是**形状对总分发**（复合体展开 → 提供者 → 外壳 → 高度场 → 通用 `match`），
+    与 solver 那件不同：**不需要结构打包**（各段的输入是"整对上下文"而不是共享缓冲），
+    所以是"每段一个 helper + 通用 match 每臂一个 helper"。两招（都纯搬移、逐位同旧）：
+    ① **参数名照抄原局部名**（`a`/`b`/`pa`/`ra`/`pb`/`rb`/`out`/`bodies`/`providers`）⇒
+    搬走的函数体**一字不改**（只有 `&convex`→`convex` 这类必改项）⇒ token 级比对近乎逐字相等。
+    代价是参数多（10–11 个 + `self`）⇒ 按本 crate 既有惯例挂 `#[allow(clippy::too_many_arguments)]`
+    （`hull_pair`/`sphere_convex_ab` 本来就这么写，不是新引进的风格）。
+    ② **段的 `return;` → `return bool`**：提供者段与高度场段**一旦进入就必然结束整对**
+    ⇒ 段 helper 内每个 `return;` 改 `return true;`、函数尾补 `false`（= 未进入本段），
+    调用方 `if self.xxx_pair(..) { return; }` —— 比 `Step` 枚举省一层。
+    子段再拆两条：**纯函数不带 `self`**（`pick_dominant_normal`/`four_corner_points`/`sphere_sphere`
+    都不碰 `self`；原函数内闭包 `quant` 提成模块级 `quant_normal` 只需改调用点）、
+    **函数内 `struct Group` 跟着它的代码搬进新 helper**（局部 item 不必提到模块级）。
+    ⚠️ 新坑：`match opt { Some(x) => Some(f(x)), None => None }` 撞 `clippy::manual_map`
+    ⇒ 写 `opt.map(|x| f(x))`；但 `None => return` 那种**不能**这么改（要保留 `let ... else`，
+    它表达的是"整对结束"而不是"取不到值"）。
 
 ### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
