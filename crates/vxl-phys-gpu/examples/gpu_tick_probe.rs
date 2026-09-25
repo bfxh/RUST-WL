@@ -408,10 +408,11 @@ fn time_gpu(
         for i in 0..gpu_ticks {
             pk.run_deferred(pc, 1, substeps);
             if i > 0 {
-                pk.readback_pending_wait();
+                // 真消费方那一步：等 + 映射 + 拷出（不是"只等"——只等会低报）。
+                let _pos = pk.take_deferred_state();
             }
         }
-        pk.readback_pending_wait();
+        let _pos = pk.take_deferred_state();
         let per = t.elapsed().as_secs_f64() * 1e3 / gpu_ticks.max(1) as f64;
         println!(
             "  管线档（PLAN-gpu §19.1③：回读等待与下一 tick 计算重叠）**{per:.2} ms/tick** vs 同步档合计 **{:.2} ms**（{:.2} 计算 + {:.2} 回读）",
