@@ -110,12 +110,12 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-core/src/interop.rs": {
-  "file_lines": 354,
-  "max_fn_lines": 38,
+  "file_lines": 389,
+  "max_fn_lines": 32,
   "max_type_members": 5
  },
  "crates/vxl-phys-core/src/lib.rs": {
-  "file_lines": 36,
+  "file_lines": 34,
   "max_fn_lines": 0,
   "max_type_members": 0
  },
@@ -138,6 +138,11 @@
   "file_lines": 473,
   "max_fn_lines": 35,
   "max_type_members": 9
+ },
+ "crates/vxl-phys-core/src/narrow_tier.rs": {
+  "file_lines": 121,
+  "max_fn_lines": 22,
+  "max_type_members": 5
  },
  "crates/vxl-phys-core/src/probe.rs": {
   "file_lines": 93,
@@ -195,14 +200,19 @@
   "max_type_members": 20
  },
  "crates/vxl-phys-fluid/src/fluid_boundary.rs": {
-  "file_lines": 116,
-  "max_fn_lines": 79,
-  "max_type_members": 2
+  "file_lines": 128,
+  "max_fn_lines": 57,
+  "max_type_members": 4
  },
  "crates/vxl-phys-fluid/src/fluid_density.rs": {
-  "file_lines": 268,
-  "max_fn_lines": 104,
-  "max_type_members": 4
+  "file_lines": 277,
+  "max_fn_lines": 69,
+  "max_type_members": 5
+ },
+ "crates/vxl-phys-fluid/src/fluid_density/wall_gather.rs": {
+  "file_lines": 103,
+  "max_fn_lines": 55,
+  "max_type_members": 3
  },
  "crates/vxl-phys-fluid/src/fluid_force.rs": {
   "file_lines": 219,
@@ -254,9 +264,39 @@
   "max_fn_lines": 61,
   "max_type_members": 0
  },
+ "crates/vxl-phys-gpu/examples/gpu_body_integrate_probe.rs": {
+  "file_lines": 153,
+  "max_fn_lines": 90,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_body_probe.rs": {
+  "file_lines": 509,
+  "max_fn_lines": 86,
+  "max_type_members": 16
+ },
+ "crates/vxl-phys-gpu/examples/gpu_broad_probe.rs": {
+  "file_lines": 172,
+  "max_fn_lines": 78,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_coupling_probe.rs": {
+  "file_lines": 483,
+  "max_fn_lines": 91,
+  "max_type_members": 14
+ },
+ "crates/vxl-phys-gpu/examples/gpu_curved_probe.rs": {
+  "file_lines": 155,
+  "max_fn_lines": 52,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-gpu/examples/gpu_density_probe.rs": {
   "file_lines": 291,
   "max_fn_lines": 272,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_facade_probe.rs": {
+  "file_lines": 214,
+  "max_fn_lines": 70,
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_grid_probe.rs": {
@@ -264,15 +304,55 @@
   "max_fn_lines": 183,
   "max_type_members": 0
  },
- "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
-  "file_lines": 391,
-  "max_fn_lines": 328,
+ "crates/vxl-phys-gpu/examples/gpu_narrow_probe/diag.rs": {
+  "file_lines": 370,
+  "max_fn_lines": 94,
   "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_narrow_probe/main.rs": {
+  "file_lines": 772,
+  "max_fn_lines": 91,
+  "max_type_members": 8
+ },
+ "crates/vxl-phys-gpu/examples/gpu_narrow_tier_probe/diag.rs": {
+  "file_lines": 495,
+  "max_fn_lines": 106,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_narrow_tier_probe/main.rs": {
+  "file_lines": 518,
+  "max_fn_lines": 106,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-gpu/examples/gpu_narrow_up_probe.rs": {
+  "file_lines": 404,
+  "max_fn_lines": 66,
+  "max_type_members": 8
+ },
+ "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
+  "file_lines": 388,
+  "max_fn_lines": 311,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_walls_probe.rs": {
+  "file_lines": 800,
+  "max_fn_lines": 114,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/examples/gpu_walls_probe/diag.rs": {
+  "file_lines": 196,
+  "max_fn_lines": 79,
+  "max_type_members": 9
  },
  "crates/vxl-phys-gpu/src/bbox.rs": {
   "file_lines": 633,
   "max_fn_lines": 89,
   "max_type_members": 12
+ },
+ "crates/vxl-phys-gpu/src/broad.rs": {
+  "file_lines": 371,
+  "max_fn_lines": 97,
+  "max_type_members": 9
  },
  "crates/vxl-phys-gpu/src/grid.rs": {
   "file_lines": 429,
@@ -280,14 +360,29 @@
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/src/lib.rs": {
-  "file_lines": 53,
+  "file_lines": 52,
   "max_fn_lines": 8,
   "max_type_members": 3
  },
+ "crates/vxl-phys-gpu/src/narrow.rs": {
+  "file_lines": 583,
+  "max_fn_lines": 82,
+  "max_type_members": 12
+ },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 810,
+  "file_lines": 788,
   "max_fn_lines": 99,
   "max_type_members": 13
+ },
+ "crates/vxl-phys-gpu/src/pipeline/bodies.rs": {
+  "file_lines": 248,
+  "max_fn_lines": 49,
+  "max_type_members": 8
+ },
+ "crates/vxl-phys-gpu/src/pipeline/coupling.rs": {
+  "file_lines": 52,
+  "max_fn_lines": 31,
+  "max_type_members": 1
  },
  "crates/vxl-phys-gpu/src/pipeline/gpu_setup.rs": {
   "file_lines": 92,
@@ -299,8 +394,33 @@
   "max_fn_lines": 0,
   "max_type_members": 32
  },
+ "crates/vxl-phys-gpu/src/pipeline/reaction.rs": {
+  "file_lines": 256,
+  "max_fn_lines": 73,
+  "max_type_members": 6
+ },
+ "crates/vxl-phys-gpu/src/pipeline/readback.rs": {
+  "file_lines": 221,
+  "max_fn_lines": 46,
+  "max_type_members": 7
+ },
+ "crates/vxl-phys-gpu/src/pipeline/stepper.rs": {
+  "file_lines": 146,
+  "max_fn_lines": 40,
+  "max_type_members": 9
+ },
+ "crates/vxl-phys-gpu/src/pipeline/wall_table.rs": {
+  "file_lines": 197,
+  "max_fn_lines": 62,
+  "max_type_members": 4
+ },
+ "crates/vxl-phys-gpu/src/pipeline/walls.rs": {
+  "file_lines": 217,
+  "max_fn_lines": 52,
+  "max_type_members": 6
+ },
  "crates/vxl-phys-gpu/src/probe.rs": {
-  "file_lines": 483,
+  "file_lines": 482,
   "max_fn_lines": 95,
   "max_type_members": 16
  },
@@ -670,9 +790,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/showcase.rs": {
-  "file_lines": 372,
-  "max_fn_lines": 344,
-  "max_type_members": 0
+  "file_lines": 459,
+  "max_fn_lines": 62,
+  "max_type_members": 7
  },
  "crates/vxl-phys/examples/splat_rest_probe.rs": {
   "file_lines": 358,
@@ -685,8 +805,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/trimesh_rest_probe.rs": {
-  "file_lines": 492,
-  "max_fn_lines": 360,
+  "file_lines": 521,
+  "max_fn_lines": 60,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/trimesh_sphere_rest_probe.rs": {
@@ -735,13 +855,13 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/src/world_body.rs": {
-  "file_lines": 336,
+  "file_lines": 335,
   "max_fn_lines": 49,
   "max_type_members": 24
  },
  "crates/vxl-phys/src/world_build.rs": {
-  "file_lines": 177,
-  "max_fn_lines": 39,
+  "file_lines": 176,
+  "max_fn_lines": 38,
   "max_type_members": 15
  },
  "crates/vxl-phys/src/world_ccd.rs": {
@@ -755,12 +875,22 @@
   "max_type_members": 1
  },
  "crates/vxl-phys/src/world_step.rs": {
-  "file_lines": 344,
-  "max_fn_lines": 116,
-  "max_type_members": 6
+  "file_lines": 368,
+  "max_fn_lines": 97,
+  "max_type_members": 7
+ },
+ "crates/vxl-phys/src/world_step/fluid_stepper.rs": {
+  "file_lines": 81,
+  "max_fn_lines": 14,
+  "max_type_members": 2
+ },
+ "crates/vxl-phys/src/world_step/narrow_tier.rs": {
+  "file_lines": 305,
+  "max_fn_lines": 118,
+  "max_type_members": 12
  },
  "crates/vxl-phys/src/world_struct.rs": {
-  "file_lines": 44,
+  "file_lines": 43,
   "max_fn_lines": 0,
   "max_type_members": 23
  },

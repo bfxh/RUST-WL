@@ -129,27 +129,20 @@ fn min_corner_gap(pos: Vec3, rot: Quat) -> f32 {
     min_gap
 }
 
-fn main() {
-    let cfg = PhysConfig::default();
-    println!(
-        "【P5 代价侧】起伏三角网静置（±{S} m / {N}×{N} 格 / 格距 1 m）\n  \
-         配置：dt {:.5}、skin {:.4}、iters {}、substeps {}、sleep_time {:.3}\n  \
-         投放：盒半高 {HALF}、落点 (0, H(0,0)+2.5, 0)、{} tick",
-        cfg.dt,
-        cfg.contact_skin,
-        cfg.velocity_iterations,
-        cfg.substeps,
-        cfg.sleep_time,
-        ticks()
-    );
+/// μ=0.9 / restitution 0.02（arena 的 `vxl_body_material` 同款）。
+fn arena_material() -> vxl_phys_core::Material {
+    vxl_phys_core::Material {
+        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
+        restitution: 0.02,
+    }
+}
 
+/// 主场景：起伏网 + 主盒（落点 (0, H(0,0)+2.5, 0)），**两个体**都上同一摩擦。
+fn scene_main(cfg: &PhysConfig) -> (TriMesh, World, usize) {
     let mesh = terrain();
     let mut w = World::new(cfg.clone());
     let mesh_body = w.add_mesh(mesh.clone()) as usize;
-    let m = w.add_material(vxl_phys_core::Material {
-        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-        restitution: 0.02,
-    });
+    let m = w.add_material(arena_material());
     let i = w.add_dynamic(
         Shape::Box {
             half: Vec3::splat(HALF),
@@ -161,6 +154,11 @@ fn main() {
     w.bodies.set_material(i, m);
     // arena 的 vxl 适配器对**每个**体都调  ⇒ 静态三角网体也拿到同一摩擦
     w.bodies.set_material(mesh_body, m);
+    (mesh, w, i)
+}
+
+/// ① 轨迹打印（每 25 tick 看它**什么时候睡**、睡在多大的间隙上——实为每 100 tick 采样一次）。
+fn trajectory_printout(w: &mut World, i: usize) {
     println!(
         "
 轨迹（每 25 tick 一次；看它**什么时候睡**、睡在多大的间隙上）："
@@ -181,7 +179,10 @@ fn main() {
             );
         }
     }
+}
 
+/// 末态位姿/速度报表。
+fn end_state_report(w: &World, i: usize) {
     let (pos, rot) = w.bodies.pose(i);
     let v = w.bodies.linvel[i];
     let av = w.bodies.angvel(i);
@@ -203,8 +204,10 @@ fn main() {
          （arena 在 **300 tick** 读到的 0.094 m 是本盒**下坡翻滚中的瞬时采样**，不是静置值；\
          换 900 tick 窗口同一探针即通过 ⇒ 见 OPEN-PROBLEMS P5 ⑰）"
     );
+}
 
-    // ② 末态直接问提供者：它到底产生了哪些接触？（撑住的理由必须在接触集里）
+/// ② 末态直接问提供者：它到底产生了哪些接触？（撑住的理由必须在接触集里）
+fn contacts_direct(mesh: &TriMesh, cfg: &PhysConfig, pos: Vec3, rot: Quat) {
     let mut out: Vec<InteropContact> = Vec::new();
     mesh.contacts_box(0, Vec3::splat(HALF), pos, rot, cfg.contact_skin, &mut out);
     println!(
@@ -218,9 +221,11 @@ fn main() {
             c.point.x, c.point.y, c.point.z, c.normal.x, c.normal.y, c.normal.z, c.depth, c.feature
         );
     }
+}
 
-    // ③ 真正的最低采样点：把它拿出来，问最近面查询（距离/最近点/法线），
-    //    再按 `depth = skin − (p−q)·n` 复算一遍提供者的判据。
+/// ③ 真正的最低采样点：把它拿出来，问最近面查询（距离/最近点/法线），
+///    再按 `depth = skin − (p−q)·n` 复算一遍提供者的判据。
+fn lowest_corner_query(mesh: &TriMesh, cfg: &PhysConfig, pos: Vec3, rot: Quat) {
     let mut best = (f32::INFINITY, Vec3::ZERO);
     for axis in 0..3usize {
         for sgn in [-1.0f32, 1.0] {
@@ -272,8 +277,10 @@ fn main() {
             cfg.contact_skin - sd
         );
     }
+}
 
-    // ① 末态流形（睡眠体无流形 ⇒ 用极长 sleep_time 重跑一份作对照）
+/// ① 末态流形（睡眠体无流形 ⇒ 用极长 sleep_time 重跑一份作对照，见 `control_no_sleep`）。
+fn manifolds_of_box(w: &World, i: usize) {
     println!("\n① 末态流形（默认配置 ⇒ 睡着时为 0 条属预期）");
     let mut printed = 0usize;
     for mf in w.manifolds() {
@@ -297,19 +304,17 @@ fn main() {
     if printed == 0 {
         println!("   （0 条）");
     }
+}
 
-    // ⑤ 静置对照（见文末）
-    // ④ 对照：不睡（sleep_time 极大）时是否同样悬空 ⇒ 排除"睡在半空"
+/// ④ 对照：不睡（sleep_time 极大）时是否同样悬空 ⇒ 排除"睡在半空"。
+fn control_no_sleep(mesh: &TriMesh) {
     let awake_cfg = PhysConfig {
         sleep_time: 1e9,
         ..PhysConfig::default()
     };
     let mut w2 = World::new(awake_cfg);
     let mesh_body2 = w2.add_mesh(mesh.clone()) as usize;
-    let m2 = w2.add_material(vxl_phys_core::Material {
-        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-        restitution: 0.02,
-    });
+    let m2 = w2.add_material(arena_material());
     let j = w2.add_dynamic(
         Shape::Box {
             half: Vec3::splat(HALF),
@@ -339,16 +344,15 @@ fn main() {
             })
             .count()
     );
+}
 
-    // ⑤ 静置对照（贴面投放）：底面离地 5 cm 投放、无翻滚 ⇒ 量的是**纯静置高度**，
-    //    把"静置精度"与"翻滚轨迹"分开。这是本探针给 P5 的最终读数。
+/// ⑤ 静置对照（贴面投放）：底面离地 5 cm 投放、无翻滚 ⇒ 量的是**纯静置高度**，
+///    把"静置精度"与"翻滚轨迹"分开。这是本探针给 P5 的最终读数。
+fn control_drop_heights(mesh: &TriMesh) {
     for drop in [0.05f32, 0.5, 2.5] {
         let mut w3 = World::new(PhysConfig::default());
         let mb = w3.add_mesh(mesh.clone()) as usize;
-        let m3 = w3.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
-        });
+        let m3 = w3.add_material(arena_material());
         let k = w3.add_dynamic(
             Shape::Box {
                 half: Vec3::splat(HALF),
@@ -372,9 +376,11 @@ fn main() {
             ((p3.x - 0.0).powi(2) + (p3.z - 0.0).powi(2)).sqrt()
         );
     }
+}
 
-    // ⑥ 平地对照（同材质、同投放方式）：**平地若也滑 ⇒ 网格摩擦整体失效**；
-    //    平地不滑、坡上滑 ⇒ 是切向漂移/静摩擦那一路（与 P1「塔不入睡」同族）。
+/// ⑥ 平地对照（同材质、同投放方式）：**平地若也滑 ⇒ 网格摩擦整体失效**；
+///    平地不滑、坡上滑 ⇒ 是切向漂移/静摩擦那一路（与 P1「塔不入睡」同族）。
+fn control_flat() {
     let mut flat_v: Vec<Vec3> = Vec::new();
     let mut flat_t: Vec<[u32; 3]> = Vec::new();
     for iz in 0..=2u32 {
@@ -395,10 +401,7 @@ fn main() {
     }
     let mut w4 = World::new(PhysConfig::default());
     let mb4 = w4.add_mesh(TriMesh::new(flat_v, flat_t)) as usize;
-    let m4 = w4.add_material(vxl_phys_core::Material {
-        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-        restitution: 0.02,
-    });
+    let m4 = w4.add_material(arena_material());
     let k4 = w4.add_dynamic(
         Shape::Box {
             half: Vec3::splat(HALF),
@@ -422,11 +425,13 @@ fn main() {
         w4.bodies.linvel[k4].length(),
         w4.bodies.awake[k4]
     );
+}
 
-    // ⑦ 斜面判别（零成本、可判别）：**均匀 11.3° 斜面的平网格**，盒子**预旋到与斜面贴合**
-    //    投放（无翻滚、无曲率）⇒ 只测"斜面上的静摩擦"这一件事。
-    //    预测：若滑走 ⇒ 斜面上的摩擦/切向基（法线是面法线）这一路有问题；
-    //          若站住 ⇒ 起伏网上那 2.5 m 滑移是**地形曲率/翻滚**带来的，不是摩擦失效。
+/// ⑦ 斜面判别（零成本、可判别）：**均匀 11.3° 斜面的平网格**，盒子**预旋到与斜面贴合**
+///    投放（无翻滚、无曲率）⇒ 只测"斜面上的静摩擦"这一件事。
+///    预测：若滑走 ⇒ 斜面上的摩擦/切向基（法线是面法线）这一路有问题；
+///          若站住 ⇒ 起伏网上那 2.5 m 滑移是**地形曲率/翻滚**带来的，不是摩擦失效。
+fn control_slope() {
     let slope = 11.3f32.to_radians();
     let tan_s = slope.tan();
     let mut sv: Vec<Vec3> = Vec::new();
@@ -447,10 +452,7 @@ fn main() {
     }
     let mut w5 = World::new(PhysConfig::default());
     let mb5 = w5.add_mesh(TriMesh::new(sv, st)) as usize;
-    let m5 = w5.add_material(vxl_phys_core::Material {
-        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-        restitution: 0.02,
-    });
+    let m5 = w5.add_material(arena_material());
     // 盒预旋到与斜面平行：绕 z 轴转 +slope，沿斜面法线抬起 0.35 + 2 cm 贴合间隙
     let q = Quat::from_axis_angle(Vec3::Z, slope);
     let n_ramp = Vec3::new(-slope.sin(), slope.cos(), 0.0);
@@ -488,4 +490,31 @@ fn main() {
             );
         }
     }
+}
+
+fn main() {
+    let cfg = PhysConfig::default();
+    println!(
+        "【P5 代价侧】起伏三角网静置（±{S} m / {N}×{N} 格 / 格距 1 m）\n  \
+         配置：dt {:.5}、skin {:.4}、iters {}、substeps {}、sleep_time {:.3}\n  \
+         投放：盒半高 {HALF}、落点 (0, H(0,0)+2.5, 0)、{} tick",
+        cfg.dt,
+        cfg.contact_skin,
+        cfg.velocity_iterations,
+        cfg.substeps,
+        cfg.sleep_time,
+        ticks()
+    );
+    let (mesh, mut w, i) = scene_main(&cfg);
+    trajectory_printout(&mut w, i);
+    end_state_report(&w, i);
+    let (pos, rot) = w.bodies.pose(i);
+    contacts_direct(&mesh, &cfg, pos, rot);
+    lowest_corner_query(&mesh, &cfg, pos, rot);
+    manifolds_of_box(&w, i);
+    // ⑤ 静置对照（见文末）
+    control_no_sleep(&mesh);
+    control_drop_heights(&mesh);
+    control_flat();
+    control_slope();
 }
