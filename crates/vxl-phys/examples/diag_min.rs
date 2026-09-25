@@ -11,6 +11,148 @@ use std::time::Instant;
 use vxl_phys::core::FrictionModel;
 use vxl_phys::{HeightField, PhysConfig, Quat, Shape, Vec3, World};
 
+/// 逐 tick 诊断的跨 tick 状态（前位置/前能量 ⇒ 增量与残差都要它）。
+struct Diag {
+    prev_pos: Vec<Vec3>,
+    prev_e: f32,
+    prev_pe: f32,
+    max_de: f32,
+    dt: f32,
+}
+
+impl Diag {
+    fn new(w: &World, dyn_ids: &[usize]) -> Self {
+        let prev_pos: Vec<Vec3> = dyn_ids.iter().map(|&i| w.bodies.position[i]).collect();
+        Diag {
+            prev_pos,
+            prev_e: f32::NAN,
+            prev_pe: f32::NAN,
+            max_de: f32::MIN,
+            dt: w.config.dt,
+        }
+    }
+}
+
+/// 推进 `ticks` 个 tick：逐 tick 统计 KE/PE/dE、位移残差、流形点数分布、最深穿透，
+/// 并打读数（前 30 tick 全打，之后每 20 tick 一行）。
+fn run_ticks(w: &mut World, ticks: usize, dyn_ids: &[usize], d: &mut Diag) {
+    let g = 9.81f32;
+    for t in 1..=ticks {
+        w.step();
+        let (mut ke, mut pe) = (0.0f32, 0.0f32);
+        let (mut vmax, mut wmax, mut vmax_i) = (0.0f32, 0.0f32, 0usize);
+        let mut awake = 0usize;
+        let (mut resid_max, mut resid_big) = (0.0f32, 0usize);
+        for (k, &i) in dyn_ids.iter().enumerate() {
+            let v = w.bodies.linvel[i];
+            let wv = w.bodies.angvel(i);
+            let m = 1.0 / w.bodies.inv_mass[i];
+            let vv = v.length();
+            if vv > vmax {
+                vmax = vv;
+                vmax_i = i;
+            }
+            let ww = wv.length();
+            if ww > wmax {
+                wmax = ww;
+            }
+            ke += 0.5 * m * vv * vv;
+            let inv_i = w.bodies.local_inv_inertia[i];
+            if inv_i.x > 0.0 {
+                let q = w.bodies.rot(i);
+                let wl = q.conjugate().rotate_vec3(wv);
+                let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
+                let lw = q.rotate_vec3(ll);
+                ke += 0.5 * wv.dot(lw);
+            }
+            pe += m * g * w.bodies.position[i].y;
+            if w.bodies.awake[i] {
+                awake += 1;
+            }
+            let dd = w.bodies.position[i] - d.prev_pos[k];
+            d.prev_pos[k] = w.bodies.position[i];
+            let rl = (dd - v * d.dt).length();
+            if rl > resid_max {
+                resid_max = rl;
+            }
+            if rl > 5e-4 {
+                resid_big += 1;
+            }
+        }
+        let e = ke + pe;
+        let dpe = if d.prev_pe.is_nan() {
+            0.0
+        } else {
+            pe - d.prev_pe
+        };
+        d.prev_pe = pe;
+        let de = if d.prev_e.is_nan() { 0.0 } else { e - d.prev_e };
+        d.prev_e = e;
+        if de > d.max_de {
+            d.max_de = de;
+        }
+        let (mut m1, mut m2, mut m3, mut m4) = (0u32, 0u32, 0u32, 0u32);
+        let mut max_depth = 0.0f32;
+        for mm in w.manifolds() {
+            match mm.points.len() {
+                1 => m1 += 1,
+                2 => m2 += 1,
+                3 => m3 += 1,
+                4 => m4 += 1,
+                _ => {}
+            }
+            for p in &mm.points {
+                if p.depth > max_depth {
+                    max_depth = p.depth;
+                }
+            }
+        }
+        if t <= 30 || t % 20 == 0 {
+            let vb = &w.bodies;
+            println!(
+                "t {t:3} |v| {vmax:6.3} |w| {wmax:6.3} KE {ke:9.1} dPE {:9.1} dE {de:9.1} | 残差 {resid_max:.5}m ×{resid_big} | awake {awake:3} 流形 {} [{m1}/{m2}/{m3}/{m4}] 最深 {max_depth:.3} | vmax#{} y {:.3}",
+                dpe,
+                w.manifolds().len(),
+                vmax_i,
+                vb.position[vmax_i].y
+            );
+        }
+    }
+}
+
+/// 末态：|v| 前 5 体明细。
+fn report_top5(w: &World, dyn_ids: &[usize]) {
+    let mut order: Vec<usize> = dyn_ids.to_vec();
+    order.sort_by(|&a, &b| {
+        w.bodies.linvel[b]
+            .length()
+            .total_cmp(&w.bodies.linvel[a].length())
+    });
+    println!("== 末态 |v| 前 5：");
+    for &i in order.iter().take(5) {
+        println!(
+            "  #{} pos {:.3},{:.3},{:.3} |v| {:.3} |w| {:.3} awake {}",
+            i,
+            w.bodies.position[i].x,
+            w.bodies.position[i].y,
+            w.bodies.position[i].z,
+            w.bodies.linvel[i].length(),
+            w.bodies.angvel(i).length(),
+            w.bodies.awake[i]
+        );
+    }
+}
+
+/// 收尾：跑轮用时 / 清醒数 / 单 tick dE 峰值。
+fn report_done(w: &World, dyn_ids: &[usize], ticks: usize, t0: Instant, max_de: f32) {
+    let awake = dyn_ids.iter().filter(|&&i| w.bodies.awake[i]).count();
+    println!(
+        "== 跑完：{ticks} tick 用时 {:.1}s | 清醒 {awake}/{} | 单 tick dE 峰值 {max_de:.1}",
+        t0.elapsed().as_secs_f32(),
+        dyn_ids.len()
+    );
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let layers: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(5);
@@ -83,119 +225,14 @@ fn main() {
     let dyn_ids: Vec<usize> = (0..w.bodies.len())
         .filter(|&i| w.bodies.is_dynamic(i))
         .collect();
-    let g = 9.81f32;
-    let dt = w.config.dt;
-    let mut prev_pos: Vec<Vec3> = dyn_ids.iter().map(|&i| w.bodies.position[i]).collect();
-    let mut prev_e = f32::NAN;
-    let mut prev_pe = f32::NAN;
-    let mut max_de = f32::MIN;
-
     println!(
         "场景：{layers} 层 × {side}×{side} | 竖距 {spacing} 横距 {xspacing} | iters {iters} | μ {mu} | 地板 {floor} | 线程 {threads} | 体数 {}",
         dyn_ids.len()
     );
     let t0 = Instant::now();
-    for t in 1..=ticks {
-        w.step();
-        let (mut ke, mut pe) = (0.0f32, 0.0f32);
-        let (mut vmax, mut wmax, mut vmax_i) = (0.0f32, 0.0f32, 0usize);
-        let mut awake = 0usize;
-        let (mut resid_max, mut resid_big) = (0.0f32, 0usize);
-        for (k, &i) in dyn_ids.iter().enumerate() {
-            let v = w.bodies.linvel[i];
-            let wv = w.bodies.angvel(i);
-            let m = 1.0 / w.bodies.inv_mass[i];
-            let vv = v.length();
-            if vv > vmax {
-                vmax = vv;
-                vmax_i = i;
-            }
-            let ww = wv.length();
-            if ww > wmax {
-                wmax = ww;
-            }
-            ke += 0.5 * m * vv * vv;
-            let inv_i = w.bodies.local_inv_inertia[i];
-            if inv_i.x > 0.0 {
-                let q = w.bodies.rot(i);
-                let wl = q.conjugate().rotate_vec3(wv);
-                let ll = wl.mul_per_elem(Vec3::new(1.0 / inv_i.x, 1.0 / inv_i.y, 1.0 / inv_i.z));
-                let lw = q.rotate_vec3(ll);
-                ke += 0.5 * wv.dot(lw);
-            }
-            pe += m * g * w.bodies.position[i].y;
-            if w.bodies.awake[i] {
-                awake += 1;
-            }
-            let d = w.bodies.position[i] - prev_pos[k];
-            prev_pos[k] = w.bodies.position[i];
-            let rl = (d - v * dt).length();
-            if rl > resid_max {
-                resid_max = rl;
-            }
-            if rl > 5e-4 {
-                resid_big += 1;
-            }
-        }
-        let e = ke + pe;
-        let dpe = if prev_pe.is_nan() { 0.0 } else { pe - prev_pe };
-        prev_pe = pe;
-        let de = if prev_e.is_nan() { 0.0 } else { e - prev_e };
-        prev_e = e;
-        if de > max_de {
-            max_de = de;
-        }
-        let (mut m1, mut m2, mut m3, mut m4) = (0u32, 0u32, 0u32, 0u32);
-        let mut max_depth = 0.0f32;
-        for m in w.manifolds() {
-            match m.points.len() {
-                1 => m1 += 1,
-                2 => m2 += 1,
-                3 => m3 += 1,
-                4 => m4 += 1,
-                _ => {}
-            }
-            for p in &m.points {
-                if p.depth > max_depth {
-                    max_depth = p.depth;
-                }
-            }
-        }
-        if t <= 30 || t % 20 == 0 {
-            let vb = &w.bodies;
-            println!(
-                "t {t:3} |v| {vmax:6.3} |w| {wmax:6.3} KE {ke:9.1} dPE {:9.1} dE {de:9.1} | 残差 {resid_max:.5}m ×{resid_big} | awake {awake:3} 流形 {} [{m1}/{m2}/{m3}/{m4}] 最深 {max_depth:.3} | vmax#{} y {:.3}",
-                dpe,
-                w.manifolds().len(),
-                vmax_i,
-                vb.position[vmax_i].y
-            );
-        }
-    }
-    // 末态：|v| 前 5 体明细。
-    let mut order: Vec<usize> = dyn_ids.clone();
-    order.sort_by(|&a, &b| {
-        w.bodies.linvel[b]
-            .length()
-            .total_cmp(&w.bodies.linvel[a].length())
-    });
-    println!("== 末态 |v| 前 5：");
-    for &i in order.iter().take(5) {
-        println!(
-            "  #{} pos {:.3},{:.3},{:.3} |v| {:.3} |w| {:.3} awake {}",
-            i,
-            w.bodies.position[i].x,
-            w.bodies.position[i].y,
-            w.bodies.position[i].z,
-            w.bodies.linvel[i].length(),
-            w.bodies.angvel(i).length(),
-            w.bodies.awake[i]
-        );
-    }
-    let awake = dyn_ids.iter().filter(|&&i| w.bodies.awake[i]).count();
-    println!(
-        "== 跑完：{ticks} tick 用时 {:.1}s | 清醒 {awake}/{} | 单 tick dE 峰值 {max_de:.1}",
-        t0.elapsed().as_secs_f32(),
-        dyn_ids.len()
-    );
+    let mut d = Diag::new(&w, &dyn_ids);
+    run_ticks(&mut w, ticks, &dyn_ids, &mut d);
+
+    report_top5(&w, &dyn_ids);
+    report_done(&w, &dyn_ids, ticks, t0, d.max_de);
 }

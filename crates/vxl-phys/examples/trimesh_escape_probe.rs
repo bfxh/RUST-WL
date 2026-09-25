@@ -114,15 +114,8 @@ fn drop_one_cfg(
     (pos.y, v.length(), w.bodies.awake[i])
 }
 
-fn main() {
-    let step = SIZE / SEG as f32;
-    // 取一个远离边界的四边形：格点为 (0,0)–(step, step) 那一格。
-    let (gx, gz) = (0.0f32, 0.0f32);
-    let cx = gx + step * 0.5;
-    let cz = gz + step * 0.5;
-    let ticks = 400usize;
-    println!("地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；投放高度 h+2+半尺寸；{ticks} tick");
-
+/// 【A】落点对照（盒半高 0.32，默认档）：形心/对角线中点/顶点正上方/边中点。
+fn probe_landing_spots(cx: f32, cz: f32, gx: f32, gz: f32, step: f32, ticks: usize) {
     println!("【A】落点对照（盒半高 0.32，默认档）");
     // ⚠️ 要"看接触"就必须**不让它睡**：睡眠体不做检测 ⇒ 末态 0 条流形（本探针实测），
     //    而沉降是在醒着的时候形成的（体带着压入量睡进去）。故 PROBE_CONTACTS 时用
@@ -168,9 +161,11 @@ fn main() {
             "{name:16} x {x:6.2} z {z:6.2} | 地面 {surface:6.3} 期望静置 {rest:6.3} | 末态 y {y:9.3} 沉降 {sink:+.3} |v| {v:6.2} 清醒 {awake} ⇒ {verdict}"
         );
     }
+}
 
-    // 【B】尺寸扫描（形心处）：FALSIFY 点——"按体中心求接触"预测**沉降 ≈ 半尺寸**；
-    //      若沉降是常数（例如只与 skin 有关），则预测不成立、假设被否证。
+/// 【B】尺寸扫描（形心处）：FALSIFY 点——"按体中心求接触"预测**沉降 ≈ 半尺寸**；
+///      若沉降是常数（例如只与 skin 有关），则预测不成立、假设被否证。
+fn probe_size_sweep(cx: f32, cz: f32, ticks: usize) {
     println!("【B】尺寸扫描（形心 x {cx:.2} z {cz:.2}）：假设＝「按体中心求接触」⇒ 沉降 ≈ 半尺寸");
     println!("  形状        半尺寸   地面 h   末态 y   **沉降**   沉降/半尺寸");
     for half in [0.12f32, 0.24, 0.48, 0.80] {
@@ -207,12 +202,14 @@ fn main() {
             sink / r
         );
     }
+}
 
-    // 【D】球那一路的决定性读数（P5 唯一还站着的线索）：**接触自己的 depth 就是它的判词**。
-    //      不需要"正确的参考面"——`depth` 是接触给出的自述：
-    //        · 球沉下去而接触报 depth ≈ 0 ⇒ **提供者/窄相侧算错**（它以为贴着）
-    //        · 球沉下去而接触报 depth ≈ 实际压入量（正） ⇒ **消费/求解侧没顶出去**
-    //      必须**不睡**（睡眠体不做检测 ⇒ 末态无流形）。放**真正的三角内部点**（②，避开对角线）。
+/// 【D】球那一路的决定性读数（P5 唯一还站着的线索）：**接触自己的 depth 就是它的判词**。
+///      不需要"正确的参考面"——`depth` 是接触给出的自述：
+///        · 球沉下去而接触报 depth ≈ 0 ⇒ **提供者/窄相侧算错**（它以为贴着）
+///        · 球沉下去而接触报 depth ≈ 实际压入量（正） ⇒ **消费/求解侧没顶出去**
+///      必须**不睡**（睡眠体不做检测 ⇒ 末态无流形）。放**真正的三角内部点**（②，避开对角线）。
+fn probe_sphere_inner(gx: f32, gz: f32, step: f32, ticks: usize) {
     println!("【D】球那一路：真内部点 (0.94, 0.94) 的接触自述（不睡：sleep_time=1e9）");
     for r in [0.20f32, 0.40, 0.70] {
         let no_sleep = PhysConfig {
@@ -236,10 +233,12 @@ fn main() {
             println!("     （接触明细见上：本探针在 PROBE_CONTACTS 下逐次打印）");
         }
     }
+}
 
-    // 【C】迭代预算判别：假设＝"网格接触的去穿透受**迭代数**限制（软接触）"
-    //      ⇒ 换到参考配方（16 迭代 / 16 子步）后**沉降应大幅缩小**。
-    //      若沉降几乎不变 ⇒ 不是迭代预算问题，而是**几何/压入量本身算错**。
+/// 【C】迭代预算判别：假设＝"网格接触的去穿透受**迭代数**限制（软接触）"
+///      ⇒ 换到参考配方（16 迭代 / 16 子步）后**沉降应大幅缩小**。
+///      若沉降几乎不变 ⇒ 不是迭代预算问题，而是**几何/压入量本身算错**。
+fn probe_iteration_budget(cx: f32, cz: f32, ticks: usize) {
     let fine = PhysConfig {
         velocity_iterations: 16,
         normal_inner: 1,
@@ -294,4 +293,19 @@ fn main() {
             surface + r - y1
         );
     }
+}
+
+fn main() {
+    let step = SIZE / SEG as f32;
+    // 取一个远离边界的四边形：格点为 (0,0)–(step, step) 那一格。
+    let (gx, gz) = (0.0f32, 0.0f32);
+    let cx = gx + step * 0.5;
+    let cz = gz + step * 0.5;
+    let ticks = 400usize;
+    println!("地形：{SIZE} m / {SEG} 段 ⇒ 格距 {step:.3} m；投放高度 h+2+半尺寸；{ticks} tick");
+
+    probe_landing_spots(cx, cz, gx, gz, step, ticks);
+    probe_size_sweep(cx, cz, ticks);
+    probe_sphere_inner(gx, gz, step, ticks);
+    probe_iteration_budget(cx, cz, ticks);
 }

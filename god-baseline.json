@@ -725,9 +725,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/diag_min.rs": {
-  "file_lines": 202,
-  "max_fn_lines": 188,
-  "max_type_members": 0
+  "file_lines": 239,
+  "max_fn_lines": 84,
+  "max_type_members": 5
  },
  "crates/vxl-phys/examples/diag_pile.rs": {
   "file_lines": 89,
@@ -745,8 +745,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m0_gates.rs": {
-  "file_lines": 366,
-  "max_fn_lines": 174,
+  "file_lines": 457,
+  "max_fn_lines": 75,
   "max_type_members": 13
  },
  "crates/vxl-phys/examples/m0_pyramid.rs": {
@@ -765,9 +765,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/m1_pile.rs": {
-  "file_lines": 280,
-  "max_fn_lines": 205,
-  "max_type_members": 0
+  "file_lines": 351,
+  "max_fn_lines": 59,
+  "max_type_members": 10
  },
  "crates/vxl-phys/examples/m1_profile.rs": {
   "file_lines": 101,
@@ -800,8 +800,8 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/trimesh_escape_probe.rs": {
-  "file_lines": 298,
-  "max_fn_lines": 181,
+  "file_lines": 312,
+  "max_fn_lines": 57,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/trimesh_rest_probe.rs": {

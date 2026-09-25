@@ -25,6 +25,32 @@ const SIDE: usize = 20;
 const LAYERS: usize = 25;
 const SPACING: f32 = 0.52;
 
+/// 命令行参数（后四个是 `Option`：不传 = 继承 `PhysConfig` 默认，见文件头注）。
+struct Args {
+    iters: u32,
+    substeps: u32,
+    threads: usize,
+    ticks: u32,
+    shock: Option<u32>,
+    stab: Option<u32>,
+    wake_gate_k: Option<u32>,
+    hold: Option<u32>,
+}
+
+fn parse_args() -> Args {
+    let mut args = std::env::args().skip(1);
+    Args {
+        iters: args.next().and_then(|s| s.parse().ok()).unwrap_or(16),
+        substeps: args.next().and_then(|s| s.parse().ok()).unwrap_or(1),
+        threads: args.next().and_then(|s| s.parse().ok()).unwrap_or(8),
+        ticks: args.next().and_then(|s| s.parse().ok()).unwrap_or(600),
+        shock: args.next().and_then(|s| s.parse().ok()),
+        stab: args.next().and_then(|s| s.parse().ok()),
+        wake_gate_k: args.next().and_then(|s| s.parse().ok()),
+        hold: args.next().and_then(|s| s.parse().ok()),
+    }
+}
+
 fn build(
     iters: u32,
     substeps: u32,
@@ -72,77 +98,87 @@ fn build(
     w
 }
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let iters: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(16);
-    let substeps: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-    let threads: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(8);
-    let ticks: u32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(600);
-    let shock: Option<u32> = args.next().and_then(|s| s.parse().ok());
-    let stab: Option<u32> = args.next().and_then(|s| s.parse().ok());
-    let wake_gate_k: Option<u32> = args.next().and_then(|s| s.parse().ok());
-    let hold: Option<u32> = args.next().and_then(|s| s.parse().ok());
-
-    let mut w = build(iters, substeps, threads, shock, stab, wake_gate_k, hold);
-    let boxes = w.bodies.len();
-    println!(
-        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {iters} 子步 {substeps} 线程 {threads} shock {shock:?} stab {stab:?} wakeK {wake_gate_k:?} hold {hold:?} | {ticks} tick"
-    );
-    for _ in 0..10 {
-        w.step();
-    }
-
-    let mut sleep_tick: Option<u32> = None;
-    let mut worst_depth = 0.0f32;
-    let mut deep_ticks = 0u32;
-    let mut last100: Vec<f64> = Vec::with_capacity(100);
-    let mut total_ms = 0.0f64;
+/// 逐 tick 累计读数 + 抖动审计状态。
+struct Stats {
+    sleep_tick: Option<u32>,
+    worst_depth: f32,
+    deep_ticks: u32,
+    last100: Vec<f64>,
+    total_ms: f64,
     // **抖动审计（SPEC §3：休眠体被重复唤醒 < 1 次/秒/体）**——与 `m0_gates` / `m1_scale`
     // 同一口径的逐体「睡→醒」翻转计数。⚠️ 本场景**今天还不睡**（awake→0 未达标，见 `M1-EXIT.md`
     // §2.2）⇒ 该量现读 0 属**结构必然**、不代表达标；它是给修好万级入睡之后备好的**同一把尺子**。
     // 整段在 `ms` 计时区之外 ⇒ 不污染读数；行尾带 ASCII 机读标签（照 `FINAL_HASH=` 先例）。
-    let dyn_ids: Vec<usize> = (0..w.bodies.len())
-        .filter(|&i| w.bodies.is_dynamic(i))
-        .collect();
-    let mut flips_per_body: Vec<u32> = vec![0; w.bodies.len()];
-    let mut prev_awake: Vec<bool> = (0..w.bodies.len()).map(|i| w.bodies.awake[i]).collect();
-    let mut max_flips: u32 = 0;
-    let mut active_ticks: u32 = 0;
+    dyn_ids: Vec<usize>,
+    flips_per_body: Vec<u32>,
+    prev_awake: Vec<bool>,
+    max_flips: u32,
+    active_ticks: u32,
+}
+
+impl Stats {
+    fn new(w: &World) -> Self {
+        Stats {
+            sleep_tick: None,
+            worst_depth: 0.0,
+            deep_ticks: 0,
+            last100: Vec::with_capacity(100),
+            total_ms: 0.0,
+            dyn_ids: (0..w.bodies.len())
+                .filter(|&i| w.bodies.is_dynamic(i))
+                .collect(),
+            flips_per_body: vec![0; w.bodies.len()],
+            prev_awake: (0..w.bodies.len()).map(|i| w.bodies.awake[i]).collect(),
+            max_flips: 0,
+            active_ticks: 0,
+        }
+    }
+
+    /// 尾窗(100) p50（判据 ③ 的读数）。
+    fn p50_tail(&self) -> f64 {
+        let mut s = self.last100.clone();
+        s.sort_by(f64::total_cmp);
+        s.get(s.len() / 2).copied().unwrap_or(0.0)
+    }
+}
+
+/// 推进 `ticks` 个 tick：逐 tick 计时/健康采样 + 抖动审计 + 每 100 tick 一行读数。
+fn run_ticks(w: &mut World, ticks: u32, st: &mut Stats) {
     for t in 1..=ticks {
         let t0 = Instant::now();
         w.step();
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
-        total_ms += ms;
+        st.total_ms += ms;
         if t > ticks.saturating_sub(100) {
-            last100.push(ms);
+            st.last100.push(ms);
         }
         let h = w.health();
         if h.awake_bodies > 0 {
-            active_ticks += 1;
-            for &i in &dyn_ids {
-                if !prev_awake[i] && w.bodies.awake[i] {
-                    flips_per_body[i] += 1;
-                    max_flips = max_flips.max(flips_per_body[i]);
+            st.active_ticks += 1;
+            for &i in &st.dyn_ids {
+                if !st.prev_awake[i] && w.bodies.awake[i] {
+                    st.flips_per_body[i] += 1;
+                    st.max_flips = st.max_flips.max(st.flips_per_body[i]);
                 }
-                prev_awake[i] = w.bodies.awake[i];
+                st.prev_awake[i] = w.bodies.awake[i];
             }
         }
         if h.deep_penetrations > 0 {
-            deep_ticks += 1;
+            st.deep_ticks += 1;
         }
-        worst_depth = worst_depth.max(h.max_depth);
-        if sleep_tick.is_none() && h.awake_bodies == 0 {
-            sleep_tick = Some(t);
+        st.worst_depth = st.worst_depth.max(h.max_depth);
+        if st.sleep_tick.is_none() && h.awake_bodies == 0 {
+            st.sleep_tick = Some(t);
         }
         if t % 100 == 0 || t == ticks {
             println!(
                 "tick {t:3}: 累计均值 {:6.1} ms | awake {:5} | 近100 p50 {:6.2} ms | deep {} max_depth {:.3}",
-                total_ms / t as f64,
+                st.total_ms / t as f64,
                 h.awake_bodies,
-                if last100.is_empty() {
+                if st.last100.is_empty() {
                     0.0
                 } else {
-                    let mut s = last100.clone();
+                    let mut s = st.last100.clone();
                     s.sort_by(f64::total_cmp);
                     s[s.len() / 2]
                 },
@@ -151,10 +187,10 @@ fn main() {
             );
         }
     }
+}
 
-    let mut s = last100.clone();
-    s.sort_by(f64::total_cmp);
-    let p50_tail = s.get(s.len() / 2).copied().unwrap_or(0.0);
+/// 末态总览 + 速度分布 + 抖动（判据 ①③ 的读数）。
+fn report_summary(w: &World, boxes: usize, st: &Stats) {
     let h = w.health();
 
     // 速度分布诊断（入睡判据是「全岛 |v|<0.04 且 |ω|<0.05 持续 0.5s」——
@@ -183,38 +219,41 @@ fn main() {
     println!("----");
     println!(
         "入睡 tick：{} | 末态 awake {} | 末态 deep {} | 最大深度（全窗）{:.4} | 深穿透 tick 数 {}",
-        sleep_tick
+        st.sleep_tick
             .map(|t| t.to_string())
             .unwrap_or_else(|| "未入睡".into()),
         h.awake_bodies,
         h.deep_penetrations,
-        worst_depth,
-        deep_ticks
+        st.worst_depth,
+        st.deep_ticks
     );
-    println!("尾窗(100) p50：{p50_tail:.3} ms");
+    println!("尾窗(100) p50：{:.3} ms", st.p50_tail());
     // 抖动审计（与 `m0_gates`/`m1_scale` 同口径；分母用活跃秒 = 更严）。行尾 ASCII 机读标签。
     {
-        let act_s = (active_ticks.max(1) as f64) / 60.0;
+        let act_s = (st.active_ticks.max(1) as f64) / 60.0;
         println!(
             "抖动：单体贴最大睡醒翻转 {} 次（活跃 {:.1} s ⇒ {:.2} 次/秒/体；SPEC §3 阈值 <1 ⇒ {}）｜ wake_flips={} wake_rate_per_s={:.2}",
-            max_flips,
+            st.max_flips,
             act_s,
-            max_flips as f64 / act_s,
-            if (max_flips as f64) < act_s {
+            st.max_flips as f64 / act_s,
+            if (st.max_flips as f64) < act_s {
                 "过"
             } else {
                 "**不过**"
             },
-            max_flips,
-            max_flips as f64 / act_s
+            st.max_flips,
+            st.max_flips as f64 / act_s
         );
     }
     println!(
         "速度分布：未达睡眠阈(>0.04/0.05) {n_slow} 体 | 中速(>0.1/0.2) {n_mid} 体 | 快速(>0.5/1.0) {n_fast} 体 | |v|max {vmax:.3} |ω|max {wmax:.3}"
     );
-    // —— 诊断（2026-09-22 加）：残差**在哪**、离阈值**多远** ——
-    // ① |v| 直方图（对数带）：整体刚过阈 vs 少数拖尾；
-    // ② 按**高度三分位**统计缺口体：底层载重抖 vs 顶层还在沉/被挤出。
+}
+
+/// 残差**在哪**、离阈值**多远**（2026-09-22 加）：
+/// ① |v| 直方图（对数带）：整体刚过阈 vs 少数拖尾；
+/// ② 按**高度三分位**统计缺口体：底层载重抖 vs 顶层还在沉/被挤出。
+fn report_gaps(w: &World, boxes: usize) {
     let mut bins = [0u32; 7];
     let (mut ymin, mut ymax) = (f32::MAX, f32::MIN);
     for i in 0..boxes {
@@ -263,10 +302,14 @@ fn main() {
         bins[0], bins[1], bins[2], bins[3], bins[4], bins[5], bins[6]
     );
     println!("  缺口体高度三分位（y {ymin:.3}..{ymax:.3}）：底 {lo3} | 中 {mid3} | 顶 {hi3}");
+}
 
-    let slept = sleep_tick.map(|t| t < ticks).unwrap_or(false);
+/// 出口判据判定（未过 ⇒ 退出码 1，供脚本消费）。
+fn print_verdict(w: &World, ticks: u32, st: &Stats) {
+    let h = w.health();
+    let slept = st.sleep_tick.map(|t| t < ticks).unwrap_or(false);
     let clean = h.nan_bodies == 0 && h.deep_penetrations == 0;
-    let quiet = p50_tail < 1.0;
+    let quiet = st.p50_tail() < 1.0;
     if slept && clean && quiet {
         println!("✅ M1 万级堆叠稳定 PASS");
     } else {
@@ -276,4 +319,32 @@ fn main() {
         );
         std::process::exit(1);
     }
+}
+
+fn main() {
+    let a = parse_args();
+    let mut w = build(
+        a.iters,
+        a.substeps,
+        a.threads,
+        a.shock,
+        a.stab,
+        a.wake_gate_k,
+        a.hold,
+    );
+    let boxes = w.bodies.len();
+    println!(
+        "M1 稳定性跑轮：{boxes} 盒密堆（{SIDE}×{SIDE}×{LAYERS}）| iters {} 子步 {} 线程 {} shock {:?} stab {:?} wakeK {:?} hold {:?} | {} tick",
+        a.iters, a.substeps, a.threads, a.shock, a.stab, a.wake_gate_k, a.hold, a.ticks
+    );
+    for _ in 0..10 {
+        w.step();
+    }
+
+    let mut st = Stats::new(&w);
+    run_ticks(&mut w, a.ticks, &mut st);
+
+    report_summary(&w, boxes, &st);
+    report_gaps(&w, boxes);
+    print_verdict(&w, a.ticks, &st);
 }
