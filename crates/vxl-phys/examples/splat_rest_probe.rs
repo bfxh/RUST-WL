@@ -50,9 +50,22 @@ fn iso_height_at(f: &GaussianSplatField, x: f32, z: f32) -> f32 {
     0.5 * (lo + hi)
 }
 
-fn main() {
-    let field = flat_field(0.5);
-    let y_ref = iso_height_at(&field, 0.0, 0.0);
+/// 平场 + μ=0.9 材质的**单刚体世界**：②③ 的"投放 → 静置 TICKS → 读末态"同形段收口
+/// （四次建世界逐字同款：场 σ 固定、材质元组固定、投放点 (0, y, 0)、密度 1000）。
+fn flat_field_world(sigma: f32, shape: Shape, y: f32) -> (World, usize) {
+    let mut w = World::new(PhysConfig::default());
+    w.add_splat_field(flat_field(sigma));
+    let m = w.add_material(vxl_phys_core::Material {
+        friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
+        restitution: 0.02,
+    });
+    let i = w.add_dynamic(shape, Vec3::new(0.0, y, 0.0), Quat::IDENTITY, 1000.0) as usize;
+    w.bodies.set_material(i, m);
+    (w, i)
+}
+
+/// 头部读数：等值面高 + 截断半径与"有效余量"（P6 死区判据的量化形式）。
+fn print_header(field: &GaussianSplatField, y_ref: f32) {
     // **死区判据**（P6 根因的量化形式）：截断半径 = σ·√cut；若它在等值面上方的余量
     // 小于体半径，则体心会落进"读不到任何核（s=0）"的死区 ⇒ 该体在此域上不可能稳定接触。
     // 3σ（cut=9）对**多核叠加**的场不够：等值面本身可以浮到接近 3σ 高（这里是 1.31 / 1.5）。
@@ -65,25 +78,21 @@ fn main() {
         field.cut,
         cut_r - y_ref
     );
+}
+
+/// ② 平场上的**盒**与**球**（盒：底面 4 角各按自己所在 (x,z) 的等值面高度算间隙取最小）。
+fn box_and_sphere_gaps(field: &GaussianSplatField, y_ref: f32) {
     println!("  形状           末态 y      **最小离面间隙**   清醒  |v|");
 
     // 盒：底面 4 角各按**自己所在 (x,z)** 的等值面高度算间隙，取最小值
     for half in [0.25f32, 0.35] {
-        let mut w = World::new(PhysConfig::default());
-        w.add_splat_field(flat_field(0.5));
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
-        });
-        let i = w.add_dynamic(
+        let (mut w, i) = flat_field_world(
+            0.5,
             Shape::Box {
                 half: Vec3::splat(half),
             },
-            Vec3::new(0.0, y_ref + half + 0.5, 0.0),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
+            y_ref + half + 0.5,
+        );
         for _ in 0..TICKS {
             w.step();
         }
@@ -92,7 +101,7 @@ fn main() {
         for sx in [-1.0f32, 1.0] {
             for sz in [-1.0f32, 1.0] {
                 let c = rot.rotate_vec3(Vec3::new(sx * half, -half, sz * half)) + pos;
-                min_gap = min_gap.min(c.y - iso_height_at(&field, c.x, c.z));
+                min_gap = min_gap.min(c.y - iso_height_at(field, c.x, c.z));
             }
         }
         println!(
@@ -106,19 +115,7 @@ fn main() {
 
     // 球（对照：`depth = radius − f`，本就不该有偏置）
     for r in [0.25f32, 0.35] {
-        let mut w = World::new(PhysConfig::default());
-        w.add_splat_field(flat_field(0.5));
-        let m = w.add_material(vxl_phys_core::Material {
-            friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-            restitution: 0.02,
-        });
-        let i = w.add_dynamic(
-            Shape::Sphere { radius: r },
-            Vec3::new(0.0, y_ref + r + 0.5, 0.0),
-            Quat::IDENTITY,
-            1000.0,
-        ) as usize;
-        w.bodies.set_material(i, m);
+        let (mut w, i) = flat_field_world(0.5, Shape::Sphere { radius: r }, y_ref + r + 0.5);
         for _ in 0..TICKS {
             w.step();
         }
@@ -126,15 +123,17 @@ fn main() {
         println!(
             "  球(半径 {r:4.2})  {:8.4}   {:+9.4}        {}  {:.4}",
             pos.y,
-            pos.y - r - iso_height_at(&field, pos.x, pos.z),
+            pos.y - r - iso_height_at(field, pos.x, pos.z),
             w.bodies.awake[i],
             w.bodies.linvel[i].length()
         );
     }
+}
 
-    // ③ **σ 扫描**：把"场起伏"与"球接触行为"分开。σ=0.5 时等值面按 0.25 m 铺距起伏明显
-    //    ⇒ 球会像在搓衣板上那样滚；σ 加大（核重叠更强）⇒ 等值面趋平。
-    //    若球在**平滑场**上贴住，则此前那条"球沉 0.25 m"是**参考场太粗糙**，不是接触算错。
+/// ③ **σ 扫描**：把"场起伏"与"球接触行为"分开。σ=0.5 时等值面按 0.25 m 铺距起伏明显
+///    ⇒ 球会像在搓衣板上那样滚；σ 加大（核重叠更强）⇒ 等值面趋平。
+///    若球在**平滑场**上贴住，则此前那条"球沉 0.25 m"是**参考场太粗糙**，不是接触算错。
+fn sigma_sweep() {
     println!("\n③ σ 扫描（球 r=0.35 / 盒半高 0.35，同一铺距 0.25 m）：");
     println!("   σ      等值面 y   球间隙    球|v|   球清醒   盒间隙   盒|v|");
     for sigma in [0.5f32, 0.75, 1.0, 1.5] {
@@ -143,19 +142,8 @@ fn main() {
         let mut row = format!("   {sigma:4.2}  {y_ref:8.4}  ");
         // 球
         {
-            let mut w = World::new(PhysConfig::default());
-            w.add_splat_field(flat_field(sigma));
-            let m = w.add_material(vxl_phys_core::Material {
-                friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-                restitution: 0.02,
-            });
-            let i = w.add_dynamic(
-                Shape::Sphere { radius: 0.35 },
-                Vec3::new(0.0, y_ref + 0.35 + 0.5, 0.0),
-                Quat::IDENTITY,
-                1000.0,
-            ) as usize;
-            w.bodies.set_material(i, m);
+            let (mut w, i) =
+                flat_field_world(sigma, Shape::Sphere { radius: 0.35 }, y_ref + 0.35 + 0.5);
             for _ in 0..TICKS {
                 w.step();
             }
@@ -169,21 +157,13 @@ fn main() {
         }
         // 盒（对照）
         {
-            let mut w = World::new(PhysConfig::default());
-            w.add_splat_field(flat_field(sigma));
-            let m = w.add_material(vxl_phys_core::Material {
-                friction: vxl_phys_core::FrictionModel::Coulomb { mu: 0.9 },
-                restitution: 0.02,
-            });
-            let i = w.add_dynamic(
+            let (mut w, i) = flat_field_world(
+                sigma,
                 Shape::Box {
                     half: Vec3::splat(0.35),
                 },
-                Vec3::new(0.0, y_ref + 0.35 + 0.5, 0.0),
-                Quat::IDENTITY,
-                1000.0,
-            ) as usize;
-            w.bodies.set_material(i, m);
+                y_ref + 0.35 + 0.5,
+            );
             for _ in 0..TICKS {
                 w.step();
             }
@@ -199,12 +179,14 @@ fn main() {
         }
         println!("{row}");
     }
+}
 
-    // ④ **深埋顶出**（把"场太软/顶点不稳"与"接触没生成"分开的关键一步）：
-    //    把球心放到等值面**下方** 0.02/0.10/0.20/0.30 m、零初速、**关重力**，看它能否被顶出来。
-    //    ⚠️ **必须做"睡 vs 不睡"对照**：零初速 + 关重力 ⇒ 睡眠计时器跑满就睡，
-    //    而**睡眠体不做检测**（本仓既有事实，`trimesh_escape_probe` 踩过同一个坑）
-    //    ⇒ 不分开就会把"接触没生成"与"睡了所以不动"混为一谈。
+/// ④ **深埋顶出**（把"场太软/顶点不稳"与"接触没生成"分开的关键一步）：
+///    把球心放到等值面**下方** 0.02/0.10/0.20/0.30 m、零初速、**关重力**，看它能否被顶出来。
+///    ⚠️ **必须做"睡 vs 不睡"对照**：零初速 + 关重力 ⇒ 睡眠计时器跑满就睡，
+///    而**睡眠体不做检测**（本仓既有事实，`trimesh_escape_probe` 踩过同一个坑）
+///    ⇒ 不分开就会把"接触没生成"与"睡了所以不动"混为一谈。
+fn deep_burial_probe() {
     println!("\n④ 深埋顶出（σ=0.5，球 r=0.35，关重力，60 tick；睡 vs 不睡 对照）：");
     let field = flat_field(0.5);
     let y_ref = iso_height_at(&field, 0.0, 0.0);
@@ -268,10 +250,12 @@ fn main() {
             );
         }
     }
+}
 
-    // ⑤ **截断收敛 + 开销**（P6 根因修复的判据）：把"等值面位置"随 `cut` 的变化量
-    //    与**无截断参考**比——参考由本探针**自己**按同一批核参数求和（不经过 crate 的 cut）。
-    //    收敛说明"4σ 之后表面不再移动"；同时给查询开销（相对 cut=9）。
+/// ⑤ **截断收敛 + 开销**（P6 根因修复的判据）：把"等值面位置"随 `cut` 的变化量
+///    与**无截断参考**比——参考由本探针**自己**按同一批核参数求和（不经过 crate 的 cut）。
+///    收敛说明"4σ 之后表面不再移动"；同时给查询开销（相对 cut=9）。
+fn cutoff_convergence() {
     println!("\n⑤ 截断收敛与开销（平场，无截断参考由本探针自算）：");
     let y_unt = iso_height_untruncated(0.0, 0.0);
     println!("   无截断等值面 y = {y_unt:.4}");
@@ -296,6 +280,17 @@ fn main() {
             0.5 * cut.sqrt() - y
         );
     }
+}
+
+fn main() {
+    let field = flat_field(0.5);
+    let y_ref = iso_height_at(&field, 0.0, 0.0);
+    print_header(&field, y_ref);
+    box_and_sphere_gaps(&field, y_ref);
+
+    sigma_sweep();
+    deep_burial_probe();
+    cutoff_convergence();
 
     f_error_profile();
 }

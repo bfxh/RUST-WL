@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 16 个**（>120 行，实测口径见 §3；B18 已清掉两个最大的示例 main）。
+> 一句话：**文件级已清零**；**函数级门面内剩 13 个**（>120 行，实测口径见 §3；B18/B19 共清掉五个最大的示例 main）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -29,6 +29,7 @@
 | `5fa7f49` | **B16**：`diag_query_cost_across_tree_shapes` 137→**57**（三棵**嵌套 fn** 用 `hoist` 上提模块级） |
 | `b3ac4fd` | **B17**：`float_motion_vs_local_water_motion` 144→**114**（两档重复的"零冲击就位"⇒ `surface_height(couple)`） |
 | `402e2c0` | **B18**：示例 main 前两件（最大的两个）—— `trimesh_rest_probe` 360→**60**（七段提纯为模块级 fn，`end_state_report` 顺手删死参数 `cfg`）、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包 + 转储拆 `write_header`/`write_body_records`/`write_voxel_bits`/`write_fluid_particles`/`write_frame`）；判据=**逐位 A/B 对拍**（见 §3 第 4 条） |
+| `本批` | **B19**：示例 main 再清三件 —— `m1_scale` 263→**79**（`Args`/`Acc` 记录 + `run_ticks`/`print_tick_diag`/`report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn + `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/`spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b`）；判据=**掩计时后全字对拍**（三份 `norm_*.py`：89/57/25 行 IDENTICAL） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -47,7 +48,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 16 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 13 个**函数 >120 行（另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -66,7 +67,7 @@ PY
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
 | 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
-| **示例 main** | 12 | `gpu_tick_probe` 311 · `gpu_density_probe` 272 · `m1_scale` 263 · `splat_rest_probe` 249 · `fluid_buoyancy` 245 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m0_gates` 174 · `arena_bench/probes_b::scene_joint_chains` 131 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**收成收闭包的 helper（B11）；**自包含的大诊断块**整块提（B15 的 99 行范例，用 `scope: inner` + `replace_outer`）；判据见下。**B18 实测订正两处**：`probes_b::scene_joint_chains` 131 旧表漏计（门只报每文件最大函数）；`gpu_tick_probe` 已从 266 涨到 **311**(GPU 线近期改动) |
+| **示例 main** | 9 | `gpu_tick_probe` 311 · `gpu_density_probe` 272 · `arena_bench/probes_a::bench` 224 · `m1_pile` 205 · `diag_min` 188 · `gpu_grid_probe` 183 · `trimesh_escape_probe` 181 · `m0_gates` 174 · `arena_bench/probes_b::scene_joint_chains` 131 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**收成收闭包的 helper（B11）；**自包含的大诊断块**整块提（B15 的 99 行范例，用 `scope: inner` + `replace_outer`）；判据见下。**B18 实测订正两处**：`probes_b::scene_joint_chains` 131 旧表漏计（门只报每文件最大函数）；`gpu_tick_probe` 已从 266 涨到 **311**(GPU 线近期改动)。**B19 → 12→9**（清掉 `m1_scale`/`splat_rest_probe`/`fluid_buoyancy`，见 §3 第 4 条） |
 | 测试 + 脚本 | 1 | `render_demo.py::main` 241（Python：门用 `ast` 量，**抽取不需要编译**；判据＝`py_compile` + 渲染一次图） | 同 `extract_block` 思路手工提 |
 
 **建议切点（已侦察）**：
@@ -82,15 +83,25 @@ PY
    （`let _ = best;`），`deepest` 也只喂那条判据 ⇒ 整段可退化成
    `if count.iter().all(|&c| c == 0) { return false; }`（语义等价：全零时发射循环本来也什么都不发）。
    **单独一次改动做，别混进纯搬移批**。
-4. 示例 `main`：形态相同（建场景 → 推进 → 报表）⇒ **B18 已定配方**（先做最大的两件）：
+4. 示例 `main`：形态相同（建场景 → 推进 → 报表）⇒ **B18/B19 已定配方**（做完最大的五件）：
    `trimesh_rest_probe` 360→**60**、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包；
-   转储按 头/体记录/体素位/流体粒/帧 拆五个 `fn(&mut impl Write, ...)`）；余 10 件照抄。
+   转储按 头/体记录/体素位/流体粒/帧 拆五个 `fn(&mut impl Write, ...)`）；
+   `m1_scale` 263→**79**（`Args`/`Acc` 两个记录结构 + `run_ticks`/`print_tick_diag`/
+   `report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn +
+   `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/
+   `spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b` 句柄包）；**余 9 件照抄**。
    **示例/探针的改写多半是"等价改写"**而不是纯搬移（多个 for 里各写一遍同样的
    "建世界 → 落体 → 打印"⇒ 收成一个收闭包的 helper）⇒ 判据**除门链外再加一条 A/B 对拍**：
    `git stash` 回旧版、同一口径各跑一遍，**读数逐字相同**。B11 验的是打印读数（`diff`）；
-   **B18 的 showcase 是二进制 dump ⇒ 判据升级为逐位对拍**（workspace 的 `cmp_showcase.py`
-   逐字段解析两侧 dump，只掩掉帧内计时 `ms`——机器计时必然抖动，非语义字段）。
-   注：`add_fluid` 返回 `usize`（索引）而**非** `BodyId`，`add_mesh` 前取 `providers().len()` 才是 provider id。
+   showcase 是二进制 dump ⇒ **逐位对拍**（`cmp_showcase.py` 逐字段解析两侧 dump，只掩帧内 `ms`）；
+   计时类输出（m1_scale / splat / fluid）⇒ **只掩计时字段、其余浮点读数全字比较**
+   （`norm_m1.py` / `norm_splat.py` / `norm_fluid.py`，都在 workspace）。抽判据时的确定性列清单：
+   m1 取 `tree_h/候选/岛/流形/点/组数/contacts/awake/NaN/deep` + 工作集模型值 + `wake_flips`。
+   ⚠️ **掩码必须吃掉计时字段的整段宽度**：`{dt:8.1}` 这类右对齐字段在耗时位数变化时前导空格
+   数也会变 ⇒ 只替换数字会留空格差、报假红（实测踩过一次，`\s+\d+\.\d+` 才干净）。
+   注：`add_fluid` 返回 `usize`（索引）而**非** `BodyId`；`add_mesh` 前取 `providers().len()`
+   才是 provider id。注：Mimosa 拦"路径来自参数"的脚本（`open(sys.argv[1])`）⇒ 对拍脚本
+   改用**常量路径 + 父目录校验**。
 
 **类型级 6 个是"已登记例外"**（`PhysConfig` 31 / `FluidSystem` 26 / `DefaultNarrowPhase` 33 /
 `Packet` 27 / `bvh8` 31 / `wide` 29）——纯数据记录，理由在 `god.gate.json` 的 `_type_exempt_doc`：

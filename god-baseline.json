@@ -735,9 +735,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/fluid_buoyancy.rs": {
-  "file_lines": 264,
-  "max_fn_lines": 245,
-  "max_type_members": 0
+  "file_lines": 303,
+  "max_fn_lines": 70,
+  "max_type_members": 3
  },
  "crates/vxl-phys/examples/m0_bench.rs": {
   "file_lines": 102,
@@ -775,9 +775,9 @@
   "max_type_members": 7
  },
  "crates/vxl-phys/examples/m1_scale.rs": {
-  "file_lines": 273,
-  "max_fn_lines": 263,
-  "max_type_members": 0
+  "file_lines": 350,
+  "max_fn_lines": 79,
+  "max_type_members": 15
  },
  "crates/vxl-phys/examples/m3_impact.rs": {
   "file_lines": 134,
@@ -795,8 +795,8 @@
   "max_type_members": 7
  },
  "crates/vxl-phys/examples/splat_rest_probe.rs": {
-  "file_lines": 358,
-  "max_fn_lines": 249,
+  "file_lines": 353,
+  "max_fn_lines": 65,
   "max_type_members": 0
  },
  "crates/vxl-phys/examples/trimesh_escape_probe.rs": {
