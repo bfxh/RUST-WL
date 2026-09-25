@@ -29,7 +29,7 @@
 | `5fa7f49` | **B16**：`diag_query_cost_across_tree_shapes` 137→**57**（三棵**嵌套 fn** 用 `hoist` 上提模块级） |
 | `b3ac4fd` | **B17**：`float_motion_vs_local_water_motion` 144→**114**（两档重复的"零冲击就位"⇒ `surface_height(couple)`） |
 | `402e2c0` | **B18**：示例 main 前两件（最大的两个）—— `trimesh_rest_probe` 360→**60**（七段提纯为模块级 fn，`end_state_report` 顺手删死参数 `cfg`）、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包 + 转储拆 `write_header`/`write_body_records`/`write_voxel_bits`/`write_fluid_particles`/`write_frame`）；判据=**逐位 A/B 对拍**（见 §3 第 4 条） |
-| `本批` | **B19**：示例 main 再清三件 —— `m1_scale` 263→**79**（`Args`/`Acc` 记录 + `run_ticks`/`print_tick_diag`/`report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn + `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/`spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b`）；判据=**掩计时后全字对拍**（三份 `norm_*.py`：89/57/25 行 IDENTICAL） |
+| `ba007bb` | **B19**：示例 main 再清三件 —— `m1_scale` 263→**79**（`Args`/`Acc` 记录 + `run_ticks`/`print_tick_diag`/`report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn + `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/`spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b`）；判据=**掩计时后全字对拍**（三份 `norm_*.py`：89/57/25 行 IDENTICAL） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
