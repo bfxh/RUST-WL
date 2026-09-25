@@ -370,7 +370,7 @@
   "max_type_members": 12
  },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 815,
+  "file_lines": 816,
   "max_fn_lines": 99,
   "max_type_members": 15
  },

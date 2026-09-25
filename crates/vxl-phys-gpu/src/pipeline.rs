@@ -685,6 +685,7 @@ impl Packet {
 
     /// 同 [`run_stages`](Packet::run_stages)，但带**壁面镜像鬼影**档（`walls`）：每子步在密度之后、
     /// EOS 之前多分派一趟 `wall_ghost.wgsl`（`WallStage::upload` 先给表）。
+    #[allow(clippy::too_many_arguments)] // 8 参：配置 + 相位掩码 + tick/子步 + 回读 + 壁面档 + 管线档
     pub fn run_stages_with(
         &mut self,
         cfg: &PacketCfg,
