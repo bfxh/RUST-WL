@@ -337,11 +337,14 @@ struct GpuTiming {
 /// ⑤ 稳态计时：先跑一次**丢弃计时**的热身（摊掉首轮编译/首触访存）——漂移表已经跑完，这里再推进
 ///    状态不影响任何对照。两条实测教训：
 ///    ① 短窗受 **GPU 时钟爬升**支配（同配置能差 2×）⇒ 3 次 × 100 tick 取最小，原值一并打印；
+///       **下限按规模让路**：`n > 2M` 档降到 20 趟（长趟本身已把时钟爬升平均掉，而 100 趟
+///       在大档是分钟级：10M 一趟 ≈230 ms ⇒ 100×3 = 70 s 起步，再加回读与快照更多）；
 ///    ② **每次计时前必须 `restore` 到同一状态**——计时本身会推进流体（剪切压实 ⇒ 邻域候选
 ///       变多），不还原就会把"状态演化"混进"相位成本"（实测：同一全链先后差 3×）。
 fn time_gpu(pk: &mut Packet, pc: &PacketCfg, ticks: usize, substeps: usize) -> GpuTiming {
     let _ = pk.run(pc, 2, substeps, false);
-    let gpu_ticks = ticks.max(100);
+    // 下限按规模让路（见函数注①）：大档 20 趟，小档维持 100 趟（口径按实际趟数打印）。
+    let gpu_ticks = ticks.max(if pc.n > 2_000_000 { 20 } else { 100 });
     let (snap_pos, snap_vel) = pk.snapshot();
     let mut reps = [0.0f32; 3];
     let mut box_ms = 0.0f32;
@@ -494,7 +497,15 @@ fn report_reactions(pk: &Packet, f: &FluidSystem, n_fluid: u32) {
 
 fn main() {
     let a = parse_args();
+    // **分段计时**：千万粒档要能直接看出"是哪一段在吃时间"（`--cpu-threads` 只管 CPU 对照档的
+    // 效率，而探针自己的建场/建卡/对拍三段在大档上是分钟级 ⇒ 没有这个读数就只能猜）。
+    let mut t_stage = std::time::Instant::now();
+    let mut stage = |m: &str| {
+        println!("⏱ {m}：{:.1} s", t_stage.elapsed().as_secs_f64());
+        t_stage = std::time::Instant::now();
+    };
     let s = build_fluid(&a);
+    stage("build_fluid（CPU 建场 + 5 趟静置）");
     let mut f = s.f;
     let dt_tick = 1.0 / 60.0;
     let gdims = {
@@ -506,16 +517,21 @@ fn main() {
     let Some((mut pk, pc)) = build_packet(&f, s.h, a.adapter_index, a.follow_box) else {
         return;
     };
+    stage("build_packet（建卡上管线/缓冲 + 首次上传）");
 
     let (drift, nan_cnt) = run_drift(&mut f, &mut pk, &pc, a.ticks, s.substeps, dt_tick);
+    stage("run_drift（CPU/GPU 各推 + 逐 tick 对拍）");
     // ③b 反作用回读 + 聚合验收（`--tank`）：GPU 逐粒 / 每体（卡上聚合）vs CPU 的
     // `boundary_forces()` / `boundary_reactions()`——同一末态、同一子步（两边都停在
     // 末子步边界）⇒ 只该差浮点累加序（`PLAN-gpu.md` §13.2 / §13.3）。
     if a.tank {
         report_reactions(&pk, &f, n_fluid as u32);
     }
+    stage("report_reactions（--tank 未开则 ≈0）");
     let (cpu_phase_ms, cpu_wall_ms) = time_cpu(&mut f, a.ticks, dt_tick);
+    stage("time_cpu（CPU 计时档）");
     let timing = time_gpu(&mut pk, &pc, a.ticks, s.substeps);
+    stage("time_gpu（GPU 计时档）");
 
     // 速度量级（读动能比要用它标定：本探针零重力 ⇒ |v| 极小，动能比对绝对差极敏感）
     let mut vmax_cpu = 0.0f32;

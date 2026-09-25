@@ -330,7 +330,7 @@
   "max_type_members": 8
  },
  "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
-  "file_lines": 546,
+  "file_lines": 562,
   "max_fn_lines": 74,
   "max_type_members": 12
  },
