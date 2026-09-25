@@ -580,9 +580,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-solver/src/constraint.rs": {
-  "file_lines": 348,
-  "max_fn_lines": 340,
-  "max_type_members": 0
+  "file_lines": 436,
+  "max_fn_lines": 104,
+  "max_type_members": 6
  },
  "crates/vxl-phys-solver/src/helpers.rs": {
   "file_lines": 136,
