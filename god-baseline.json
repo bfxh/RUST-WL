@@ -290,9 +290,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_density_probe.rs": {
-  "file_lines": 291,
-  "max_fn_lines": 272,
-  "max_type_members": 0
+  "file_lines": 378,
+  "max_fn_lines": 101,
+  "max_type_members": 14
  },
  "crates/vxl-phys-gpu/examples/gpu_facade_probe.rs": {
   "file_lines": 214,
@@ -300,9 +300,9 @@
   "max_type_members": 0
  },
  "crates/vxl-phys-gpu/examples/gpu_grid_probe.rs": {
-  "file_lines": 202,
-  "max_fn_lines": 183,
-  "max_type_members": 0
+  "file_lines": 267,
+  "max_fn_lines": 111,
+  "max_type_members": 10
  },
  "crates/vxl-phys-gpu/examples/gpu_narrow_probe/diag.rs": {
   "file_lines": 370,
@@ -330,9 +330,9 @@
   "max_type_members": 8
  },
  "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
-  "file_lines": 388,
-  "max_fn_lines": 311,
-  "max_type_members": 0
+  "file_lines": 528,
+  "max_fn_lines": 74,
+  "max_type_members": 12
  },
  "crates/vxl-phys-gpu/examples/gpu_walls_probe.rs": {
   "file_lines": 800,

@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 10 个**（>120 行：4 大分发 + 5 示例 main + 1 Python 脚本；实测口径见 §3；B18–B20 共清掉九个示例 main）。
+> 一句话：**文件级已清零**；**函数级门面内剩 7 个**（>120 行：4 大分发 + 2 示例 main + 1 Python 脚本；实测口径见 §3；B18–B21 共清掉十二个示例 main）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -30,7 +30,8 @@
 | `b3ac4fd` | **B17**：`float_motion_vs_local_water_motion` 144→**114**（两档重复的"零冲击就位"⇒ `surface_height(couple)`） |
 | `402e2c0` | **B18**：示例 main 前两件（最大的两个）—— `trimesh_rest_probe` 360→**60**（七段提纯为模块级 fn，`end_state_report` 顺手删死参数 `cfg`）、`showcase` 344→**56**（六域建景各一 fn + `Scene` 句柄包 + 转储拆 `write_header`/`write_body_records`/`write_voxel_bits`/`write_fluid_particles`/`write_frame`）；判据=**逐位 A/B 对拍**（见 §3 第 4 条） |
 | `ba007bb` | **B19**：示例 main 再清三件 —— `m1_scale` 263→**79**（`Args`/`Acc` 记录 + `run_ticks`/`print_tick_diag`/`report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn + `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/`spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b`）；判据=**掩计时后全字对拍**（三份 `norm_*.py`：89/57/25 行 IDENTICAL） |
-| `本批`（哈希下批回填） | **B20**：示例 main 再清四件 —— `m1_pile` 205→**59**、`diag_min` 188→**85**、`trimesh_escape_probe` 181→**57**、`m0_gates` 174→**75**；判据=**掩计时后全字对拍**（`norm_pile.py`/`norm_diag.py`/原样 `diff`/`norm_m0.py`；m0 的 `arena 容量` 经三次复跑判为**非确定量**后掩掉——见 §5 第 9 条） |
+| `19c7c66` | **B20**：示例 main 再清四件 —— `m1_pile` 205→**59**、`diag_min` 188→**85**、`trimesh_escape_probe` 181→**57**、`m0_gates` 174→**75**；判据=**掩计时后全字对拍**（`norm_pile.py`/`norm_diag.py`/原样 `diff`/`norm_m0.py`；m0 的 `arena 容量` 经三次复跑判为**非确定量**后掩掉——见 §5 第 9 条） |
+| `本批`（哈希下批回填） | **B21**：GPU 示例三件 —— `gpu_tick_probe` 311→**74**、`gpu_density_probe` 272→**101**、`gpu_grid_probe` 183→**111**；判据=`norm_tick.py`/`norm_density.py`/`norm_grid.py`（掩计时行；grid 那件**表哈希 + 逐位比对全等**、tick 那件**漂移表 8 行全等**）——均 IDENTICAL |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -49,7 +50,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 10 个**函数 >120 行（4 大分发 + 5 示例 main + 1 Python 脚本；另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 7 个**函数 >120 行（4 大分发 + 2 示例 main + 1 Python 脚本；另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -68,7 +69,7 @@ PY
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
 | 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
-| **示例 main** | 5 | `gpu_tick_probe` 311 · `gpu_density_probe` 272 · `arena_bench/probes_a::bench` 224 · `gpu_grid_probe` 183 · `arena_bench/probes_b::scene_joint_chains` 131 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**收成收闭包的 helper（B11）；**自包含的大诊断块**整块提（B15 的 99 行范例，用 `scope: inner` + `replace_outer`）；判据见下。**B18 实测订正两处**：`probes_b::scene_joint_chains` 131 旧表漏计（门只报每文件最大函数）；`gpu_tick_probe` 已从 266 涨到 **311**(GPU 线近期改动)。**B19 → 12→9**；**B20 → 9→5**（清掉 `m1_pile`/`diag_min`/`trimesh_escape_probe`/`m0_gates`，见 §3 第 4 条） |
+| **示例 main** | 2 | `arena_bench/probes_a::bench` 224 · `arena_bench/probes_b::scene_joint_chains` 131 | `extract_block`：场景构造 / 推进 / 报表 三段；**同形重复段**收成收闭包的 helper（B11）；**自包含的大诊断块**整块提（B15 的 99 行范例，用 `scope: inner` + `replace_outer`）；判据见下。**B18 实测订正两处**：`probes_b::scene_joint_chains` 131 旧表漏计（门只报每文件最大函数）；`gpu_tick_probe` 已从 266 涨到 **311**(GPU 线近期改动)。**B19 → 12→9**；**B20 → 9→5**；**B21 → 5→2**（清掉三件 GPU 示例，见 §3 第 4 条） |
 | 测试 + 脚本 | 1 | `render_demo.py::main` 241（Python：门用 `ast` 量，**抽取不需要编译**；判据＝`py_compile` + 渲染一次图） | 同 `extract_block` 思路手工提 |
 
 **建议切点（已侦察）**：
@@ -96,7 +97,14 @@ PY
    见 §5 第 10 条的"胶水成本"；只提 `run_ticks`（统计 + 打印就地）+ 两个报表）、
    `trimesh_escape_probe` 181→**57**（【A】落点/【B】尺寸扫描/【D】球内点/【C】迭代预算 各一段 fn）、
    `m0_gates` 174→**75**（`GateEval`/`StressEval` 两个评估结构 + `eval_gate`/`print_gate_report`/
-   `run_stress`/`print_stress_report`/`build_json`/`print_verdict`）；**余 5 件照抄**。
+   `run_stress`/`print_stress_report`/`build_json`/`print_verdict`）；
+   **B21 三件 GPU 示例**：`gpu_tick_probe` 311→**74**（`Args`/`FluidSetup`/`GpuTiming`/`Report`
+   四个记录 + `parse_args`/`build_fluid`/`build_packet`/`run_drift`/`time_cpu`/`time_gpu`/`report`）、
+   `gpu_density_probe` 272→**101**（**CPU 参考实现整块提 `cpu_reference(&FluidSystem)`**——
+   只吃一个参数最省胶水；`ukey`/`ulp`/`cmp3` 提模块级；`Cmp` 结构 + `compare`/`report`）、
+   `gpu_grid_probe` 183→**111**（`cmp_u32`/`bins_from_table`/`hash_of` 提模块级 +
+   `TableCmp`/`Scene` + `report`；打印那次**闭包不能直接用**——提到模块级要改签名）；
+   **余 2 件照抄**。
    **示例/探针的改写多半是"等价改写"**而不是纯搬移（多个 for 里各写一遍同样的
    "建世界 → 落体 → 打印"⇒ 收成一个收闭包的 helper）⇒ 判据**除门链外再加一条 A/B 对拍**：
    `git stash` 回旧版、同一口径各跑一遍，**读数逐字相同**。B11 验的是打印读数（`diff`）；
@@ -162,6 +170,13 @@ git push && gh run list --workflow=ci.yml --limit 1        # 核 CI（约 8–9 
     **纪律**：拆完**先跑 `god_gate`** 再 fmt/clippy——别把"净账为正"留到收尾才发现。
 11. **`cargo fmt --all` 之后又改文件 ⇒ gate_all 会在 fmt 步停**（B20 实测）：它自动修复后要求重跑，
    而**自动修复也改了源码** ⇒ 对拍要**再验证一次**（本批 diag_min 重验后仍 IDENTICAL）。
+12. **GPU 探针的判据要挑"不敏感"的那几个**（B21 实测）：`gpu_density_probe` 的「**最大 ulp 差**」
+   跨版本会变（`1148846126 → 1148846120`，±6），而**最大绝对差 / 逐位相同数 / >2ulp 计数全同**
+   ——前者是**近零粒子的噪声敏感极值**（ukey 跨零映射给出 1e9 量级），受编译器重排影响，
+   按 `PLAN-gpu.md` §9.2 的"量化容差口径"**不是语义判据** ⇒ 对拍掩掉它、保留后三者。
+   另：计时字段既有 `{:.3}` 浮点也有 `{:.0}` **整数**（`壁钟 4928 ms`、`一次性 setup 584 ms`、
+   `GPU **0.057 ms/轮**`）⇒ **掩码要把整数形态一起掩**（B21 为此连修两次脚本）。
+   另：`PacketCfg` 是 `Copy` ⇒ `pc.clone()` 会被 clippy `clone_on_copy` 判红（B21 实栽）。
 
 ### `extract_block.py` 的九条边界（B8/B9/B10 实测；改工具前先看这段）
 
