@@ -179,7 +179,8 @@ pub(crate) fn scene_ballpit(cfg: PhysConfig) -> World {
     w
 }
 
-pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
+/// 采样：预热 `WARMUP` 步后逐 tick 计时 `MEASURE` 次。
+fn measure_steps(w: &mut World) -> Vec<f64> {
     for _ in 0..WARMUP {
         w.step();
     }
@@ -190,11 +191,15 @@ pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
         w.step();
         samples.push(t0.elapsed().as_secs_f64() * 1000.0);
     }
-    // 长跑稳定性：窗口后再推 extra_steps，观察是否继续收敛（抖动/穿透/堆高）。
-    // **离场轨迹追踪**（诊断 P5：那 ~10 个体到底是"被接触打飞"还是"自己滑出地形边缘"）：
-    // 记录每个体**第一次落到 y < −5**（地形最低点约 −4）时的**上一 tick 速度**——
-    // 那是它"离开台面"的瞬时状态，与它此刻在哪无关。|v| 温和（≤10 m/s）⇒ 滑出边缘后自由落体；
-    // |v| 数十上百 ⇒ 接触把能量打进去了。
+    samples
+}
+
+/// 长跑稳定性：窗口后再推 `extra_steps`，观察是否继续收敛（抖动/穿透/堆高）。
+/// **离场轨迹追踪**（诊断 P5：那 ~10 个体到底是"被接触打飞"还是"自己滑出地形边缘"）：
+/// 记录每个体**第一次落到 y < −5**（地形最低点约 −4）时的**上一 tick 速度**——
+/// 那是它"离开台面"的瞬时状态，与它此刻在哪无关。|v| 温和（≤10 m/s）⇒ 滑出边缘后自由落体；
+/// |v| 数十上百 ⇒ 接触把能量打进去了。
+fn track_exits(w: &mut World, extra_steps: usize) {
     let nb = w.bodies.len();
     let mut exits: Vec<(usize, f32, Vec3, Vec3)> = Vec::new(); // (步, |v|上一tick, v上一tick, 位置)
     let mut was_in: Vec<bool> = (0..nb).map(|_| true).collect();
@@ -224,22 +229,34 @@ pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
             );
         }
     }
-    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+}
+
+/// 一次 bench 的汇总读数。
+struct Stats {
+    p50: f64,
+    p95: f64,
+    mean: f64,
+    bodies: usize,
+    dynb: usize,
+    points: usize,
+    min_sep: f32,
+    max_y: f32,
+    min_y: f32,
+    kin: f64,
+    kin_in_bounds: f64,
+    out_of_bounds: usize,
+    awake_n: usize,
+    /// 逐体明细（诊断 P5：判定"掉穿地形"还是"斜坡滚动"——见 `OPEN-PROBLEMS.md` P5）。
+    ys: Vec<(f32, f32, f32, f32)>, // (y, x, z, |v|)
+}
+
+/// 汇总读数：分位/均值 + 接触规模 + 质量读数（跨迭代数对比用：点数、最大穿透、堆高、能耗）。
+fn collect_stats(w: &World, samples: &[f64]) -> Stats {
     let p50 = samples[samples.len() / 2];
     let p95 = samples[(samples.len() as f64 * 0.95) as usize];
     let mean = samples.iter().sum::<f64>() / samples.len() as f64;
-    let t = w.timings();
-    let total_us = (t.broadphase_us
-        + t.narrowphase_us
-        + t.solve_us
-        + t.integrate_vel_us
-        + t.integrate_pos_us
-        + t.fields_us
-        + t.ccd_us)
-        .max(1);
     let bodies = w.bodies.len();
     let dynb = (0..bodies).filter(|&i| w.bodies.is_dynamic(i)).count();
-    // 接触规模 + 质量读数（跨迭代数对比用：点数、最大穿透、堆高、能耗）。
     let points: usize = w.manifolds().iter().map(|m| m.points.len()).sum();
     let mut min_sep = f32::INFINITY;
     for m in w.manifolds() {
@@ -257,8 +274,7 @@ pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
     let mut kin_in_bounds = 0.0f64;
     let mut out_of_bounds = 0usize;
     let mut awake_n = 0usize;
-    // 逐体明细（诊断 P5：判定"掉穿地形"还是"斜坡滚动"——见 `OPEN-PROBLEMS.md` P5）。
-    let mut ys: Vec<(f32, f32, f32, f32)> = Vec::new(); // (y, x, z, |v|)
+    let mut ys: Vec<(f32, f32, f32, f32)> = Vec::new();
     for i in 0..bodies {
         let (pos, _) = w.bodies.pose(i);
         if w.bodies.is_dynamic(i) {
@@ -277,38 +293,75 @@ pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
             ys.push((pos.y, pos.x, pos.z, v.length()));
         }
     }
-    {
-        let q = |p: f32| -> f32 {
-            let k = ((ys.len() as f32 - 1.0) * p).clamp(0.0, ys.len() as f32 - 1.0) as usize;
-            ys[k].0
-        };
-        println!(
-            "   y 分布：min {:.3} | p05 {:.3} | p50 {:.3} | p95 {:.3} | max {:.3}",
-            min_y,
-            q(0.05),
-            q(0.50),
-            q(0.95),
-            max_y
-        );
-        let mut by_y = ys.clone();
-        by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
-        println!("   最低 5 体（y, x, z, |v|）：");
-        for r in by_y.iter().take(5) {
-            println!(
-                "      y {:.3}  x {:.2}  z {:.2}  |v| {:.2}",
-                r.0, r.1, r.2, r.3
-            );
-        }
-        let mut by_v = ys.clone();
-        by_v.sort_by(|a, b| b.3.total_cmp(&a.3));
-        println!("   最快 5 体（|v|, y, x, z）：");
-        for r in by_v.iter().take(5) {
-            println!(
-                "      |v| {:.2}  y {:.3}  x {:.2}  z {:.2}",
-                r.3, r.0, r.1, r.2
-            );
-        }
+    Stats {
+        p50,
+        p95,
+        mean,
+        bodies,
+        dynb,
+        points,
+        min_sep,
+        max_y,
+        min_y,
+        kin,
+        kin_in_bounds,
+        out_of_bounds,
+        awake_n,
+        ys,
     }
+}
+
+/// y 分布（分位）+ 最低 5 体 + 最快 5 体。
+fn report_spread(s: &Stats) {
+    let ys = &s.ys;
+    let q = |p: f32| -> f32 {
+        let k = ((ys.len() as f32 - 1.0) * p).clamp(0.0, ys.len() as f32 - 1.0) as usize;
+        ys[k].0
+    };
+    println!(
+        "   y 分布：min {:.3} | p05 {:.3} | p50 {:.3} | p95 {:.3} | max {:.3}",
+        s.min_y,
+        q(0.05),
+        q(0.50),
+        q(0.95),
+        s.max_y
+    );
+    let mut by_y = ys.clone();
+    by_y.sort_by(|a, b| a.0.total_cmp(&b.0));
+    println!("   最低 5 体（y, x, z, |v|）：");
+    for r in by_y.iter().take(5) {
+        println!(
+            "      y {:.3}  x {:.2}  z {:.2}  |v| {:.2}",
+            r.0, r.1, r.2, r.3
+        );
+    }
+    let mut by_v = ys.clone();
+    by_v.sort_by(|a, b| b.3.total_cmp(&a.3));
+    println!("   最快 5 体（|v|, y, x, z）：");
+    for r in by_v.iter().take(5) {
+        println!(
+            "      |v| {:.2}  y {:.3}  x {:.2}  z {:.2}",
+            r.3, r.0, r.1, r.2
+        );
+    }
+}
+
+/// 读数报表：规模/相位占比 + 窄相计数 + 点承载力 + warm 匹配/回退成因 + 求解细分。
+fn report(name: &str, w: &World, s: &Stats) {
+    let (p50, p95, mean) = (s.p50, s.p95, s.mean);
+    let (bodies, dynb, points) = (s.bodies, s.dynb, s.points);
+    let (min_sep, max_y) = (s.min_sep, s.max_y);
+    let (kin, kin_in_bounds, out_of_bounds, awake_n) =
+        (s.kin, s.kin_in_bounds, s.out_of_bounds, s.awake_n);
+    let t = w.timings();
+    let total_us = (t.broadphase_us
+        + t.narrowphase_us
+        + t.solve_us
+        + t.integrate_vel_us
+        + t.integrate_pos_us
+        + t.fields_us
+        + t.ccd_us)
+        .max(1);
     println!(
         "{name}: {bodies} 体（动 {dynb}） p50 {p50:.3} ms  p95 {p95:.3}  mean {mean:.3}  等效 {:>6.0} FPS",
         1000.0 / mean
@@ -402,4 +455,13 @@ pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
         d_sleep as f64 / MEASURE as f64,
         100.0 * d_sleep as f64 / d_island.max(1) as f64,
     );
+}
+
+pub(crate) fn bench(name: &str, mut w: World, extra_steps: usize) {
+    let mut samples = measure_steps(&mut w);
+    track_exits(&mut w, extra_steps);
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let s = collect_stats(&w, &samples);
+    report_spread(&s);
+    report(name, &w, &s);
 }

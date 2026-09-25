@@ -452,12 +452,9 @@ pub(crate) fn scene_joint_probes(cfg: PhysConfig) {
 /// 链场景是关节求解器最难看的形态——一个子步内的冲量要在整条链上传播，
 /// 迭代数不足就表现为"橡皮筋"。指标：全链**最大锚点分离**与**链长拉伸**
 /// （首末体距离 / 名义长度），外加是否发散（NaN）与末态速度。
-pub(crate) fn scene_joint_chains(cfg: PhysConfig) {
-    let n = 40usize;
-    let link = 0.6f32;
-
-    // ---- 铰链链：静态锚块 + n 个球，球形关节（锚点 ±0.3 局部 X）----
-    let mut w = World::new(cfg.clone());
+/// 铰链链：静态锚块 + n 个球，球形关节（锚点 ±0.3 局部 X）。
+fn hinge_chain(cfg: PhysConfig, n: usize, link: f32) {
+    let mut w = World::new(cfg);
     ground(&mut w, 120.0);
     let m = mat(&mut w, 0.4, 0.0);
     let ia = w.bodies.len();
@@ -519,8 +516,10 @@ pub(crate) fn scene_joint_chains(cfg: PhysConfig) {
         "  末态：链尾 y={:.3}（初 {:.3}）",
         w.bodies.position[n].y, 8.0
     );
+}
 
-    // ---- 悬挂塔：固定关节，方块半 0.3、节距 0.62（锚点 ±0.31 局部 Y）----
+/// 悬挂塔：固定关节，方块半 0.3、节距 0.62（锚点 ±0.31 局部 Y）。
+fn hanging_tower(cfg: PhysConfig, n: usize) {
     let mut w = World::new(cfg);
     ground(&mut w, 120.0);
     let top = 3.0 + n as f32 * 0.62;
@@ -582,6 +581,13 @@ pub(crate) fn scene_joint_chains(cfg: PhysConfig) {
         "  最大锚点分离 {worst:.4} m  最小相邻轴同向 cos {worst_tilt:.4}  发散={nan}  步耗时 {ms:.3} ms"
     );
     println!("  末态：塔尾 y={:.3}", w.bodies.position[n].y);
+}
+
+pub(crate) fn scene_joint_chains(cfg: PhysConfig) {
+    let n = 40usize;
+    let link = 0.6f32;
+    hinge_chain(cfg.clone(), n, link);
+    hanging_tower(cfg, n);
 }
 
 /// **真实感基准（一）：恢复系数**。球从 h 落下，回落顶点相对高度应 ≈ e²
