@@ -1,28 +1,27 @@
-//! **窄相卡上档的接线验收**（`PLAN-gpu.md` §17.9）：同一个世界跑两条链，**只差"谁跑窄相"**
-//! —— A = 默认（`DefaultNarrowPhase` 在主机），B = 注册了卡上档（`World::set_narrow_tier`，
-//! 卡上跑已接的族 + 主机回填 + 按对序装配）。
+//! 窄相卡上档验收的**判据与取证**（主文件 `main.rs` 只留编排与打印；本文件由 `mod diag;` 收进来
+//! ⇒ 条目对父模块可见即可）。
 //!
-//! **判据**（与流体档的 facade 探针同族）：
-//! ① **t=1 探测器**：第一个 tick 的 `max|Δx|` 必须只有 ulp/几何量级（接线错会在 t=1 就大）；
-//! ② 逐 tick 的 `max|Δx|` 走势：**线性增长才是接线错**，随机游走是口径 B 混沌（§13.5 的判读法）；
-//! ③ **金丝雀**：把后端换成"槽表原样返回但**清空所有 count**"（= 卡上的流形没送到求解器）
-//!    ⇒ t=1 必须明显变大（证明①有分辨力）。
+//! 内容三块：
+//! - **判据**：`t1_report`（结构 / 特征多重集 / 几何 / 位姿差的读数）、`geom_ok`（点集双射 + 法线容差）。
+//! - **量具自检**：`selftest`（复算表 vs 引擎单对 vs 卡上隔离，三方同轴才准拿表判案）。
+//! - **轴取证**（只在判据变红时跑）：`axes_host`（主机侧 21 轴复算）、`axes_probe`（点名 / 前缀二分 /
+//!   隔离 / 真索引 / 真对表复现）、`card_on_bodies` / `card_pair_normal` / `prefix_bisect`。
 //!
-//! ⚠️ **边界**：本档只接"检测趟"的窄相；**CCD 回扫（`world_ccd`）仍在主机**跑 CPU 窄相
-//! （它有自己的对表与输出槽）——那是已知边界，不是遗漏。
-//!
-//! 运行：`cargo run --release -p vxl-phys-gpu --example gpu_narrow_tier_probe [--adapter K]`
+//! **判据形态见 `PLAN-gpu.md` §17.7**：逐元素「次序 + 逐位」在本栈**不可达**（`select_contacts` 的
+//! 排序/去重/截断是离散选择，ulp 差会翻它）⇒ 结构 + 特征多重集逐位 + 点集双射 + 法线容差；
+//! 点次序与同位次 ulp 噪声**只报不判**。
 
-use vxl_phys::{NarrowPhase, PhysConfig, Quat, Shape, Vec3, World};
-use vxl_phys_core::narrow_tier::{NarrowSlots, NarrowTierBackend, SLOT_WORDS};
+use vxl_phys::{Manifold, NarrowPhase, Quat, Shape, Vec3, World};
 use vxl_phys_gpu::narrow::NarrowTier;
 
+use super::{cfg, scene, scene_m1};
+
 /// 切换后第一 tick 的**诊断**：① 流形表结构（条数 / 对号 / 点数 / 特征多重集）是否一致；
-/// ② 位置差的**分布**（超阈体数 + 最大 δv）。
+/// ② 位置差的**分布**（超阈体数 + 最大 δv）；③ 几何不符的细分（法线变了几条、最近点距多大）。
 ///
 /// 读法：结构不一致或"很多体一起漂" ⇒ 接线/参数**真差**；只有个别体且 δv 被放大
 /// ⇒ 接触在 `sep ≈ skin` 的刀刃上翻面（口径 B 的离散事件，同 §15 的投影激活）。
-fn t1_report(a: &World, b: &World) -> (String, usize) {
+pub(super) fn t1_report(a: &World, b: &World) -> (String, usize) {
     let (ma, mb) = (a.manifolds(), b.manifolds());
     let mut struct_ok = ma.len() == mb.len();
     let mut feat_ok = struct_ok;
@@ -50,7 +49,7 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
         max_dv = max_dv.max((a.bodies.linvel[i] - b.bodies.linvel[i]).length());
     }
     // 几何不符的**细分**：多少个流形、法线变了几条（⇒ 换了 SAT 轴）、以及**最近点距**有多大
-    // （⇒ 是"同一批点换了代表"（≈ 去重间距 min_sep=0.04 量级）还是"点集真不同"）。
+    // （⇒ 是"同一批点换了代表"（≈ 去重间距 min_sep 量级）还是"点集真不同"）。
     let mut n_geom_bad = 0usize;
     let mut n_norm_bad = 0usize;
     let mut max_dn = 0.0f32;
@@ -63,7 +62,6 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
         max_dn = max_dn.max(dn);
         if !geom_ok(x, y) {
             n_geom_bad += 1;
-            // 每个 CPU 点到**最近**卡上点的距离（对不上时用它判"换代表"还是"真不同"）。
             for p in x.points.iter() {
                 let near = y
                     .points
@@ -74,7 +72,6 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
             }
         }
     }
-    let n_geom = n_geom_bad;
     (
         format!(
             "流形 {} / {}（对号+点数 {}, 特征多重集 {}, **几何不符 {} 条**（法线变 {}、max|Δn| {:.2e}、最近点距 max {:.2e} m））| 动了 {} 体（>1e-7 m）| max|Δv| {:.3e} m/s",
@@ -89,11 +86,11 @@ fn t1_report(a: &World, b: &World) -> (String, usize) {
             n_moved,
             max_dv
         ),
-        n_geom,
+        n_geom_bad,
     )
 }
 
-fn yn(ok: bool) -> &'static str {
+pub(super) fn yn(ok: bool) -> &'static str {
     if ok {
         "一致 ✓"
     } else {
@@ -103,7 +100,7 @@ fn yn(ok: bool) -> &'static str {
 
 /// 逐流形的**几何**是否一致（点集双射 + 法线，容差 1e-4 m）—— 与"特征多重集"分开报，方能区分
 /// "同一接触面换了命名"（刀刃）与"真的算出不同接触"。
-fn geom_ok(x: &vxl_phys::Manifold, y: &vxl_phys::Manifold) -> bool {
+pub(super) fn geom_ok(x: &Manifold, y: &Manifold) -> bool {
     const TOL: f32 = 1e-4;
     if x.points.len() != y.points.len() || (x.normal - y.normal).length() > TOL {
         return false;
@@ -130,324 +127,9 @@ fn geom_ok(x: &vxl_phys::Manifold, y: &vxl_phys::Manifold) -> bool {
     true
 }
 
-/// 一个 tick 的判据阈值：t=1 的 `max|Δx|` 超过它就算接线错（坐标 ~5 m 的 ulp ≈ 5e-7；
-/// 本档实测残差在 ulp 量级 ⇒ 这里留 ~20× 余量）。
-const T1_MAX: f32 = 1e-5;
-const TICKS: usize = 240;
-/// **预热 tick 数**（切换档之前两条链一起空跑）：把场景推到接触密集的状态，t=1 判据才不空转。
-/// m1 档的动态体从 y≈12–40 落下 ⇒ 240 tick（4 s）足够让绝大多数落地并进入接触。
-const WARM: usize = 240;
-/// 动体下落场景的规模（静态地板 12×12 + 60 球 + 40 盒）。
-const CAP_BODIES: u32 = 512;
-const CAP_PAIRS: u32 = 1 << 15;
-/// m1 档场景的规模（10k 静态盒 + 1k 动态盒）。
-const CAP_BODIES_M1: u32 = 12_000;
-const CAP_PAIRS_M1: u32 = 1 << 20;
-
-fn cfg() -> PhysConfig {
-    PhysConfig {
-        threads: 8,
-        // ⚠️ **子步必须 = 1**：`step()` 按 `substeps` 逐个跑 `substep(dt, k == 0, reuse)`，而
-        // `detect = first || !reuse_manifolds` ⇒ 非准静态时**每个子步都重跑窄相**，于是 tick 末留在
-        // `manifolds` 里的是**最后一个子步**的表 —— 那一帧的输入已被上一子步的解算+积分推进过；
-        // 直接比它 = 比**两个不同的帧**（口径 B 的差被这一步放大成"36 条几何不符"）。
-        // 子步 = 1 ⇒ 窄相只在 tick 起点的位姿上跑一次 ⇒ 与"切档前快照"**同一帧**，判据才有定义。
-        substeps: 1,
-        ..PhysConfig::default()
-    }
-}
-
-/// m1 档场景（**与 `m1_profile 8` 同族**：10k 静态盒 + 1k 动态盒 + 平地高度场）
-/// —— 全盒族 ⇒ **回填为 0**，是"卡上档该赢"的那一档。
-fn scene_m1() -> World {
-    use vxl_phys::HeightField;
-    let mut w = World::new(cfg());
-    w.add_heightfield(HeightField::flat(-60.0, -60.0, 121, 121, 1.0, 0.0));
-    for k in 0..10_000usize {
-        let x = (k % 100) as f32 - 50.0;
-        let z = (k / 100) as f32 - 50.0;
-        w.add_static(
-            Shape::Box {
-                half: Vec3::new(0.5, 0.5, 0.5),
-            },
-            Vec3::new(x, 0.5, z),
-            Quat::IDENTITY,
-        );
-    }
-    for k in 0..1_000usize {
-        let x = ((k * 37) % 97) as f32 / 97.0 * 40.0 - 20.0;
-        let z = ((k * 53) % 89) as f32 / 89.0 * 40.0 - 20.0;
-        let y = 12.0 + ((k * 29) % 71) as f32 / 71.0 * 28.0;
-        w.add_dynamic(
-            Shape::Box {
-                half: Vec3::splat(0.4),
-            },
-            Vec3::new(x, y, z),
-            Quat::IDENTITY,
-            1000.0,
-        );
-    }
-    w
-}
-
-/// 确定性场景：静态盒地板 + 一层掉落的球 + 一层掉落且**带旋转**的盒（三条卡上族都跑到）。
-fn scene() -> World {
-    let mut w = World::new(cfg());
-    for k in 0..144 {
-        let x = (k % 12) as f32 - 6.0;
-        let z = (k / 12) as f32 - 6.0;
-        w.add_static(
-            Shape::Box {
-                half: Vec3::splat(0.5),
-            },
-            Vec3::new(x, 0.0, z),
-            Quat::IDENTITY,
-        );
-    }
-    for k in 0..60 {
-        let x = ((k * 37) % 23) as f32 * 0.35 - 4.0;
-        let z = ((k * 53) % 19) as f32 * 0.35 - 3.2;
-        let y = 2.0 + ((k * 29) % 11) as f32 * 0.25;
-        w.add_dynamic(
-            Shape::Sphere { radius: 0.4 },
-            Vec3::new(x, y, z),
-            Quat::IDENTITY,
-            1000.0,
-        );
-    }
-    let axis = Vec3::new(0.3, 1.0, 0.2).normalize();
-    for k in 0..40 {
-        let x = ((k * 41) % 17) as f32 * 0.4 - 3.2;
-        let z = ((k * 59) % 13) as f32 * 0.4 - 2.4;
-        let y = 3.0 + ((k * 31) % 9) as f32 * 0.3;
-        w.add_dynamic(
-            Shape::Box {
-                half: Vec3::splat(0.4),
-            },
-            Vec3::new(x, y, z),
-            Quat::from_axis_angle(axis, 0.1 * k as f32),
-            1000.0,
-        );
-    }
-    w
-}
-
-/// 金丝雀后端：真后端 + **清空所有 `count`**（= "卡上算出来的流形没送到求解器"）。
-struct DropAll(NarrowTier);
-
-impl NarrowTierBackend for DropAll {
-    fn narrow_run(&self, bodies: &[u32], pairs: &[u32]) -> Result<NarrowSlots, String> {
-        let mut s = self.0.narrow_run(bodies, pairs)?;
-        let n = s.words.len() / SLOT_WORDS;
-        for i in 0..n {
-            s.words[i * SLOT_WORDS + 5] = 0;
-        }
-        Ok(s)
-    }
-}
-
-/// 逐体 `max|Δx|`（两条链的体数必须相同；位姿表按体号对齐）。
-fn max_dx(a: &World, b: &World) -> f32 {
-    let mut m = 0.0f32;
-    for i in 0..a.bodies.len().min(b.bodies.len()) {
-        m = m.max((a.bodies.position[i] - b.bodies.position[i]).length());
-    }
-    m
-}
-
-/// `run_pair` 的读数：`(切换后 t=1 的 Δx, 最坏 Δx, 最坏 tick, 末态 Δx, 末态 Δv, 走势检查点,
-/// 两边窄相累计 µs)`。抽别名是 clippy 的 `type_complexity` 逼的（与流体档 `FluidSlot` 同款）。
-type Reading = (f32, f32, usize, f32, f32, Vec<(usize, f32)>, [u64; 2]);
-
-/// 跑两条链：先**同时空跑 `warm` 个 tick**（都不注册 ⇒ 必须逐位相同，顺带把场景推到"接触密集"的状态；
-/// m1 档动态体从高处落下，前 ~100 tick **没有接触** ⇒ 不预热的话 t=1 判据**空转**、金丝雀都红不了），
-/// 再给 B 注册 `tier` 并逐 tick 比。
-fn run_pair(
-    tier: Option<Box<dyn NarrowTierBackend>>,
-    label: &str,
-    big: bool,
-    warm: usize,
-    want_dump: bool,
-    adapter: usize,
-) -> Reading {
-    // 诊断用的**第二份**卡上档（`run` 只要 `&self`；正题那份要被移进 World ⇒ 不能共用）。
-    let diag = if want_dump {
-        let (cb, cp) = if big {
-            (CAP_BODIES_M1, CAP_PAIRS_M1)
-        } else {
-            (CAP_BODIES, CAP_PAIRS)
-        };
-        NarrowTier::new(adapter, cb, cp, cfg().contact_skin).ok()
-    } else {
-        None
-    };
-    let mut a = if big { scene_m1() } else { scene() };
-    let mut b = if big { scene_m1() } else { scene() };
-    assert_eq!(a.bodies.len(), b.bodies.len());
-    for _ in 0..warm {
-        a.step();
-        b.step();
-    }
-    let warm_d = max_dx(&a, &b);
-    if warm_d != 0.0 {
-        println!("     ⚠️ 预热段（都不注册）出现差异 {warm_d:.3e} ⇒ 场景/比较器有不确定性");
-    }
-    if let Some(t) = tier {
-        b.set_narrow_tier(t);
-    }
-    // 切档**之前**的状态快照（诊断用：流形是在这一刻的位姿上算的，事后读体态已推进过一步）。
-    let snap: (Vec<Vec3>, Vec<Quat>) = (
-        (0..a.bodies.len()).map(|i| a.bodies.position[i]).collect(),
-        (0..a.bodies.len()).map(|i| a.bodies.rot(i)).collect(),
-    );
-    let mut t1 = 0.0f32;
-    let mut t1_diag = String::new();
-    let mut geom_bad = 0usize;
-    let mut worst = 0.0f32;
-    let mut worst_at = 0usize;
-    let mut cps: Vec<(usize, f32)> = Vec::new();
-    for t in 1..=TICKS {
-        a.step();
-        b.step();
-        let d = max_dx(&a, &b);
-        if t == 1 {
-            t1 = d;
-            let (rdiag, gb) = t1_report(&a, &b);
-            t1_diag = rdiag;
-            geom_bad = gb;
-            // ⚠️ **必须在 t=1 当场取证**：`a.manifolds()`/`a.pairs()` 是"本 tick"的，循环结束后再去读
-            // 就是**最后一个 tick** 的（首版把取证放在循环外 ⇒ 拿"末 tick 的流形"对"首 tick 的体态"
-            // ⇒ 一组**跨 tick 的错配**，把整条排查带偏）。
-            if want_dump && !t1_diag.contains("几何不符 0 条") {
-                axes_probe(&a, &b, &snap, 1, diag.as_ref(), big);
-            }
-        }
-        if d > worst {
-            worst = d;
-            worst_at = t;
-        }
-        if TICKS.is_multiple_of(t) {
-            cps.push((t, d)); // 1/2/4/5/6/8/10/…/240：够看走势（线性 vs 随机游走）
-        }
-    }
-    let end = max_dx(&a, &b);
-    let endv = (0..a.bodies.len())
-        .map(|i| (a.bodies.linvel[i] - b.bodies.linvel[i]).length())
-        .fold(0.0f32, f32::max);
-    println!(
-        "  {label}：t=1 max|Δx| {t1:.3e} m | 最坏 {worst:.3e}（第 {worst_at} tick）| 末态 max|Δx| {end:.3e} / max|Δv| {endv:.3e}",
-    );
-    if !t1_diag.is_empty() {
-        println!("     t=1 诊断：{t1_diag}");
-    }
-    println!(
-        "     ⇒ {}",
-        if t1 <= T1_MAX {
-            format!("t=1 ≤ {T1_MAX:.0e} ⇒ **接线到位**（之后的漂移是口径 B 混沌，判读法同 §13.5）")
-        } else {
-            format!("**t=1 > {T1_MAX:.0e}**，其中几何不符 {geom_bad} 条：接线把流形送到了求解器（结构一致 ✓），但**卡上与 CPU 选了不同的接触**——小档应为 0 ⇒ 与规模/退化构型有关")
-        }
-    );
-    let us = [a.timings().narrowphase_us, b.timings().narrowphase_us];
-    (t1, worst, worst_at, end, endv, cps, us)
-}
-
-fn main() {
-    let mut adapter = 0usize;
-    let rest: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(k) = rest.iter().position(|x| x == "--adapter") {
-        adapter = rest.get(k + 1).and_then(|v| v.parse().ok()).unwrap_or(0);
-    }
-    let big = rest.iter().any(|x| x == "--m1");
-    println!("== 窄相卡上档接线 vs 默认 CPU 窄相：两条链只差「谁跑窄相」==");
-    println!(
-        "  {TICKS} tick | threads=8 | 场景 = {} | 判据 t=1 ≤ {T1_MAX:.0e} m",
-        if big {
-            "m1 档（10k 静 + 1k 动盒 + 平地 ⇒ 全盒族、回填 0）"
-        } else {
-            "小档（144 静 + 60 球 + 40 带旋转盒）"
-        }
-    );
-    let (cap_b, cap_p) = if big {
-        (CAP_BODIES_M1, CAP_PAIRS_M1)
-    } else {
-        (CAP_BODIES, CAP_PAIRS)
-    };
-    let skin = cfg().contact_skin;
-    let Ok(tier) = NarrowTier::new(adapter, cap_b, cap_p, skin) else {
-        // 无适配器 ⇒ **未判定**（别当绿；同 `gpu_narrow_probe` 的约定）。
-        println!("  ⚠️ 本机无可用适配器 ⇒ **本探针未判定**（不是通过）");
-        std::process::exit(2);
-    };
-    println!("  适配器：{}", tier.adapter());
-    // 0) **量具自检**：把复算表拿到「引擎」与「卡上」面前各对一次（不一致就先修表，别去动核）。
-    if !selftest(Some(&tier)) {
-        println!("  ⚠️ 三方不同轴 ⇒ 复算表或核有问题（上面已点名），下面的「轴」诊断只能当线索");
-    }
-    // ① 自证：两条链都**不注册** ⇒ 应当逐位相同（证明比较器本身不引入差）；同时把场景预热。
-    let (t1_self, end_self, ..) = run_pair(None, "自证（都不注册）", big, WARM, false, adapter);
-    if t1_self != 0.0 || end_self != 0.0 {
-        println!("     ⚠️ 自证不为零 ⇒ 比较器/场景有不确定性，下面的读数不可信");
-    }
-    // ② 正题：B 链注册卡上档。
-    let (t1, _, _, _, _, cps, us) = run_pair(
-        Some(Box::new(
-            NarrowTier::new(adapter, cap_b, cap_p, skin).expect("建卡上档"),
-        )),
-        "卡上档（B 注册 / A 默认）",
-        big,
-        WARM,
-        true,
-        adapter,
-    );
-    // 走势检查点：**线性增长才是接线错**（指数/饱和 = 口径 B 混沌，§13.5 的判读法）。
-    let trend: Vec<String> = cps
-        .iter()
-        .filter(|(t, _)| matches!(t, 1 | 10 | 60 | 120 | 240))
-        .map(|(t, d)| format!("t{t}={d:.2e}"))
-        .collect();
-    println!("     走势检查点：{}", trend.join(" | "));
-    println!(
-        "     窄相累计（{TICKS} tick）：默认 {:.3} ms（{:.3} ms/tick）| 卡上档（含回填+装配）{:.3} ms（{:.3} ms/tick）⇒ {}",
-        us[0] as f64 / 1e3,
-        us[0] as f64 / 1e3 / TICKS as f64,
-        us[1] as f64 / 1e3,
-        us[1] as f64 / 1e3 / TICKS as f64,
-        if us[1] < us[0] {
-            "**卡上档更快**"
-        } else {
-            "**这一档规模下卡上更慢**（往返固定开销主导）"
-        }
-    );
-    // ③ 金丝雀：清空 count ⇒ 判据必须变红。
-    let (t1c, ..) = run_pair(
-        Some(Box::new(DropAll(
-            NarrowTier::new(adapter, cap_b, cap_p, skin).expect("建卡上档"),
-        ))),
-        "金丝雀（清空 count）",
-        big,
-        WARM,
-        false,
-        adapter,
-    );
-    println!(
-        "  裁决：{}\n    （t=1：正题 {t1:.3e} / 金丝雀 {t1c:.3e} ⇒ {}）",
-        if t1 <= T1_MAX && t1c > T1_MAX {
-            "**接线成立 ✓**（正题过、金丝雀如期红）"
-        } else {
-            "**未通过 ✗**（正题超阈 或 金丝雀没红 = 判据无分辨力）"
-        },
-        if t1c > T1_MAX {
-            "金丝雀如期变红 ✓"
-        } else {
-            "**金丝雀没红 ✗**"
-        }
-    );
-}
-
 /// **量具自检**（先证明复算表可信，再用它判案）：手算得清的盒对，比对「复算表 #0」/「**引擎自己**的
 /// 单对 `collide`」/「卡上隔离」三方选中的轴 ⇒ 全一致才拿复算表去判案，有分歧就**先修表**。
-fn selftest(tier: Option<&NarrowTier>) -> bool {
+pub(super) fn selftest(tier: Option<&NarrowTier>) -> bool {
     type Case<'a> = (&'a str, [f32; 3], f32, [f32; 3], f32, [f32; 4]);
     let cases: [Case; 2] = [
         (
@@ -549,9 +231,10 @@ fn selftest(tier: Option<&NarrowTier>) -> bool {
     all_ok
 }
 
-/// **卡上把这一对放在指定体号上**（`ia`/`ib`）：补占位体到该下标再放真身 ⇒ 实测与 `(0,1)` 隔离逐位相同（§17.9 补记七）。
+/// **卡上把这一对放在指定体号上**（`ia`/`ib`）：补占位体到该下标再放真身 ⇒ 实测与 `(0,1)` 隔离逐位
+/// 相同（§17.9 补记七）。
 #[allow(clippy::too_many_arguments)] // 一对盒 = 位置/姿态/半长 ×2 + 体号 ×2
-fn card_on_bodies(
+pub(super) fn card_on_bodies(
     t: &NarrowTier,
     pa: Vec3,
     ra: Quat,
@@ -588,8 +271,7 @@ fn card_on_bodies(
 }
 
 /// **卡上**对**这一对**（给定帧）的答案 = `(法线, 点数)`：建一个 2 体世界 → 打包 → 卡上跑一趟。
-/// 与 `engine_pair_normal` 配对，就是"同一对、同一帧：引擎 vs 卡上"的最小对照。
-fn card_pair_normal(
+pub(super) fn card_pair_normal(
     t: &NarrowTier,
     pa: Vec3,
     ra: Quat,
@@ -601,8 +283,16 @@ fn card_pair_normal(
     card_on_bodies(t, pa, ra, ha, pb, rb, hb, 0, 1)
 }
 
-/// **前缀二分（最小形态）**：同一对 `(0,1)` 只变对表长度 m，每次读最后一个槽 ⇒ 答案与列表长度无关（m=1…4096 全对）。
-fn prefix_bisect(t: &NarrowTier, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) {
+/// **前缀二分（最小形态）**：同一对 `(0,1)` 只变对表长度 m，每次读最后一个槽 ⇒ 答案应与列表长度无关。
+pub(super) fn prefix_bisect(
+    t: &NarrowTier,
+    pa: Vec3,
+    ra: Quat,
+    ha: Vec3,
+    pb: Vec3,
+    rb: Quat,
+    hb: Vec3,
+) {
     let want = axes_host(pa, ra, ha, pb, rb, hb)[0].1; // 正确方向 = 复算表 #0
     let mut w = World::new(cfg());
     w.add_static(Shape::Box { half: ha }, pa, ra);
@@ -624,13 +314,13 @@ fn prefix_bisect(t: &NarrowTier, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Qua
 }
 
 /// 对**几何不符**的前几对做**轴取证**：点名（双方选中的轴排第几 + sep）、前缀二分、隔离对照。
-fn axes_probe(
+pub(super) fn axes_probe(
     a: &World,
     b: &World,
     snap: &(Vec<Vec3>, Vec<Quat>),
     max_n: usize,
     tier: Option<&NarrowTier>,
-    big: bool,
+    mult: usize,
 ) {
     let (ma, mb) = (a.manifolds(), b.manifolds());
     let mut shown = 0usize;
@@ -694,7 +384,7 @@ fn axes_probe(
             println!("          ⌗ 真索引({}, {})：{}", x.a, x.b, one(x.a, x.b));
             // ③ **真实对表复现**：把世界重建到**快照体态** + 用**本 tick 的真对表**喂卡上 = 复刻那一趟的调用。
             // 它若复现全量跑的答案 ⇒ 差异就在"对的列表/其它体"；若给 #0 ⇒ 输入还有别的不同。
-            let mut w3 = if big { scene_m1() } else { scene() };
+            let mut w3 = if mult > 0 { scene_m1(mult) } else { scene() };
             for (i, (p, r)) in snap.0.iter().zip(snap.1.iter()).enumerate() {
                 w3.bodies.position[i] = *p;
                 w3.bodies.set_rot(i, *r);
@@ -714,7 +404,11 @@ fn axes_probe(
                         [nv.x, nv.y, nv.z],
                         s.count(),
                         nv.dot(table[0].1),
-                        if nv.dot(y.normal) > 0.9999 { " 复现✓" } else { "" }
+                        if nv.dot(y.normal) > 0.9999 {
+                            " 复现✓"
+                        } else {
+                            ""
+                        }
                     );
                 }
                 Err(e) => println!("          ⌗ 真对表复现：跑不通（{e}）"),
@@ -727,8 +421,9 @@ fn axes_probe(
     }
 }
 
-/// **主机侧复算**该对的 21 条分离轴（镜像 `sat.rs::build_axes` + 标量 sep），返回按 `sep` 降序的 `(sep, n, 轴类)`。
-fn axes_host(
+/// **主机侧复算**该对的 21 条分离轴（镜像 `sat.rs::build_axes` + 标量 sep），返回按 `sep` 降序的
+/// `(sep, n, 轴类)`。
+pub(super) fn axes_host(
     pa: Vec3,
     ra: Quat,
     ha: Vec3,

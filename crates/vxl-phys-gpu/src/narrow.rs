@@ -35,6 +35,56 @@ pub const DIAG_WORDS: usize = 2;
 /// 护栏：体数/对数上限（超了直接报错，让调用方回退 CPU）。
 const MAX_ITEMS: u32 = 1 << 22;
 
+/// **卡上档的分项计时**（诊断；`PLAN-gpu.md` §17.10 补记）。
+///
+/// 为什么要**进程级**而不是放进 `NarrowTier`：门面把档 `Box<dyn Trait>` 移进了 `World`，探针拿不到
+/// 那个对象 ⇒ 只有在卡上档内部累加、任何探针都能读，才能把"World 路径比直调慢 2 ms"这件事拆开。
+/// 代价：每趟 8 次 `fetch_add`（~100 ns），相对 ms 级分项可忽略。
+///
+/// 索引含义：`[0]` 变动打包(idx/rec) `[1]` 两次 `write_buffer` `[2]` 参数/对表写
+/// `[3]` 编码+提交 `[4]` `map_async`+`poll(Wait)`（含等 GPU）`[5]` 取映射+解码 `[6]` `flatten`
+/// `[7]` 调用次数。
+pub mod prof {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub static W: [AtomicU64; 8] = [
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+        AtomicU64::new(0),
+    ];
+
+    /// 累加一项（µs）。
+    pub fn add(i: usize, us: u64) {
+        W[i].fetch_add(us, Ordering::Relaxed);
+    }
+
+    /// 读一项（µs）。
+    pub fn us(i: usize) -> u64 {
+        W[i].load(Ordering::Relaxed)
+    }
+
+    /// 清零（探针在量某一条链**之前**调）。
+    pub fn reset() {
+        for a in &W {
+            a.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// 分项计时的**读数**（`prof` 的 8 项，µs）。
+pub fn prof_snapshot() -> [u64; 8] {
+    let mut o = [0u64; 8];
+    for (i, v) in o.iter_mut().enumerate() {
+        *v = prof::us(i);
+    }
+    o
+}
+
 /// 逐对槽（主机侧视图 = 卡上 26 字的**逐字镜像** ⇒ 比较与装配都在同一份数据上做）。
 #[derive(Clone, Copy, Debug)]
 pub struct Slot {
@@ -312,6 +362,7 @@ impl NarrowTier {
             return Ok(());
         }
         // 打包成两段**连续**数据：`idx`（体号）与 `rec`（12 字/条）⇒ 两次 `write_buffer`。
+        let t0 = std::time::Instant::now();
         let mut idx: Vec<u8> = Vec::with_capacity(changed.len() * 4);
         let mut rec: Vec<u8> = Vec::with_capacity(changed.len() * BODY_WORDS * 4);
         for &i in changed {
@@ -319,8 +370,12 @@ impl NarrowTier {
             let a = (i as usize) * BODY_WORDS;
             rec.extend_from_slice(&words_to_bytes(&bodies[a..a + BODY_WORDS]));
         }
+        let d = t0.elapsed().as_micros() as u64;
+        prof::add(0, d);
+        let t1 = std::time::Instant::now();
         self.queue.write_buffer(&self.bufs.upd_idx, 0, &idx);
         self.queue.write_buffer(&self.bufs.upd_rec, 0, &rec);
+        prof::add(1, t1.elapsed().as_micros() as u64);
         self.resident_upd
             .store(changed.len() as u32, std::sync::atomic::Ordering::Relaxed);
         self.resident_n
@@ -380,8 +435,12 @@ impl NarrowTier {
             self.queue
                 .write_buffer(&self.bufs.bodies, 0, &words_to_bytes(b));
         }
+        let t_prm = std::time::Instant::now();
         self.queue
             .write_buffer(&self.bufs.pairs, 0, &words_to_bytes(pairs));
+        prof::add(2, t_prm.elapsed().as_micros() as u64);
+        prof::add(7, 1); // 趟数（每趟 `run_common` 记 1 ⇒ 读数分项都是"每趟均值"）
+        let t_enc = std::time::Instant::now();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -409,6 +468,24 @@ impl NarrowTier {
             cp.set_bind_group(0, &self.bg, &[]);
             cp.dispatch_workgroups(n_pairs.div_ceil(WG).max(1), 1, 1);
         }
+        prof::add(3, t_enc.elapsed().as_micros() as u64);
+        let (out, diag) = self.finish(enc, n_pairs);
+        Ok(NarrowRun { slots: out, diag })
+    }
+
+    /// **收尾一趟**：`slots → rb` 拷贝 + `diag` 拷贝 + 提交 + `map_async` + `poll(Wait)` + 解码。
+    ///
+    /// 单独成函数有两个理由：① 尺寸门（`run_common` 曾 129 行 > 120）；② 这一段的**每一项**都是
+    /// 分项计时（`prof`）的对象——"提交/等"与"解码"拆开后才能各归各的账（§17.10 补记的实测：
+    /// 这一档每趟代价的 70–88% 就在 `提交+映射+等`，不是算、不是带宽、不是解码）。
+    ///
+    /// **解码走一次过**：逐字 `data[o]`、`data[o+1]`… 的取法实测慢一倍（m1 档 0.124 → 0.061 ms，
+    /// m4 档 1.09 → 0.50 ms；输出字表**逐位相同**，见 `gpu_narrow_up_probe` 的 ⑨/⑩）。
+    fn finish(
+        &self,
+        mut enc: wgpu::CommandEncoder,
+        n_pairs: u32,
+    ) -> (Vec<Slot>, [u32; DIAG_WORDS]) {
         let used = (n_pairs as u64) * (SLOT_BYTES as u64);
         let diag_at = used;
         if used > 0 {
@@ -421,6 +498,7 @@ impl NarrowTier {
             diag_at,
             (DIAG_WORDS as u64) * 4,
         );
+        let t_wait = std::time::Instant::now();
         self.queue.submit(Some(enc.finish()));
         let slice = self.bufs.rb.slice(..used + (DIAG_WORDS as u64) * 4);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -434,18 +512,20 @@ impl NarrowTier {
             })
             .ok();
         rx.recv().ok();
+        prof::add(4, t_wait.elapsed().as_micros() as u64);
+        let t_dec = std::time::Instant::now();
         let data = slice.get_mapped_range();
-        let out = (0..n_pairs as usize)
-            .map(|i| {
-                let b = i * SLOT_BYTES;
-                let mut words = [0u32; SLOT_WORDS];
-                for (k, w) in words.iter_mut().enumerate() {
-                    let o = b + k * 4;
-                    *w = u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
-                }
-                Slot { words }
-            })
-            .collect();
+        let mut out: Vec<Slot> = Vec::with_capacity(n_pairs as usize);
+        let mut words_it = data[..(n_pairs as usize) * SLOT_BYTES].chunks_exact(4);
+        for _ in 0..n_pairs {
+            let mut words = [0u32; SLOT_WORDS];
+            for w in words.iter_mut() {
+                // `chunks_exact(4)` 已保证每块 4 字节 ⇒ 这里的 `expect` 不会触发（不留 panic 面）。
+                let c = words_it.next().expect("chunks_exact 每块 4 字节");
+                *w = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            }
+            out.push(Slot { words });
+        }
         let rd = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
         let mut diag = [0u32; DIAG_WORDS];
         for (k, d) in diag.iter_mut().enumerate() {
@@ -453,7 +533,8 @@ impl NarrowTier {
         }
         drop(data);
         self.bufs.rb.unmap();
-        Ok(NarrowRun { slots: out, diag })
+        prof::add(5, t_dec.elapsed().as_micros() as u64);
+        (out, diag)
     }
 }
 
@@ -484,12 +565,15 @@ impl vxl_phys_core::narrow_tier::NarrowTierBackend for NarrowTier {
 
 /// 逐槽 → 裸字表（门面只认字）。
 fn flatten(r: NarrowRun) -> vxl_phys_core::narrow_tier::NarrowSlots {
+    let t = std::time::Instant::now();
     let mut words = Vec::with_capacity(r.slots.len() * SLOT_WORDS);
     for s in &r.slots {
         words.extend_from_slice(&s.words);
     }
-    vxl_phys_core::narrow_tier::NarrowSlots {
+    let out = vxl_phys_core::narrow_tier::NarrowSlots {
         words,
         diag: r.diag,
-    }
+    };
+    prof::add(6, t.elapsed().as_micros() as u64);
+    out
 }
