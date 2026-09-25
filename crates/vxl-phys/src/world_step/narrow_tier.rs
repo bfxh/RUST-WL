@@ -60,6 +60,11 @@ impl World {
         self.narrow.tier.is_some()
     }
 
+    /// 本 tick 的对表（诊断用：卡上档那一趟的输入就是这个列表）。
+    pub fn pairs(&self) -> &[(u32, u32)] {
+        &self.pairs
+    }
+
     /// **卡上窄相一趟**：返回 `true` = `self.manifolds` 已由卡上档填好；`false` = 调用方走 CPU 路径。
     ///
     /// `predict_dt` = 本次检测趟本要传给 CPU 窄相的预测时长（见 `set_predict_dt`）：非 0 就让位
@@ -74,6 +79,7 @@ impl World {
             return false;
         };
         let packed = vxl_phys_core::narrow_tier::pack_bodies(&self.bodies);
+        dump_words_if_asked(&packed, pairs, self.tick);
         let flat = vxl_phys_core::narrow_tier::flat_pairs(pairs);
         let slots = match tier.narrow_run(&packed, &flat) {
             Ok(s) => s,
@@ -141,4 +147,38 @@ fn manifold_of_slot(sl: &vxl_phys_core::narrow_tier::NarrowSlots, i: usize) -> M
         normal: Vec3::new(n[0], n[1], n[2]),
         points: vxl_phys_narrow::ContactPoints::from_slice(&buf[..cnt]),
     }
+}
+
+/// **一次性诊断**（默认关，生产路径零开销）：`VXL_NARROW_DUMP=<a>:<b>:<tick>` ⇒ 在那一趟里，
+/// 把**本趟真正打包给卡上**的那两个体的位姿/半长打出来。用途（§17.9 补记六的下一步）：与探针
+/// **按快照重建**的那份**逐字对拍** ⇒ 区分"问题在核读表"还是"问题在打包那一刻的体态（帧）"。
+fn dump_words_if_asked(packed: &[u32], pairs: &[(u32, u32)], tick: u64) {
+    const W: usize = vxl_phys_core::narrow_tier::BODY_WORDS;
+    let Ok(v) = std::env::var("VXL_NARROW_DUMP") else {
+        return;
+    };
+    let mut it = v.split(':');
+    let (x, y, t) = (it.next(), it.next(), it.next());
+    let (Some(a), Some(b), Some(t0)) = (
+        x.and_then(|s| s.parse::<u32>().ok()),
+        y.and_then(|s| s.parse::<u32>().ok()),
+        t.and_then(|s| s.parse::<u64>().ok()),
+    ) else {
+        return;
+    };
+    if tick != t0 || !pairs.contains(&(a, b)) {
+        return;
+    }
+    let f = |i: usize, k: usize| f32::from_bits(packed[i * W + k]);
+    let p3 = |i: usize, k: usize| [f(i, k), f(i, k + 1), f(i, k + 2)];
+    let q4 = |i: usize, k: usize| [f(i, k), f(i, k + 1), f(i, k + 2), f(i, k + 3)];
+    eprintln!(
+        "NARROW_DUMP tick={tick} 对({a},{b})：a.pos={:?} a.rot={:?} a.half={:?} | b.pos={:?} b.rot={:?} b.half={:?}",
+        p3(a as usize, 0),
+        q4(a as usize, 3),
+        p3(a as usize, 8),
+        p3(b as usize, 0),
+        q4(b as usize, 3),
+        p3(b as usize, 8),
+    );
 }

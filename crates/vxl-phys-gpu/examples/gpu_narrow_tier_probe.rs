@@ -301,9 +301,15 @@ fn run_pair(
         let d = max_dx(&a, &b);
         if t == 1 {
             t1 = d;
-            let (diag, gb) = t1_report(&a, &b);
-            t1_diag = diag;
+            let (rdiag, gb) = t1_report(&a, &b);
+            t1_diag = rdiag;
             geom_bad = gb;
+            // ⚠️ **必须在 t=1 当场取证**：`a.manifolds()`/`a.pairs()` 是"本 tick"的，循环结束后再去读
+            // 就是**最后一个 tick** 的（首版把取证放在循环外 ⇒ 拿"末 tick 的流形"对"首 tick 的体态"
+            // ⇒ 一组**跨 tick 的错配**，把整条排查带偏）。
+            if want_dump && !t1_diag.contains("几何不符 0 条") {
+                axes_probe(&a, &b, &snap, 1, diag.as_ref(), big);
+            }
         }
         if d > worst {
             worst = d;
@@ -322,9 +328,6 @@ fn run_pair(
     );
     if !t1_diag.is_empty() {
         println!("     t=1 诊断：{t1_diag}");
-        if want_dump && !t1_diag.contains("几何不符 0 条") {
-            axes_probe(&a, &b, &snap, 1, diag.as_ref());
-        }
     }
     println!(
         "     ⇒ {}",
@@ -535,6 +538,45 @@ fn selftest(tier: Option<&NarrowTier>) -> bool {
     all_ok
 }
 
+/// **卡上把这一对放在指定体号上**（`ia`/`ib`）的答案：先补占位体到该下标，再放真身 ⇒ 测"答案是否与
+/// **体号/表规模**有关"（§17.9 补记七：实测与 `(0,1)` 隔离逐位相同 ⇒ 无关）。
+#[allow(clippy::too_many_arguments)] // 一对盒 = 位置/姿态/半长 ×2 + 体号 ×2
+fn card_on_bodies(
+    t: &NarrowTier,
+    pa: Vec3,
+    ra: Quat,
+    ha: Vec3,
+    pb: Vec3,
+    rb: Quat,
+    hb: Vec3,
+    ia: u32,
+    ib: u32,
+) -> Option<(Vec3, u32)> {
+    let mut w = World::new(cfg());
+    let pad = |w: &mut World, n: u32| {
+        for k in 0..n {
+            w.add_static(
+                Shape::Box {
+                    half: Vec3::splat(0.01),
+                },
+                Vec3::new(0.0, -1000.0 - k as f32, 0.0),
+                Quat::IDENTITY,
+            );
+        }
+    };
+    pad(&mut w, ia);
+    w.add_static(Shape::Box { half: ha }, pa, ra);
+    pad(&mut w, ib - ia - 1);
+    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
+    assert_eq!(w.bodies.len() as u32, ib + 1, "占位体没补齐到指定体号");
+    let packed = vxl_phys_core::narrow_tier::pack_bodies(&w.bodies);
+    let flat = vxl_phys_core::narrow_tier::flat_pairs(&[(ia, ib)]);
+    let r = t.run(&packed, &flat).ok()?;
+    let s = &r.slots[0];
+    let n = s.normal();
+    Some((Vec3::new(n[0], n[1], n[2]), s.count()))
+}
+
 /// **卡上**对**这一对**（给定帧）的答案 = `(法线, 点数)`：建一个 2 体世界 → 打包 → 卡上跑一趟。
 /// 与 `engine_pair_normal` 配对，就是"同一对、同一帧：引擎 vs 卡上"的最小对照。
 fn card_pair_normal(
@@ -546,39 +588,12 @@ fn card_pair_normal(
     rb: Quat,
     hb: Vec3,
 ) -> Option<(Vec3, u32)> {
-    let mut w = World::new(cfg());
-    w.add_static(Shape::Box { half: ha }, pa, ra);
-    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
-    let packed = vxl_phys_core::narrow_tier::pack_bodies(&w.bodies);
-    let flat = vxl_phys_core::narrow_tier::flat_pairs(&[(0, 1)]);
-    let r = t.run(&packed, &flat).ok()?;
-    let s = &r.slots[0];
-    let n = s.normal();
-    Some((Vec3::new(n[0], n[1], n[2]), s.count()))
-}
-
-/// **引擎自己**对**单对**盒的答案（法线）：建一个两体世界跑一次 `collide` ⇒ 与全量跑同一条代码路径。
-/// 用来做"同一帧证明"：哪一帧的体态能复现全量跑的流形，就说明全量跑窄相看的是那一帧。
-fn engine_pair_normal(pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) -> Option<Vec3> {
-    let mut w = World::new(cfg());
-    w.add_static(Shape::Box { half: ha }, pa, ra);
-    w.add_dynamic(Shape::Box { half: hb }, pb, rb, 1000.0);
-    let mut out = Vec::new();
-    w.narrow.collide(
-        &w.bodies,
-        &[(0, 1)],
-        &[],
-        &vxl_phys_core::interop::NoProviders,
-        &mut out,
-        &vxl_phys_core::schedule::SerialJobSystem,
-    );
-    out.first().map(|m| m.normal)
+    card_on_bodies(t, pa, ra, ha, pb, rb, hb, 0, 1)
 }
 
 /// **前缀二分（最小形态）**：同一个两体世界、**同一对 (0,1)**，只让**对表长度 m**（因而目标对的**槽位号
-/// m−1**）变 —— 每次读**最后一个槽**的答案。判读（§17.9 补记五）：
-/// **答案随 m 变 ⇒ ①卡上对"这一对"不是纯函数**（与容器无关的另一路干扰）；**恒定 = 隔离值 ⇒ ②
-/// 全量跑喂进去的输入与隔离不同**（矛头转向打包/读表）。
+/// m−1**）变 —— 每次读**最后一个槽**的答案。判读：答案随 m 变 ⇒ 卡上依赖批次位置；恒定 ⇒ 不依赖
+/// （实测 m=1…4096 全对 ⇒ **与列表长度无关**，§17.9 补记六）。
 fn prefix_bisect(t: &NarrowTier, pa: Vec3, ra: Quat, ha: Vec3, pb: Vec3, rb: Quat, hb: Vec3) {
     let want = axes_host(pa, ra, ha, pb, rb, hb)[0].1; // 正确方向 = 复算表 #0
     let mut w = World::new(cfg());
@@ -607,6 +622,7 @@ fn axes_probe(
     snap: &(Vec<Vec3>, Vec<Quat>),
     max_n: usize,
     tier: Option<&NarrowTier>,
+    big: bool,
 ) {
     let (ma, mb) = (a.manifolds(), b.manifolds());
     let mut shown = 0usize;
@@ -624,8 +640,8 @@ fn axes_probe(
             "       ⌖ 对 ({}, {})：a={:?} | b={:?}",
             x.a,
             x.b,
-            (pa, ha),
-            (pb, hb)
+            (pa, ra, ha),
+            (pb, rb, hb)
         );
         let table = axes_host(pa, ra, ha, pb, rb, hb);
         // **点名**：双方各自选中的那条在表里排第几、它的 sep 多少（近平行轴时"top-5 里找"会一起命中）。
@@ -652,65 +668,53 @@ fn axes_probe(
         if let Some(t) = tier {
             prefix_bisect(t, pa, ra, ha, pb, rb, hb);
         }
-        // **同一帧证明**：把这一对分别按「切档前快照」与「事后（tick 末）体态」各喂一次**引擎自己**的
-        // 单对 `collide`，看哪一帧能复现全量跑里 CPU 那条流形 —— 这决定"两边比的是不是同一帧"。
-        let (pa2, pb2) = (
-            a.bodies.position[x.a as usize],
-            a.bodies.position[x.b as usize],
-        );
-        let (ra2, rb2) = (a.bodies.rot(x.a as usize), a.bodies.rot(x.b as usize));
-        println!(
-            "          ⌗ 同一帧证明：全量 CPU n={:?} | 全量卡上 n={:?}",
-            [x.normal.x, x.normal.y, x.normal.z],
-            [y.normal.x, y.normal.y, y.normal.z]
-        );
-        for (tag, qa, qb, ppos) in [
-            ("切档前快照", (ra, rb), (pa, pb), 0u8),
-            ("事后(tick末)", (ra2, rb2), (pa2, pb2), 1),
-        ] {
-            let _ = ppos;
-            match engine_pair_normal(qb.0, qa.0, ha, qb.1, qa.1, hb) {
-                Some(n) => println!(
-                    "             {tag}：引擎单对 n={:?}{}{}",
-                    [n.x, n.y, n.z],
-                    if n.dot(x.normal) > 0.999 {
-                        " =全量CPU ✓"
-                    } else {
-                        ""
-                    },
-                    if n.dot(y.normal) > 0.999 {
-                        " =全量卡上 ✓"
-                    } else {
-                        ""
-                    }
-                ),
-                None => println!("             {tag}：引擎单对=无接触"),
+        // **隔离 / 真索引对照**：同一份记录喂两次卡上 —— ① 放在 (0,1)（两体世界）；
+        // ② 放在**真实体号**（补齐到该下标的占位体表）。两次答案不同 ⇒ 问题在"核按体号取记录"
+        // （索引/表规模），与几何无关；相同 ⇒ 索引无关，剩下的只有"真实对表的其它内容/其它体"。
+        if let Some(t) = tier {
+            let one = |ia: u32, ib: u32| -> String {
+                match card_on_bodies(t, pa, ra, ha, pb, rb, hb, ia, ib) {
+                    Some((n, c)) => format!(
+                        "n={:?}(c{c}) n·#0={:+.5}",
+                        [n.x, n.y, n.z],
+                        n.dot(table[0].1)
+                    ),
+                    None => "跑不通".into(),
+                }
+            };
+            println!("          ⌗ 隔离(0,1)：{}", one(0, 1));
+            println!("          ⌗ 真索引({}, {})：{}", x.a, x.b, one(x.a, x.b));
+            // ③ **真实对表复现**：把世界重建到**快照体态** + 用**本 tick 的真对表**喂卡上 = 复刻那一趟的调用。
+            // 它若复现全量跑的答案 ⇒ 差异就在"对的列表/其它体"；若给 #0 ⇒ 输入还有别的不同。
+            let mut w3 = if big { scene_m1() } else { scene() };
+            for i in 0..w3.bodies.len() {
+                w3.bodies.position[i] = snap.0[i];
+                w3.bodies.set_rot(i, snap.1[i]);
             }
-            // **卡上也是同一对**：隔离跑一次卡上档 ⇒ 若它在隔离下选 #0（与引擎一致）而全量跑选 #3，
-            // 说明卡上的答案依赖"这一对在批次里的位置/邻居"，不是这一对本身的几何问题。
-            if let Some(t) = tier {
-                let mut w2 = World::new(cfg());
-                w2.add_static(Shape::Box { half: ha }, qb.0, qa.0);
-                w2.add_dynamic(Shape::Box { half: hb }, qb.1, qa.1, 1000.0);
-                let packed = vxl_phys_core::narrow_tier::pack_bodies(&w2.bodies);
-                let flat = vxl_phys_core::narrow_tier::flat_pairs(&[(0, 1)]);
-                if let Ok(r) = t.run(&packed, &flat) {
-                    let s = &r.slots[0];
+            let pr = a.pairs();
+            let ti = pr.iter().position(|p| *p == (x.a, x.b)).unwrap_or(0);
+            let packed3 = vxl_phys_core::narrow_tier::pack_bodies(&w3.bodies);
+            let flat3 = vxl_phys_core::narrow_tier::flat_pairs(pr);
+            match t.run(&packed3, &flat3) {
+                Ok(r) => {
+                    let s = &r.slots[ti];
                     let n = s.normal();
                     let nv = Vec3::new(n[0], n[1], n[2]);
-                    let n_tab = table[0].1;
                     println!(
-                        "             {tag}：**卡上隔离** n={:?}（count {}）| 与表#0 n·={:+.5}{}",
+                        "          ⌗ 真对表复现（{} 对，目标第 {} 位）：n={:?}(c{}) n·#0={:+.5}{}",
+                        pr.len(),
+                        ti,
                         [nv.x, nv.y, nv.z],
                         s.count(),
-                        nv.dot(n_tab),
-                        if nv.dot(n_tab) > 0.999 {
-                            " =表#0 ✓"
+                        nv.dot(table[0].1),
+                        if nv.dot(y.normal) > 0.9999 {
+                            " =全量卡上 ✓（复现）"
                         } else {
-                            " **≠表#0 ✗**"
+                            ""
                         }
                     );
                 }
+                Err(e) => println!("          ⌗ 真对表复现：跑不通（{e}）"),
             }
         }
         shown += 1;
