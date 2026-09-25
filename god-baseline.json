@@ -334,6 +334,11 @@
   "max_fn_lines": 66,
   "max_type_members": 8
  },
+ "crates/vxl-phys-gpu/examples/gpu_reorder_probe.rs": {
+  "file_lines": 495,
+  "max_fn_lines": 89,
+  "max_type_members": 10
+ },
  "crates/vxl-phys-gpu/examples/gpu_tick_probe.rs": {
   "file_lines": 605,
   "max_fn_lines": 86,
