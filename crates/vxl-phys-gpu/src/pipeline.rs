@@ -635,7 +635,15 @@ impl Packet {
         substeps: usize,
         tick_readback: bool,
     ) -> TickMs {
-        self.run_stages(cfg, 0b111_1111, ticks, substeps, tick_readback)
+        self.run_stages(cfg, 0b111_1111, ticks, substeps, tick_readback, false)
+    }
+
+    /// **管线档回读**（`PLAN-gpu` §19.1 ③）：同 `run(.., tick_readback = true)`，但**只发起不等待**
+    /// ——末子步的 `copy_buffer_to_buffer` + `submit` 发出去就返回，**不调 `poll_wait`**（含末尾那次）；
+    /// 宿主在真要读之前调 `readback_pending_wait()` 一次等完 ⇒ **回读的等待与下一 tick 的计算重叠**
+    /// （渲染/耦合用"上一帧状态"是行业惯例）。默认档走 `run`（同步）⇒ 判据与哈希不受影响。
+    pub fn run_deferred(&mut self, cfg: &PacketCfg, ticks: usize, substeps: usize) -> TickMs {
+        self.run_stages(cfg, 0b111_1111, ticks, substeps, true, true)
     }
 
     /// **消融计时**（诊断）：只跑 `stages` 打开的相位，返回每 tick 毫秒。
@@ -648,8 +656,9 @@ impl Packet {
         ticks: usize,
         substeps: usize,
         tick_readback: bool,
+        defer: bool,
     ) -> TickMs {
-        self.run_stages_with(cfg, stages, ticks, substeps, tick_readback, None)
+        self.run_stages_with(cfg, stages, ticks, substeps, tick_readback, None, defer)
     }
 
     /// **跑一个子步**（`dt_sub` 由调用方给；`cfg.recompute_box` 时先刷箱子）——给"**逐子步**喂表/换档"
@@ -684,6 +693,8 @@ impl Packet {
         substeps: usize,
         tick_readback: bool,
         walls: Option<&WallStage>,
+        // 只发起回读不等待（`run_deferred` 传 true；见该方法注）。
+        defer: bool,
     ) -> TickMs {
         let dt_tick = 1.0 / 60.0;
         let dt_sub = dt_tick / substeps as f32;
@@ -713,7 +724,7 @@ impl Packet {
                     }
                     self.queue.submit(Some(enc.finish()));
                 }
-                if tick_readback {
+                if tick_readback && !defer {
                     self.poll_wait().ok();
                 }
                 continue;
@@ -734,14 +745,24 @@ impl Packet {
                 );
             }
             self.queue.submit(Some(enc.finish()));
-            if tick_readback {
+            if tick_readback && !defer {
                 self.poll_wait().ok();
             }
         }
-        self.poll_wait().ok();
+        if !defer {
+            self.poll_wait().ok();
+        }
         out.total = (t0.elapsed().as_secs_f64() * 1e3) as f32;
         out.per_tick = out.total / ticks.max(1) as f32;
         out
+    }
+
+    /// **回读的"延迟等待"**（`PLAN-gpu` §19.1 ③ 的原语）：配合 `run_deferred(..)` 使用时，那次调用
+    /// 只**发起**（末子步拷贝 + `submit`）就返回、不阻塞；宿主在**真要读之前**（下一 tick 的计算
+    /// 已发出之后）调本方法把待完成的 GPU 工作一次等完 ⇒ **回读的等待与下一 tick 的计算重叠**
+    /// （渲染/耦合用"上一帧状态"是行业惯例）。默认档走 `run`（同步）⇒ 不涉及本方法。
+    pub fn readback_pending_wait(&self) {
+        self.poll_wait().ok();
     }
 
     pub(crate) fn poll_wait(&self) -> Result<wgpu::PollStatus, wgpu::PollError> {

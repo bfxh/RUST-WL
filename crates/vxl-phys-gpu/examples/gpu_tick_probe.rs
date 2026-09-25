@@ -78,6 +78,9 @@ struct Args {
     /// 常驻测试 `parallel_equals_serial_bitwise` 已证两者**逐位相同** ⇒ 判据不受影响，
     /// 但千万粒档的 CPU 对照从"十几分钟"降到"一两分钟"（大档验收的前提）。
     cpu_threads: usize,
+    /// `--pipe`：**管线档**回读演示（`PLAN-gpu` §19.1 ③）——`defer_readback` 只发起不等待，
+    /// 每 tick 等一下 tick 之前的回读 ⇒ 量与"回读等待被下一 tick 的计算遮住"能省多少。
+    pipe: bool,
 }
 
 fn parse_args() -> Args {
@@ -102,6 +105,7 @@ fn parse_args() -> Args {
             .and_then(|k| rest.get(k + 1))
             .and_then(|v| v.parse().ok())
             .unwrap_or(1),
+        pipe: rest.iter().any(|a| a == "--pipe"),
     }
 }
 
@@ -341,7 +345,13 @@ struct GpuTiming {
 ///       在大档是分钟级：10M 一趟 ≈230 ms ⇒ 100×3 = 70 s 起步，再加回读与快照更多）；
 ///    ② **每次计时前必须 `restore` 到同一状态**——计时本身会推进流体（剪切压实 ⇒ 邻域候选
 ///       变多），不还原就会把"状态演化"混进"相位成本"（实测：同一全链先后差 3×）。
-fn time_gpu(pk: &mut Packet, pc: &PacketCfg, ticks: usize, substeps: usize) -> GpuTiming {
+fn time_gpu(
+    pk: &mut Packet,
+    pc: &PacketCfg,
+    ticks: usize,
+    substeps: usize,
+    pipe: bool,
+) -> GpuTiming {
     let _ = pk.run(pc, 2, substeps, false);
     // 下限按规模让路（见函数注①）：大档 20 趟，小档维持 100 趟（口径按实际趟数打印）。
     let gpu_ticks = ticks.max(if pc.n > 2_000_000 { 20 } else { 100 });
@@ -371,7 +381,9 @@ fn time_gpu(pk: &mut Packet, pc: &PacketCfg, ticks: usize, substeps: usize) -> G
         let mut best = f32::INFINITY;
         for _ in 0..2 {
             pk.restore(&snap_pos, &snap_vel);
-            let ms = pk.run_stages(pc, mask, gpu_ticks, substeps, false).per_tick;
+            let ms = pk
+                .run_stages(pc, mask, gpu_ticks, substeps, false, false)
+                .per_tick;
             best = best.min(ms);
         }
         stage_ms.push((name, best));
@@ -389,6 +401,25 @@ fn time_gpu(pk: &mut Packet, pc: &PacketCfg, ticks: usize, substeps: usize) -> G
             "**整块 flush**（驱动行为：只能换回读路径）"
         }
     );
+    // §19.1 ③ 的落地演示（`--pipe`）：每 tick「发起（含回读拷贝）→ 等一下 tick 之前的回读」
+    // ⇒ 回读的等待与**下一 tick 的 GPU 计算重叠**。与同步档合计（计算 + 回读）对比。
+    if pipe {
+        let t = std::time::Instant::now();
+        for i in 0..gpu_ticks {
+            pk.run_deferred(pc, 1, substeps);
+            if i > 0 {
+                pk.readback_pending_wait();
+            }
+        }
+        pk.readback_pending_wait();
+        let per = t.elapsed().as_secs_f64() * 1e3 / gpu_ticks.max(1) as f64;
+        println!(
+            "  管线档（PLAN-gpu §19.1③：回读等待与下一 tick 计算重叠）**{per:.2} ms/tick** vs 同步档合计 **{:.2} ms**（{:.2} 计算 + {:.2} 回读）",
+            f64::from(gpu_ms + rb_ms),
+            gpu_ms,
+            rb_ms
+        );
+    }
     GpuTiming {
         gpu_ticks,
         reps,
@@ -541,7 +572,7 @@ fn main() {
     stage("report_reactions（--tank 未开则 ≈0）");
     let (cpu_phase_ms, cpu_wall_ms) = time_cpu(&mut f, a.ticks, dt_tick);
     stage("time_cpu（CPU 计时档）");
-    let timing = time_gpu(&mut pk, &pc, a.ticks, s.substeps);
+    let timing = time_gpu(&mut pk, &pc, a.ticks, s.substeps, a.pipe);
     stage("time_gpu（GPU 计时档）");
 
     // 速度量级（读动能比要用它标定：本探针零重力 ⇒ |v| 极小，动能比对绝对差极敏感）

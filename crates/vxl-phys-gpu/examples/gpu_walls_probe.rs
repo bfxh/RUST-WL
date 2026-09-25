@@ -113,7 +113,7 @@ fn dens_on_gpu(
         w_arg = Some(&walls);
     }
     // 位掩码 0b000_1111 = 分箱 / 扫描+占位 / 规范化 / **密度**（不跑 EOS、力、积分 ⇒ 位置不动）。
-    pk.run_stages_with(&cfg, 0b000_1111, 1, 1, false, w_arg);
+    pk.run_stages_with(&cfg, 0b000_1111, 1, 1, false, w_arg, false);
     Some(walls.read_dens(&pk, cfg.n_fluid as usize))
 }
 

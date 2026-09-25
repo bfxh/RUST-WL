@@ -102,6 +102,8 @@ impl FluidStepper for GpuFluidStepper {
             self.substeps,
             false,
             self.walls.as_ref(),
+            // 门面默认同步（管线档由调用方按需走 `run_deferred`；见 `PLAN-gpu` §19.5）。
+            false,
         );
         self.reactions.clear();
         self.reactions.extend(self.stage.aggregate(&self.pk, spans));

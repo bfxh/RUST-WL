@@ -177,7 +177,7 @@ pub fn chain_sim_full(s: &Sim, prov: &dyn ProviderColliders) -> Option<ChainOut>
             walls.upload(&pk, WallSide::Project, &i3, &st3, &pl3);
             w_arg = Some(&walls);
         }
-        pk.run_stages_with(&s.cfg, 0b111_1111, 1, s.substeps, false, w_arg);
+        pk.run_stages_with(&s.cfg, 0b111_1111, 1, s.substeps, false, w_arg, false);
     }
     let (gp, _) = pk.read_state();
     let n = gp.len() / 3;
