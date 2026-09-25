@@ -186,36 +186,264 @@ def hull2d(pts):
     return lo[:-1] + up[:-1]
 
 
-# ---------------------------------------------------------------- 主渲染
-def main():
+# ---------------------------------------------------------------- 命令行 / 字体
+def parse_args():
     def arg(name, default=None, cast=str):
         if name in sys.argv:
             return cast(sys.argv[sys.argv.index(name) + 1])
         return default
 
-    stride = arg("--stride", 1, int)
-    src_name = arg("--src", SRC_NAME)
-    dst_name = arg("--dst", DST_NAME)
-    dist = arg("--dist", 13.0, float)
-    ty = arg("--ty", 1.6, float)
-    label = arg("--label", "体素 · 多边形 · 高斯喷溅 · 三角网 · 刚体 · 流体（六域同场）")
-    src = _resolve(src_name)
-    if not os.path.exists(src):
-        raise SystemExit(f"找不到转储：{src}（先在仓库根跑 showcase 示例）")
-    data = parse(src_name)
-    nx, ny, nz = data["dims"]
-    ox, oy, oz = data["origin"]
-    step = data["step"]
-    splats = data["splats"]
-    frames = data["frames"][::stride]
+    return (
+        arg("--stride", 1, int),
+        arg("--src", SRC_NAME),
+        arg("--dst", DST_NAME),
+        arg("--dist", 13.0, float),
+        arg("--ty", 1.6, float),
+        arg("--label", "体素 · 多边形 · 高斯喷溅 · 三角网 · 刚体 · 流体（六域同场）"),
+    )
 
+
+def load_fonts():
     try:
         font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 13)
         fontb = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 15)
     except Exception:
         font = ImageFont.load_default()
         fontb = font
+    return font, fontb
 
+
+# ---------------------------------------------------------------- 逐域图元
+def voxel_faces(bits, dims, origin, step):
+    """把占用位转成可见四边形表（顶面 + 四个侧面，仅当邻格外露）。
+
+    **占用位不变 ⇒ 上层复用上一帧的表**（体素面是场景里最贵的部分）。
+    """
+    nx, ny, nz = dims
+    ox, oy, oz = origin
+
+    def has(ix, iy, iz):
+        idx = ix * ny * nz + iy * nz + iz
+        return (bits[idx // 8] >> (idx % 8)) & 1
+
+    faces = []
+    for iy in range(ny):
+        for iz in range(nz):
+            ix = 0
+            while ix < nx:
+                if not has(ix, iy, iz):
+                    ix += 1
+                    continue
+                jx = ix
+                while jx + 1 < nx and has(jx + 1, iy, iz):
+                    jx += 1
+                top = iy + 1 >= ny or any(
+                    not has(xx, iy + 1, iz) for xx in range(ix, jx + 1))
+                if top:
+                    y = oy + (iy + 1) * step
+                    x0, x1 = ox + ix * step, ox + (jx + 1) * step
+                    z0, z1 = oz + iz * step, oz + (iz + 1) * step
+                    faces.append((((x0, y, z0), (x1, y, z0), (x1, y, z1), (x0, y, z1)),
+                                  (0.62, 0.66, 0.72)))
+                ix = jx + 1
+    for ix in range(nx):
+        for iy in range(ny):
+            for iz in range(nz):
+                if not has(ix, iy, iz):
+                    continue
+                x0, x1 = ox + ix * step, ox + (ix + 1) * step
+                y0, y1 = oy + iy * step, oy + (iy + 1) * step
+                z0, z1 = oz + iz * step, oz + (iz + 1) * step
+                for dx, dz, quad in (
+                    (1, 0, ((x1, y0, z0), (x1, y0, z1), (x1, y1, z1), (x1, y1, z0))),
+                    (-1, 0, ((x0, y0, z1), (x0, y0, z0), (x0, y1, z0), (x0, y1, z1))),
+                    (0, 1, ((x1, y0, z1), (x0, y0, z1), (x0, y1, z1), (x1, y1, z1))),
+                    (0, -1, ((x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0))),
+                ):
+                    jx, jz = ix + dx, iz + dz
+                    if 0 <= jx < nx and 0 <= jz < nz and has(jx, iy, jz):
+                        continue
+                    faces.append((quad, (0.52, 0.56, 0.62)))
+    return faces
+
+
+def add_voxel_prims(prims, cam, faces):
+    """体素面：投影 + 面法线着色（深度取四角均值）。"""
+    for quad, col in faces:
+        scr = [cam.project(p) for p in quad]
+        if any(s is None for s in scr):
+            continue
+        n = norm(cross(sub(quad[1], quad[0]), sub(quad[2], quad[0])))
+        prims.append((sum(s[2] for s in scr) / 4, "poly",
+                      [(s[0], s[1]) for s in scr], shade(col, n)))
+
+
+def add_mesh_prims(prims, cam, meshes):
+    """三角网（静态薄壳面；背面剔除，防双面条纹）。"""
+    for (verts, tris) in meshes:
+        for (a, b, c) in tris:
+            pa, pb, pc = verts[a], verts[b], verts[c]
+            ctr = ((pa[0] + pb[0] + pc[0]) / 3, (pa[1] + pb[1] + pc[1]) / 3,
+                   (pa[2] + pb[2] + pc[2]) / 3)
+            n = norm(cross(sub(pb, pa), sub(pc, pa)))
+            view = norm(sub(cam.eye, ctr))
+            if dot(n, view) <= 0.0:
+                continue
+            scr = [cam.project(p) for p in (pa, pb, pc)]
+            if any(s is None for s in scr):
+                continue
+            prims.append((sum(s[2] for s in scr) / 3, "poly",
+                          [(s[0], s[1]) for s in scr],
+                          shade((0.55, 0.60, 0.85), n)))
+
+
+def add_splat_prims(prims, cam, splats):
+    """喷溅（软光斑）。"""
+    for (c, s, op, col) in splats:
+        scr = cam.project(c)
+        if scr is None:
+            continue
+        z = scr[2]
+        r = max(3.0, s[0] * 2.6 * cam.f / z)
+        prims.append((z, "splat", (scr[0], scr[1], r, col, op), None))
+
+
+def add_fluid_prims(prims, cam, fluids, ty):
+    """流体粒子（蓝色软团；越高越亮）。"""
+    for ps in fluids:
+        for p in ps:
+            scr = cam.project(p)
+            if scr is None:
+                continue
+            t = min(1.0, max(0.0, (p[1] - ty) * 0.9 + 0.5))
+            col = (int(255 * (0.15 + 0.30 * t)), int(255 * (0.45 + 0.28 * t)),
+                   int(255 * (0.88 + 0.12 * t)))
+            prims.append((scr[2], "fluid",
+                          (scr[0], scr[1], FLUID_R * cam.f / scr[2]), col))
+
+
+def add_body_prims(prims, cam, bodies):
+    """刚体：盒（12 三角形）/ 球 / 凸壳（二维凸包）。"""
+    for (kind, awake, pos, rot, half, pts) in bodies:
+        m = quat_mat(rot)
+        if kind == 0:
+            hx, hy, hz = half
+            cs = []
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    for sz in (-1, 1):
+                        cs.append(add(pos, mv(m, (sx * hx, sy * hy, sz * hz))))
+            for fq in ((0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4),
+                       (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)):
+                tri = [cs[i] for i in fq]
+                scr = [cam.project(p) for p in tri]
+                if any(s is None for s in scr):
+                    continue
+                n = norm(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])))
+                base = (0.86, 0.62, 0.30) if awake else (0.52, 0.56, 0.60)
+                prims.append((sum(s[2] for s in scr) / 4, "poly",
+                              [(s[0], s[1]) for s in scr], shade(base, n)))
+        elif kind == 1:
+            scr = cam.project(pos)
+            if scr:
+                z = scr[2]
+                r = half[0] * cam.f / z
+                sc = (0.85, 0.30, 0.25) if awake else (0.5, 0.52, 0.55)
+                prims.append((z, "sphere", (scr[0], scr[1], r),
+                              tuple(int(255.0 * c) for c in sc)))
+        elif kind == 2 and pts:
+            scr = [cam.project(add(pos, mv(m, p))) for p in pts]
+            scr = [s for s in scr if s]
+            if len(scr) >= 3:
+                poly = hull2d([(s[0], s[1]) for s in scr])
+                if len(poly) >= 3:
+                    hc = (0.30, 0.80, 0.55) if awake else (0.40, 0.55, 0.48)
+                    prims.append((sum(s[2] for s in scr) / len(scr), "hull", poly,
+                                  tuple(int(255.0 * c) for c in hc)))
+
+
+def add_shadow_prims(prims, bodies, shadow_y):
+    """接地阴影标记（深度固定 900 ⇒ 永远最后画；实际投影在 `paint` 里做）。"""
+    for (kind, awake, pos, rot, half, pts) in bodies:
+        if kind == 0 and half and len(half) == 3:
+            prims.append((900.0, "shadow",
+                          (pos[0], pos[2], max(half[0], half[2]) * 1.15, shadow_y), None))
+        elif kind == 1 and half:
+            prims.append((900.0, "shadow",
+                          (pos[0], pos[2], half[0] * 1.15, shadow_y), None))
+
+
+# ---------------------------------------------------------------- 绘制 / 叠加
+def draw_background(dr):
+    for y in range(H):
+        t = y / H
+        dr.line([(0, y), (W, y)],
+                fill=tuple(int(BG_TOP[i] * (1 - t) + BG_BOT[i] * t) for i in range(3)))
+
+
+def paint(dr, cam, prims, shadow_y):
+    """按深度从远到近画图元（"shadow" 分支在这里做投影：它要的是地面点 `(x, shadow_y, z)`）。"""
+    prims.sort(key=lambda t: -t[0])
+    for (_z, tag, a, col) in prims:
+        if tag == "poly":
+            dr.polygon(a, fill=col)
+        elif tag == "hull":
+            dr.polygon(a, fill=col, outline=(16, 40, 28))
+        elif tag == "sphere":
+            px, py, r = a
+            dr.ellipse([px - r, py - r, px + r, py + r], fill=col)
+            dr.ellipse([px - r * 0.45, py - r * 0.8, px + r * 0.2, py - r * 0.2],
+                       fill=(255, 235, 225, 110))
+        elif tag == "splat":
+            px, py, r, c, op = a
+            cc = tuple(int(255 * min(1.0, v)) for v in c)
+            for k in range(5, 0, -1):
+                rr = r * k / 5
+                dr.ellipse([px - rr, py - rr, px + rr, py + rr],
+                           fill=cc + (int(60 * op * (1.0 - k / 6.0)),))
+        elif tag == "fluid":
+            px, py, r = a
+            dr.ellipse([px - r, py - r, px + r, py + r], fill=col + (80,))
+            rr = r * 0.7
+            dr.ellipse([px - rr, py - rr, px + rr, py + rr], fill=col + (230,))
+        elif tag == "shadow":
+            px, py, r = a[0], a[1], a[2]
+            c = cam.project((px, shadow_y, py))
+            if c:
+                s = r * cam.f / max(1.0, c[2])
+                dr.ellipse([c[0] - s, c[1] - s * 0.35, c[0] + s, c[1] + s * 0.35],
+                           fill=(0, 0, 0, 60))
+
+
+def overlay(dr, font, fontb, label, tick, ms, fi, total_ms, n_bodies, fluids):
+    """叠加信息条（标题 + 本帧读数 + 均值）。"""
+    fps = 1000.0 / ms if ms > 0 else 0
+    dr.rectangle([0, 0, W, 22], fill=(10, 12, 16, 200))
+    dr.text((8, 4), "vxl-phys", font=fontb, fill=(120, 220, 255))
+    dr.text((86, 5), label, font=font, fill=(200, 210, 225))
+    water = sum(len(ps) for ps in fluids)
+    extra = f"  |  水 {water}" if water else ""
+    dr.text((8, H - 18),
+            f"tick {tick}  |  {ms:.2f} ms/tick  |  {fps:.0f} FPS  |  体 {n_bodies}{extra}",
+            font=font, fill=(200, 210, 225))
+    avg = total_ms / (fi + 1)
+    dr.text((W - 200, H - 18), f"均 {avg:.2f} ms ⇒ {1000 / avg:.0f} FPS",
+            font=font, fill=(160, 230, 180))
+
+
+# ---------------------------------------------------------------- 主渲染
+def main():
+    stride, src_name, dst_name, dist, ty, label = parse_args()
+    src = _resolve(src_name)
+    if not os.path.exists(src):
+        raise SystemExit(f"找不到转储：{src}（先在仓库根跑 showcase 示例）")
+    data = parse(src_name)
+    dims, origin, step = data["dims"], data["origin"], data["step"]
+    splats = data["splats"]
+    frames = data["frames"][::stride]
+    shadow_y = origin[1] + 3 * step + 0.01
+
+    font, fontb = load_fonts()
     frames_dir = _resolve(os.path.splitext(dst_name)[0] + "_frames")
     os.makedirs(frames_dir, exist_ok=True)
     out_frames = []
@@ -228,196 +456,21 @@ def main():
                   (0.0, ty, 0.0))
         im = Image.new("RGB", (W, H), BG_BOT)
         dr = ImageDraw.Draw(im, "RGBA")
-        for y in range(H):
-            t = y / H
-            dr.line([(0, y), (W, y)],
-                    fill=tuple(int(BG_TOP[i] * (1 - t) + BG_BOT[i] * t) for i in range(3)))
-        prims = []
+        draw_background(dr)
 
         # ---- 体素面（占用位不变 ⇒ 复用上一帧面表）----
-        if bits != vox_cache[0]:
+        faces = vox_cache[1] if bits == vox_cache[0] else voxel_faces(bits, dims, origin, step)
+        vox_cache = (bits, faces)
 
-            def has(ix, iy, iz):
-                idx = ix * ny * nz + iy * nz + iz
-                return (bits[idx // 8] >> (idx % 8)) & 1
-
-            faces = []
-            for iy in range(ny):
-                for iz in range(nz):
-                    ix = 0
-                    while ix < nx:
-                        if not has(ix, iy, iz):
-                            ix += 1
-                            continue
-                        jx = ix
-                        while jx + 1 < nx and has(jx + 1, iy, iz):
-                            jx += 1
-                        top = iy + 1 >= ny or any(
-                            not has(xx, iy + 1, iz) for xx in range(ix, jx + 1))
-                        if top:
-                            y = oy + (iy + 1) * step
-                            x0, x1 = ox + ix * step, ox + (jx + 1) * step
-                            z0, z1 = oz + iz * step, oz + (iz + 1) * step
-                            faces.append((((x0, y, z0), (x1, y, z0), (x1, y, z1), (x0, y, z1)),
-                                          (0.62, 0.66, 0.72)))
-                        ix = jx + 1
-            for ix in range(nx):
-                for iy in range(ny):
-                    for iz in range(nz):
-                        if not has(ix, iy, iz):
-                            continue
-                        x0, x1 = ox + ix * step, ox + (ix + 1) * step
-                        y0, y1 = oy + iy * step, oy + (iy + 1) * step
-                        z0, z1 = oz + iz * step, oz + (iz + 1) * step
-                        for dx, dz, quad in (
-                            (1, 0, ((x1, y0, z0), (x1, y0, z1), (x1, y1, z1), (x1, y1, z0))),
-                            (-1, 0, ((x0, y0, z1), (x0, y0, z0), (x0, y1, z0), (x0, y1, z1))),
-                            (0, 1, ((x1, y0, z1), (x0, y0, z1), (x0, y1, z1), (x1, y1, z1))),
-                            (0, -1, ((x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0))),
-                        ):
-                            jx, jz = ix + dx, iz + dz
-                            if 0 <= jx < nx and 0 <= jz < nz and has(jx, iy, jz):
-                                continue
-                            faces.append((quad, (0.52, 0.56, 0.62)))
-            vox_cache = (bits, faces)
-        for quad, col in vox_cache[1]:
-            scr = [cam.project(p) for p in quad]
-            if any(s is None for s in scr):
-                continue
-            n = norm(cross(sub(quad[1], quad[0]), sub(quad[2], quad[0])))
-            prims.append((sum(s[2] for s in scr) / 4, "poly",
-                          [(s[0], s[1]) for s in scr], shade(col, n)))
-
-        # ---- 三角网（静态薄壳面；背面剔除，防双面条纹）----
-        for (verts, tris) in data["meshes"]:
-            for (a, b, c) in tris:
-                pa, pb, pc = verts[a], verts[b], verts[c]
-                ctr = ((pa[0] + pb[0] + pc[0]) / 3, (pa[1] + pb[1] + pc[1]) / 3,
-                       (pa[2] + pb[2] + pc[2]) / 3)
-                n = norm(cross(sub(pb, pa), sub(pc, pa)))
-                view = norm(sub(cam.eye, ctr))
-                if dot(n, view) <= 0.0:
-                    continue
-                scr = [cam.project(p) for p in (pa, pb, pc)]
-                if any(s is None for s in scr):
-                    continue
-                prims.append((sum(s[2] for s in scr) / 3, "poly",
-                              [(s[0], s[1]) for s in scr],
-                              shade((0.55, 0.60, 0.85), n)))
-
-        # ---- 喷溅（软光斑）----
-        for (c, s, op, col) in splats:
-            scr = cam.project(c)
-            if scr is None:
-                continue
-            z = scr[2]
-            r = max(3.0, s[0] * 2.6 * cam.f / z)
-            prims.append((z, "splat", (scr[0], scr[1], r, col, op), None))
-
-        # ---- 流体粒子（蓝色软团；越高越亮）----
-        for ps in fluids:
-            for p in ps:
-                scr = cam.project(p)
-                if scr is None:
-                    continue
-                t = min(1.0, max(0.0, (p[1] - ty) * 0.9 + 0.5))
-                col = (int(255 * (0.15 + 0.30 * t)), int(255 * (0.45 + 0.28 * t)),
-                       int(255 * (0.88 + 0.12 * t)))
-                prims.append((scr[2], "fluid",
-                              (scr[0], scr[1], FLUID_R * cam.f / scr[2]), col))
-
-        # ---- 刚体 ----
-        for (kind, awake, pos, rot, half, pts) in bodies:
-            m = quat_mat(rot)
-            if kind == 0:
-                hx, hy, hz = half
-                cs = []
-                for sx in (-1, 1):
-                    for sy in (-1, 1):
-                        for sz in (-1, 1):
-                            cs.append(add(pos, mv(m, (sx * hx, sy * hy, sz * hz))))
-                for fq in ((0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4),
-                           (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)):
-                    tri = [cs[i] for i in fq]
-                    scr = [cam.project(p) for p in tri]
-                    if any(s is None for s in scr):
-                        continue
-                    n = norm(cross(sub(tri[1], tri[0]), sub(tri[2], tri[0])))
-                    base = (0.86, 0.62, 0.30) if awake else (0.52, 0.56, 0.60)
-                    prims.append((sum(s[2] for s in scr) / 4, "poly",
-                                  [(s[0], s[1]) for s in scr], shade(base, n)))
-            elif kind == 1:
-                scr = cam.project(pos)
-                if scr:
-                    z = scr[2]
-                    r = half[0] * cam.f / z
-                    sc = (0.85, 0.30, 0.25) if awake else (0.5, 0.52, 0.55)
-                    prims.append((z, "sphere", (scr[0], scr[1], r),
-                                  tuple(int(255.0 * c) for c in sc)))
-            elif kind == 2 and pts:
-                scr = [cam.project(add(pos, mv(m, p))) for p in pts]
-                scr = [s for s in scr if s]
-                if len(scr) >= 3:
-                    poly = hull2d([(s[0], s[1]) for s in scr])
-                    if len(poly) >= 3:
-                        hc = (0.30, 0.80, 0.55) if awake else (0.40, 0.55, 0.48)
-                        prims.append((sum(s[2] for s in scr) / len(scr), "hull", poly,
-                                      tuple(int(255.0 * c) for c in hc)))
-
-        # ---- 接地阴影 ----
-        shadow_y = oy + 3 * step + 0.01
-        for (kind, awake, pos, rot, half, pts) in bodies:
-            if kind == 0 and half and len(half) == 3:
-                prims.append((900.0, "shadow",
-                              (pos[0], pos[2], max(half[0], half[2]) * 1.15, shadow_y), None))
-            elif kind == 1 and half:
-                prims.append((900.0, "shadow",
-                              (pos[0], pos[2], half[0] * 1.15, shadow_y), None))
-
-        prims.sort(key=lambda t: -t[0])
-        for (_z, tag, a, col) in prims:
-            if tag == "poly":
-                dr.polygon(a, fill=col)
-            elif tag == "hull":
-                dr.polygon(a, fill=col, outline=(16, 40, 28))
-            elif tag == "sphere":
-                px, py, r = a
-                dr.ellipse([px - r, py - r, px + r, py + r], fill=col)
-                dr.ellipse([px - r * 0.45, py - r * 0.8, px + r * 0.2, py - r * 0.2],
-                           fill=(255, 235, 225, 110))
-            elif tag == "splat":
-                px, py, r, c, op = a
-                cc = tuple(int(255 * min(1.0, v)) for v in c)
-                for k in range(5, 0, -1):
-                    rr = r * k / 5
-                    dr.ellipse([px - rr, py - rr, px + rr, py + rr],
-                               fill=cc + (int(60 * op * (1.0 - k / 6.0)),))
-            elif tag == "fluid":
-                px, py, r = a
-                dr.ellipse([px - r, py - r, px + r, py + r], fill=col + (80,))
-                rr = r * 0.7
-                dr.ellipse([px - rr, py - rr, px + rr, py + rr], fill=col + (230,))
-            elif tag == "shadow":
-                px, py, r = a[0], a[1], a[2]
-                c = cam.project((px, shadow_y, py))
-                if c:
-                    s = r * cam.f / max(1.0, c[2])
-                    dr.ellipse([c[0] - s, c[1] - s * 0.35, c[0] + s, c[1] + s * 0.35],
-                               fill=(0, 0, 0, 60))
-
-        # ---- 叠加信息 ----
-        fps = 1000.0 / ms if ms > 0 else 0
-        dr.rectangle([0, 0, W, 22], fill=(10, 12, 16, 200))
-        dr.text((8, 4), "vxl-phys", font=fontb, fill=(120, 220, 255))
-        dr.text((86, 5), label, font=font, fill=(200, 210, 225))
-        water = sum(len(ps) for ps in fluids)
-        extra = f"  |  水 {water}" if water else ""
-        dr.text((8, H - 18),
-                f"tick {tick}  |  {ms:.2f} ms/tick  |  {fps:.0f} FPS  |  体 {len(bodies)}{extra}",
-                font=font, fill=(200, 210, 225))
-        avg = total_ms / (fi + 1)
-        dr.text((W - 200, H - 18), f"均 {avg:.2f} ms ⇒ {1000 / avg:.0f} FPS",
-                font=font, fill=(160, 230, 180))
+        prims = []
+        add_voxel_prims(prims, cam, faces)
+        add_mesh_prims(prims, cam, data["meshes"])
+        add_splat_prims(prims, cam, splats)
+        add_fluid_prims(prims, cam, fluids, ty)
+        add_body_prims(prims, cam, bodies)
+        add_shadow_prims(prims, bodies, shadow_y)
+        paint(dr, cam, prims, shadow_y)
+        overlay(dr, font, fontb, label, tick, ms, fi, total_ms, len(bodies), fluids)
 
         out_name = os.path.basename(frames_dir) + "/f%04d.png" % fi
         im.save(_resolve(out_name))

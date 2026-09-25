@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 5 个**（>120 行：4 大分发 + 1 Python 脚本；**示例 main 已全清**——B18–B22 共十四件；实测口径见 §3）。
+> 一句话：**文件级已清零**；**函数级门面内剩 4 个**（全是库内**大分发**：`process_pair_shaped` / `solve_phase` / `build_constraint` / `compute_pairs`；**示例 main 与脚本已全清**——B18–B23 共十五件；实测口径见 §3）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -32,7 +32,8 @@
 | `ba007bb` | **B19**：示例 main 再清三件 —— `m1_scale` 263→**79**（`Args`/`Acc` 记录 + `run_ticks`/`print_tick_diag`/`report_working_set`）、`splat_rest_probe` 249→**70**（②③④⑤ 各一段 fn + `flat_field_world` 收四次同形建世界）、`fluid_buoyancy` 245→**70**（`add_tank`/`pour_water`/`spawn_density_boxes` 收 2a/2b 逐字重复段 + `Run`/`Run2b`）；判据=**掩计时后全字对拍**（三份 `norm_*.py`：89/57/25 行 IDENTICAL） |
 | `19c7c66` | **B20**：示例 main 再清四件 —— `m1_pile` 205→**59**、`diag_min` 188→**85**、`trimesh_escape_probe` 181→**57**、`m0_gates` 174→**75**；判据=**掩计时后全字对拍**（`norm_pile.py`/`norm_diag.py`/原样 `diff`/`norm_m0.py`；m0 的 `arena 容量` 经三次复跑判为**非确定量**后掩掉——见 §5 第 9 条） |
 | `9417718` | **B21**：GPU 示例三件 —— `gpu_tick_probe` 311→**74**、`gpu_density_probe` 272→**101**、`gpu_grid_probe` 183→**111**；判据=`norm_tick.py`/`norm_density.py`/`norm_grid.py`（掩计时行；grid 那件**表哈希 + 逐位比对全等**、tick 那件**漂移表 8 行全等**）——均 IDENTICAL |
-| `本批`（哈希下批回填） | **B22**：arena_bench 两件（**示例 main 到此全清**）—— `probes_a::bench` 224→**109**（`measure_steps`/`track_exits`/`collect_stats`/`report_spread`/`report` + `Stats` 记录）、`probes_b::scene_joint_chains` 131→**8**（`hinge_chain`/`hanging_tower` 两段各一 fn）；判据=`norm_arena.py`（wall）/ `norm_jc.py`（joint_chains）——均 IDENTICAL |
+| `3b9e252` | **B22**：arena_bench 两件（**示例 main 到此全清**）—— `probes_a::bench` 224→**109**（`measure_steps`/`track_exits`/`collect_stats`/`report_spread`/`report` + `Stats` 记录）、`probes_b::scene_joint_chains` 131→**8**（`hinge_chain`/`hanging_tower` 两段各一 fn）；判据=`norm_arena.py`（wall）/ `norm_jc.py`（joint_chains）——均 IDENTICAL |
+| `本批`（哈希下批回填） | **B23**：`scripts/render_demo.py` 241→**60**（**脚本类清零**）—— `parse_args`/`load_fonts`/`voxel_faces`（含面表缓存）/`add_{voxel,mesh,splat,fluid,body,shadow}_prims`/`draw_background`/`paint`/`overlay`（逐域一函数）；判据=**渲染产物逐位相同**（GIF sha256 + 50 张 PNG 合集 sha256 两侧一致） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -51,7 +52,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 5 个**函数 >120 行（4 大分发 + 1 Python 脚本；**示例 main 已清零**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 4 个**函数 >120 行（全是库内**大分发**；**示例 main 与脚本已清零**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -71,7 +72,7 @@ PY
 |---|---|---|---|
 | 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
 | **示例 main** | **0** | — | **已全清**：B11/B13–B15 六件 + B18 两件 + B19 三件 + B20 四件 + B21 三件 + B22 两件 = 二十件（含探针/示例目录式与 arena_bench 的子模块函数）。配方与判据见 §3 第 4 条 |
-| 测试 + 脚本 | 1 | `render_demo.py::main` 241（Python：门用 `ast` 量，**抽取不需要编译**；判据＝`py_compile` + 渲染一次图） | 同 `extract_block` 思路手工提 |
+| 测试 + 脚本 | **0** | — | **已清零**（B23：`render_demo.py::main` 241→**60**；配方 = 按域提 `add_*_prims` + `voxel_faces`/`paint`/`overlay`，判据 = **渲染产物 sha256**（GIF 与 PNG 帧合集）——比打印读数更强） |
 
 **建议切点（已侦察）**：
 
@@ -110,6 +111,12 @@ PY
    `report_spread`（分布 + 极值）/ `report`（规模/相位/窄相/承载力/warm/细分）；`bench` 本体只剩
    12 行编排）、`probes_b::scene_joint_chains` 131→**8**（`hinge_chain`/`hanging_tower`
    两段各一 fn——**同形重复段收口**的又一例）。**示例类到此全清**。
+   **B23 `scripts/render_demo.py`** 241→**60**（Python，门用 `ast` 量 ⇒ **不需要编译**）：
+   `parse_args` / `load_fonts` / `voxel_faces`（面表缓存留在 main 那两行）/ `add_voxel_prims` /
+   `add_mesh_prims` / `add_splat_prims` / `add_fluid_prims` / `add_body_prims` /
+   `add_shadow_prims` / `draw_background` / `paint` / `overlay`——**逐域一函数**，main 只剩
+   每帧编排。**判据 = 渲染产物逐位相同**（`--src showcase_a.bin`：GIF sha256 与 50 张
+   PNG 帧的合集 sha256 两侧一致）——这类"产物型"脚的判据比打印读数更强，可照抄。
    **示例/探针的改写多半是"等价改写"**而不是纯搬移（多个 for 里各写一遍同样的
    "建世界 → 落体 → 打印"⇒ 收成一个收闭包的 helper）⇒ 判据**除门链外再加一条 A/B 对拍**：
    `git stash` 回旧版、同一口径各跑一遍，**读数逐字相同**。B11 验的是打印读数（`diff`）；

@@ -970,8 +970,8 @@
   "max_type_members": 0
  },
  "scripts/render_demo.py": {
-  "file_lines": 435,
-  "max_fn_lines": 241,
+  "file_lines": 488,
+  "max_fn_lines": 60,
   "max_type_members": 2
  }
 }
