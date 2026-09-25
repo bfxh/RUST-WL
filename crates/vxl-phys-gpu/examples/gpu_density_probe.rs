@@ -355,7 +355,7 @@ fn main() {
         nx: gd.dims.0,
         ny: gd.dims.1,
         nz: gd.dims.2,
-        _pad: 0,
+        n_total: np as u32,
     };
     let inputs = PhaseInputs {
         pos_flat: &pos_flat,

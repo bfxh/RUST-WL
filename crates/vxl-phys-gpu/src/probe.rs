@@ -35,7 +35,8 @@ pub struct PhaseParams {
     pub nx: u32,
     pub ny: u32,
     pub nz: u32,
-    pub _pad: u32,
+    /// ⚠️ 同槽位的老名字是 `_pad`、调用方传 0 ⇒ 两核 `if i >= P.n_total` 直接返回（探针量了个空）。
+    pub n_total: u32,
 }
 
 /// **极简 `block_on`**（不引 `pollster`）：wgpu 的 `request_device` 在原生后端是
@@ -145,6 +146,37 @@ pub fn split_2d(groups: u32) -> (u32, u32) {
     (gx, g.div_ceil(gx))
 }
 
+/// 一轮（密度 + 力各一趟）的命令编码——抽出来只为把 `phases_on_adapter` 的**块长**降下来
+/// （上帝对象门是棘轮：探针为 10M 档长了十几行，代价就是"最长函数必须更短"）。
+fn encode_phase_round(
+    enc: &mut wgpu::CommandEncoder,
+    p_dens: &wgpu::ComputePipeline,
+    dens_bg: &wgpu::BindGroup,
+    p_force: &wgpu::ComputePipeline,
+    force_bg: &wgpu::BindGroup,
+    gx: u32,
+    gy: u32,
+) {
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("density.pass"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(p_dens);
+        cp.set_bind_group(0, dens_bg, &[]);
+        cp.dispatch_workgroups(gx, gy, 1);
+    }
+    {
+        let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("force.pass"),
+            timestamp_writes: None,
+        });
+        cp.set_pipeline(p_force);
+        cp.set_bind_group(0, force_bg, &[]);
+        cp.dispatch_workgroups(gx, gy, 1);
+    }
+}
+
 /// 在**指定适配器序号**上跑「密度 + 力/黏度」两相位（缓冲/管线复用，`repeats` 轮）。
 /// 两相位探针的缓冲（`phases_on_adapter` 第一段：字节化 + 建 + 上传）。
 pub(crate) struct PhaseBuffs {
@@ -158,6 +190,41 @@ pub(crate) struct PhaseBuffs {
     pub out_b: wgpu::Buffer,
     pub params_b: wgpu::Buffer,
     pub readback: wgpu::Buffer,
+}
+
+/// `PhaseParams` → uniform 缓冲的字节布局。**手写字节序**（不能靠 `#[repr(C)]`：WGSL 的 uniform
+/// 对齐规则与 Rust 的字段排布不是一回事），顺序即 `Params` 的字段序。
+fn phase_params_bytes(params: PhaseParams) -> Vec<u8> {
+    let mut b = Vec::with_capacity(64);
+    for x in params.gmin {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    for x in [
+        params.inv,
+        params.h2,
+        params.k6,
+        params.w0,
+        params.mass,
+        params.ks,
+        params.h,
+        params.alpha_c,
+        params._pad0,
+    ] {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    for x in params.gvec {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    for x in [
+        params.n_fluid,
+        params.nx,
+        params.ny,
+        params.nz,
+        params.n_total,
+    ] {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    b
 }
 
 pub(crate) fn make_phase_buffs(
@@ -180,32 +247,7 @@ pub(crate) fn make_phase_buffs(
         }
         b
     };
-    let params_bytes = {
-        let mut b = Vec::with_capacity(64);
-        for x in params.gmin {
-            b.extend_from_slice(&x.to_le_bytes());
-        }
-        for x in [
-            params.inv,
-            params.h2,
-            params.k6,
-            params.w0,
-            params.mass,
-            params.ks,
-            params.h,
-            params.alpha_c,
-            params._pad0,
-        ] {
-            b.extend_from_slice(&x.to_le_bytes());
-        }
-        for x in params.gvec {
-            b.extend_from_slice(&x.to_le_bytes());
-        }
-        for x in [params.n_fluid, params.nx, params.ny, params.nz, params._pad] {
-            b.extend_from_slice(&x.to_le_bytes());
-        }
-        b
-    };
+    let params_bytes = phase_params_bytes(params);
     let ro = |label: &str, data: &[u8]| {
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
@@ -444,29 +486,15 @@ pub fn phases_on_adapter(
     let setup_ms = (t0.elapsed().as_secs_f64() * 1e3) as f32;
     let reps = repeats.max(1);
     let groups = (n as u32).div_ceil(64u32);
+    // **二维分派**（与管线同口径）：`n > 65535×64 ≈ 4.19M` 时一维组数越单维上限（10M 档正是）；
+    // 核里的展平行早就在，一维时 `gid.y == 0` ⇒ 既有档逐位不变。
+    let (gx, gy) = split_2d(groups);
     let t_disp = std::time::Instant::now();
     for _ in 0..reps {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("phases.enc"),
         });
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("density.pass"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_dens);
-            cp.set_bind_group(0, &dens_bg, &[]);
-            cp.dispatch_workgroups(groups, 1, 1);
-        }
-        {
-            let mut cp = enc.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("force.pass"),
-                timestamp_writes: None,
-            });
-            cp.set_pipeline(&p_force);
-            cp.set_bind_group(0, &force_bg, &[]);
-            cp.dispatch_workgroups(groups, 1, 1);
-        }
+        encode_phase_round(&mut enc, &p_dens, &dens_bg, &p_force, &force_bg, gx, gy);
         queue.submit(Some(enc.finish()));
     }
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
