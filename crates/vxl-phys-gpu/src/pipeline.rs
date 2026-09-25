@@ -752,15 +752,21 @@ impl Packet {
     }
 
     /// 量一次"状态回读 + 同步"的成本（耦合接口的代价）。
-    pub fn measure_readback_ms(&self) -> f32 {
+    /// 状态回读计时：**拷贝恒为全量 `pos`**，但**映射区间可指定**（`map_bytes`）——这是
+    /// `PLAN-gpu` §19.1 ① 的判别量：耗时随映射区间**线性下降** ⇒ 驱动按**映射区间**拷贝
+    /// （生产上可只映射真正需要的部分）；**映射 1 MB 仍花全量时间** ⇒ 是**整块 flush**
+    /// （驱动行为，只能换回读路径）。传 `u64::MAX` = 全量（原口径）。
+    pub fn measure_readback_ms(&self, map_bytes: u64) -> f32 {
+        let total = (self.n as u64) * 12;
+        let map = map_bytes.clamp(1, total);
         let t = std::time::Instant::now();
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        enc.copy_buffer_to_buffer(&self.pos_b, 0, &self.readback_b, 0, (self.n as u64) * 12);
+        enc.copy_buffer_to_buffer(&self.pos_b, 0, &self.readback_b, 0, total);
         self.queue.submit(Some(enc.finish()));
         self.poll_wait().ok();
-        let slice = self.readback_b.slice(..(self.n as u64) * 12);
+        let slice = self.readback_b.slice(..map);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             tx.send(r).ok();

@@ -377,7 +377,18 @@ fn time_gpu(pk: &mut Packet, pc: &PacketCfg, ticks: usize, substeps: usize) -> G
         stage_ms.push((name, best));
     }
     pk.restore(&snap_pos, &snap_vel);
-    let rb_ms = pk.measure_readback_ms();
+    let rb_ms = pk.measure_readback_ms(u64::MAX);
+    // §19.1 ① 判别：**同一次全量拷贝**、只映射 1 MB ⇒ 与全量映射比。线性降 ⇒ 驱动按映射区间拷贝
+    // （生产上可只映射需要的部分）；不降 ⇒ 整块 flush（驱动行为，只能换回读路径）。直接打印、不进 Report。
+    let rb_1m_ms = pk.measure_readback_ms(1 << 20);
+    println!(
+        "  回读口径判别（PLAN-gpu §19.1①）：全量映射 {rb_ms:.2} ms vs 只映射 1 MB {rb_1m_ms:.2} ms ⇒ {}",
+        if rb_1m_ms < rb_ms * 0.5 {
+            "**按映射区间拷贝**（可只映射真需要的部分）"
+        } else {
+            "**整块 flush**（驱动行为：只能换回读路径）"
+        }
+    );
     GpuTiming {
         gpu_ticks,
         reps,
