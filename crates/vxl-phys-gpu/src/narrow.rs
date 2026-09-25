@@ -21,6 +21,10 @@ pub use vxl_phys_core::narrow_tier::{
     flat_pairs, BODY_WORDS, KIND_BOX, KIND_NONE, KIND_SPHERE, NOT_HANDLED, SLOT_BYTES, SLOT_WORDS,
 };
 
+/// 一排线程数（64）。
+/// ⚠️ **已否证的假设**（§17.9 补记五）：曾疑"动态索引的局部数组（`sat_boxes` 的 `axes`、裁剪多边形）
+/// 被后端降到共享内存 ⇒ 同 workgroup 内 invocation 互相踩"。把本值改成 **1** 重跑 m1 档：24 条几何不符
+/// **一条不少、数值完全相同** ⇒ **invocation 间干扰被排除**（容器布局无关）。
 const WG: u32 = 64;
 /// 体记录里 `kind` 的字偏移（裸整数：1 = 球、2 = 盒、0 = 本档不接手）。
 pub const BODY_KIND_AT: usize = 7;
