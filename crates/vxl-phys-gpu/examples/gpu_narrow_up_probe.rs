@@ -289,7 +289,7 @@ fn report_host(c: &Ctx) {
     );
 }
 
-/// ⑨ 现状解码（逐槽逐字 + 逐槽 extend）/ ⑩ 一次过（`chunks_exact` 直出字表）。
+/// ⑨ 现状解码（逐槽逐字 + 逐槽 extend）/ ⑩ 一次过（`as_chunks` 切块 + 按索引解码，直出字表）。
 fn report_decode(c: &Ctx) {
     let nb = c.pairs.len() * SLOT_BYTES;
     let bytes: Vec<u8> = vec![0u8; nb];
@@ -312,15 +312,18 @@ fn report_decode(c: &Ctx) {
         std::hint::black_box(&flat);
     });
     let (t_one, ilo, ihi) = window_ms(|| {
+        // ⑩ 的形态 = 生产里那次改动的形状（`as_chunks` 切块 + 按索引解码）。
+        // ⚠️ **别用 `chunks_exact`**：CI 的 clippy 比本机新，会判 `chunks_exact_to_as_chunks`（本片踩过）。
+        let (blocks, _rest) = bytes.as_chunks::<4>();
         let mut w: Vec<u32> = Vec::with_capacity(nb / 4);
-        for ch in bytes.chunks_exact(4) {
-            w.push(u32::from_le_bytes([ch[0], ch[1], ch[2], ch[3]]));
+        for c in blocks {
+            w.push(u32::from_le_bytes([c[0], c[1], c[2], c[3]]));
         }
         std::hint::black_box(&w);
     });
     println!("     回读解码（含在 ③ 里，随对数线性）:");
     println!("       ⑨ 现状：逐字 from_le_bytes + 逐槽 extend  {t_dec:>7.3}（{elo:.3}–{ehi:.3}）");
-    println!("       ⑩ 一次过：chunks_exact 直出字表        {t_one:>7.3}（{ilo:.3}–{ihi:.3}）");
+    println!("       ⑩ 一次过：as_chunks 直出字表           {t_one:>7.3}（{ilo:.3}–{ihi:.3}）");
     println!(
         "     ⇒ ⑨→⑩ 省 {:.3} ms（{}）",
         t_dec - t_one,

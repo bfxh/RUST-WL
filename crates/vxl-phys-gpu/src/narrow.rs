@@ -516,13 +516,16 @@ impl NarrowTier {
         let t_dec = std::time::Instant::now();
         let data = slice.get_mapped_range();
         let mut out: Vec<Slot> = Vec::with_capacity(n_pairs as usize);
-        let mut words_it = data[..(n_pairs as usize) * SLOT_BYTES].chunks_exact(4);
-        for _ in 0..n_pairs {
+        // ⚠️ **别用 `chunks_exact`**（常量块长）：CI 的 clippy 比本机新，会判
+        // `chunks_exact_to_as_chunks` ⇒ `-D warnings` 下门红（`pipeline/readback.rs` 早记过同一条）。
+        // `as_chunks::<SLOT_BYTES>()` 一次切到"整槽"，槽内仍**按索引解码**（repo 惯例写法）。
+        let (slots_bytes, _rest) =
+            data[..(n_pairs as usize) * SLOT_BYTES].as_chunks::<SLOT_BYTES>();
+        for sb in slots_bytes {
             let mut words = [0u32; SLOT_WORDS];
-            for w in words.iter_mut() {
-                // `chunks_exact(4)` 已保证每块 4 字节 ⇒ 这里的 `expect` 不会触发（不留 panic 面）。
-                let c = words_it.next().expect("chunks_exact 每块 4 字节");
-                *w = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            for (k, w) in words.iter_mut().enumerate() {
+                let o = k * 4;
+                *w = u32::from_le_bytes([sb[o], sb[o + 1], sb[o + 2], sb[o + 3]]);
             }
             out.push(Slot { words });
         }

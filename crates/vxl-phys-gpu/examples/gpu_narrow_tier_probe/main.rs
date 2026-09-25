@@ -185,7 +185,7 @@ fn max_dv(a: &World, b: &World) -> f32 {
 /// 分位数（p50/p90/max）。**必须看分布**：240 tick 的累计均值会被少数 GPU 同步卡顿的 tick 拖走
 /// （单趟地板的 min/max 就相差近十倍）⇒ 只看均值分不清"真慢"与"抖"。
 fn stat(v: &mut [f32]) -> (f32, f32, f32) {
-    v.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(f32::total_cmp);
     let p = |q: f64| v[((v.len() as f64 - 1.0) * q) as usize];
     (p(0.5), p(0.9), *v.last().unwrap_or(&0.0))
 }
