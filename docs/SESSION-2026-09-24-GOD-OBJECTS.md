@@ -1,6 +1,6 @@
 # 上帝对象清零（2026-09-24）——交接档
 
-> 一句话：**文件级已清零**；**函数级门面内剩 4 个**（全是库内**大分发**：`process_pair_shaped` / `solve_phase` / `build_constraint` / `compute_pairs`；**示例 main 与脚本已全清**——B18–B23 共十五件；实测口径见 §3）。
+> 一句话：**文件级已清零**；**函数级门面内剩 3 个**（全是库内**大分发**：`process_pair_shaped` 663 / `solve_phase` 551 / `build_constraint` 340；**示例 main、脚本与 broad 侧均已清**——B18–B24 共十六件；实测口径见 §3）。
 > 本档是下一会话的入口（烧量到线就在这儿收尾）。
 
 ## 1. 已落地（分支 `feat/solver-limits`，25 个提交 `8c650bd` → `b3ac4fd`，CI 全绿）
@@ -33,7 +33,8 @@
 | `19c7c66` | **B20**：示例 main 再清四件 —— `m1_pile` 205→**59**、`diag_min` 188→**85**、`trimesh_escape_probe` 181→**57**、`m0_gates` 174→**75**；判据=**掩计时后全字对拍**（`norm_pile.py`/`norm_diag.py`/原样 `diff`/`norm_m0.py`；m0 的 `arena 容量` 经三次复跑判为**非确定量**后掩掉——见 §5 第 9 条） |
 | `9417718` | **B21**：GPU 示例三件 —— `gpu_tick_probe` 311→**74**、`gpu_density_probe` 272→**101**、`gpu_grid_probe` 183→**111**；判据=`norm_tick.py`/`norm_density.py`/`norm_grid.py`（掩计时行；grid 那件**表哈希 + 逐位比对全等**、tick 那件**漂移表 8 行全等**）——均 IDENTICAL |
 | `3b9e252` | **B22**：arena_bench 两件（**示例 main 到此全清**）—— `probes_a::bench` 224→**109**（`measure_steps`/`track_exits`/`collect_stats`/`report_spread`/`report` + `Stats` 记录）、`probes_b::scene_joint_chains` 131→**8**（`hinge_chain`/`hanging_tower` 两段各一 fn）；判据=`norm_arena.py`（wall）/ `norm_jc.py`（joint_chains）——均 IDENTICAL |
-| `本批`（哈希下批回填） | **B23**：`scripts/render_demo.py` 241→**60**（**脚本类清零**）—— `parse_args`/`load_fonts`/`voxel_faces`（含面表缓存）/`add_{voxel,mesh,splat,fluid,body,shadow}_prims`/`draw_background`/`paint`/`overlay`（逐域一函数）；判据=**渲染产物逐位相同**（GIF sha256 + 50 张 PNG 合集 sha256 两侧一致） |
+| `ce695d0` | **B23**：`scripts/render_demo.py` 241→**60**（**脚本类清零**）—— `parse_args`/`load_fonts`/`voxel_faces`（含面表缓存）/`add_{voxel,mesh,splat,fluid,body,shadow}_prims`/`draw_background`/`paint`/`overlay`（逐域一函数）；判据=**渲染产物逐位相同**（GIF sha256 + 50 张 PNG 合集 sha256 两侧一致） |
+| `本批`（哈希下批回填） | **B24**：`compute_pairs` 256→**76**（`broad` 的 trait 方法；**是 Mode M 而不是 Mode F**——五段都只访问 `self` 上的缓冲、无逃逸控制流 ⇒ 各提一个私有方法：`detect_sleep_flip`/`update_aabbs`/`update_proxies`/`query_chunks`/`refresh_candidates`/`collect_pairs`/`compact_arena`；顺带把两段重复的块数计算收成 `query_chunks`）；判据=`m1_scale` 掩计时对拍 **89 行 IDENTICAL**（tree_h/候选列全等）+ `cargo test -p vxl-phys-broad` **33 项全绿**（含 `bvh_matches_grid_across_frames` 跨帧配对集合一致） |
 
 **验收证据（每批都一样）**：`bash scripts/gate_all.sh` 全绿，且**金样门读数与重构前逐项相同**
 ——col45 **45/45**、pile5 **2000/2000**、tower25 **2396/2500**，Δpos max **0.0034 / 0.0041 / 0.0950**
@@ -52,7 +53,7 @@
 | `dedup_fns.py` | 同名函数去重：**逐字比对后**才提取，不一致整批中止 |
 | `fn_blocks.py` | 看块边界（辅助定锚点） |
 
-## 3. 余项：**门面内 4 个**函数 >120 行（全是库内**大分发**；**示例 main 与脚本已清零**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
+## 3. 余项：**门面内 3 个**函数 >120 行（全是库内**大分发**；**示例 main、脚本与 broad 侧已清零**。另有 `gold-sample/src/main.rs::main` 335 行，在 config 排除面内）
 
 **计数口径（重要）**：门只报**每文件最大的那个**函数 ⇒ 按文件数会**低估**（旧版本档写"35 个"，实际当时
 是 36；`sat.rs::sat` 178 行就是这样被漏掉的）。按函数的数法（可复核）：
@@ -70,7 +71,7 @@ PY
 
 | 类 | 个 | 函数 | 配方 |
 |---|---|---|---|
-| 库内**大分发** | 4 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 · `compute_pairs` 256（broad） | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例） |
+| 库内**大分发** | 3 | `process_pair_shaped` 663（narrow）· `solve_phase` 551（solver）· `build_constraint` 340 | **Mode F**：`cf_census.py` 普查 → arm/段提成同型 helper，调用点 `if helper(..) { return; }`；**多段累加器要改成值进值出**（B12 的 `max_dv` 范例）。**B24 已清 `compute_pairs` 256→76**（它恰恰是 **Mode M**：五段都只访问 `self` 缓冲、无逃逸 ⇒ 各提私有方法即可；`broad` 侧现在没有超标函数了） |
 | **示例 main** | **0** | — | **已全清**：B11/B13–B15 六件 + B18 两件 + B19 三件 + B20 四件 + B21 三件 + B22 两件 = 二十件（含探针/示例目录式与 arena_bench 的子模块函数）。配方与判据见 §3 第 4 条 |
 | 测试 + 脚本 | **0** | — | **已清零**（B23：`render_demo.py::main` 241→**60**；配方 = 按域提 `add_*_prims` + `voxel_faces`/`paint`/`overlay`，判据 = **渲染产物 sha256**（GIF 与 PNG 帧合集）——比打印读数更强） |
 

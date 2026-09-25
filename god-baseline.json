@@ -40,8 +40,8 @@
   "max_type_members": 31
  },
  "crates/vxl-phys-broad/src/bvh_phase.rs": {
-  "file_lines": 374,
-  "max_fn_lines": 256,
+  "file_lines": 412,
+  "max_fn_lines": 76,
   "max_type_members": 13
  },
  "crates/vxl-phys-broad/src/grid_phase.rs": {
