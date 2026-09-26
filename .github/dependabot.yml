@@ -1,0 +1,16 @@
+# 每周一提依赖更新 PR：Cargo 依赖 + workflow 里用到的 actions。
+# 依赖升级自成 PR（PR 纪律：不与功能捆绑），按 PR 处理、单独 review/回滚。
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
