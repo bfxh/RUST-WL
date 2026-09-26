@@ -38,6 +38,8 @@ PROBES = {
         'fn p(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32,i:i32){}\n'),
     "fastmath-gate": ("probe_fastmath.rs",
         'fn p(){ let _ = fadd_fast(1.0f32, 2.0f32); }\n'),
+    "f64-gate":      ("probe_f64.rs",
+        'fn p(){ let _x: f64 = 1.0; }\n'),
     "asm-gate":     ("probe_asm.rs",
         'fn p(){ unsafe { asm!("nop"); } }\n'),
     "staticmut-gate": ("probe_staticmut.rs",
