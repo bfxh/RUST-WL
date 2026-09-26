@@ -39,6 +39,36 @@ impl DefaultNarrowPhase {
             } => {
                 capsule_provider_contacts(bpos, brot, half_height, radius, id, band, providers, buf)
             }
+            // 圆柱 / 圆锥 vs 提供者：**端面圆 + 母线采样**（逐点查询；见下方函数注）。
+            Shape::Cylinder {
+                half_height,
+                radius,
+            } => {
+                let rings = [(-half_height, radius), (0.0, radius), (half_height, radius)];
+                ring_provider_contacts(bpos, brot, rings, None, id, band, providers, buf)
+            }
+            Shape::Cone {
+                half_height,
+                radius,
+            } => {
+                // 圆锥半径沿母线线性收缩：ρ(y) = radius·(half_height − y)/(2·half_height)；
+                // 顶点（+端）是几何极值点，单独补一个样本。
+                let rings = [
+                    (-half_height, radius),
+                    (-half_height * 0.5, radius * 0.75),
+                    (0.0, radius * 0.5),
+                ];
+                ring_provider_contacts(
+                    bpos,
+                    brot,
+                    rings,
+                    Some(half_height),
+                    id,
+                    band,
+                    providers,
+                    buf,
+                )
+            }
             _ => false, // 其余形状 vs 提供者：待专用查询
         }
     }
@@ -122,6 +152,69 @@ fn capsule_provider_contacts(
         centers[n] = c;
         n += 1;
         supported |= providers.contacts_sphere(id, c, radius, band, buf);
+    }
+    supported
+}
+
+/// **圆柱 / 圆锥 vs 提供者：端面圆 + 母线采样**（逐点 `contacts_point`，与盒/外壳的顶点采样同族）。
+///
+/// **为什么不能像胶囊那样走"沿轴球采样"**：球的表面**绕轴旋转对称**，沿轴球族的并集恰好就是胶囊；
+/// 但同一族球对圆柱的并集**永远是"端部也收成球"的胶囊**——球在端面之外还伸出 `radius` ⇒ 正立圆柱
+/// 会被那个**不存在的圆角托起 `radius`**（0.35 m，不是小量）。圆柱/圆锥的极值点在**端面圆周**与
+/// **母线**上 ⇒ 只能采点。
+///
+/// **每环恰好 4 点、且从"世界最低方向"起算 90° 均布** —— 这条是**判据的要求**，不是省算力：
+/// 下游（`pick_dominant_normal` + `four_corner_points`）**只有 4 槽**，候选 >4 时按提供者给的
+/// `feature` 排序取前 4 ⇒ **可能丢掉一个角**。实测（本文件首版 = 16 固定角 + 解析最低点，17 候选）：
+/// 直立圆柱的端面圆在 5 个候选里被丢 1 个 ⇒ 接触补丁**不对称** ⇒ 每 tick 注入净力矩 ⇒ 圆柱
+/// **倾倒并"拧"进地板**（逐 tick 轨迹：`y 0.36 → −0.44`、`ay 1.00 → −0.93`，而流形深度一直 ≈ 0）。
+/// 候选**恰好 4 个**时 `four_corner_points` 不排序、不丢弃（它的分支是 `len() > 4`）⇒ 补丁必然对称。
+///
+/// **从最低方向起算**同样是为精确：固定角（0/90/180/270）在侧躺时没有一个落在环的**最低方向**上
+/// （最坏差半个角隙）⇒ 圆柱会陷进地板 `ρ(1−cos45°) ≈ 0.29ρ`（本档半径 0.35 ⇒ **10 cm**）。
+/// 环平面水平时（圆柱/圆锥正立）"最低方向"退化 ⇒ 退回固定角（此时整环等高，四角本就对称贴住支撑面）。
+///
+/// **采样集合**（局部系，轴 = +Y）：`rings` 给（轴向位置, 环半径）三元组，每环 4 点；`tip` 给
+/// **圆锥顶点**（圆柱 `None`）。**端面圆心不采**——圆盘的支撑永远在圆周上，补圆心只会多一个候选
+/// 而**破坏上面那条对称性**（盒的"面心补位"能成立是因为它由提供者用 `feature` 标了面心优先级，
+/// 本通道的 `feature` 由提供者给、我们改不动）。合计：圆柱 3×4 = 12 点、圆锥 13 点（比盒的 30 点省）。
+///
+/// **侧躺的接触与稳定位形**（实测，免得读判据时误判）：**圆柱**侧躺 = **线接触**（母线平行于地面，
+/// 三个环各出 1 点、共线）⇒ 停在质心高 `radius`；**圆锥**侧躺时**轴正水平的那一刻只有底圈最低点
+/// 一个接触点（不稳定）**，随后自己滚到**母线贴地**（顶点与底圈最低点同时贴地）才稳定
+/// —— 所以侧躺圆锥的判据只判"贴地"，不判"位形仍是水平轴"。
+#[allow(clippy::too_many_arguments)] // 位姿 + 采样环 + 顶点 + 提供者 + 出参
+fn ring_provider_contacts(
+    bpos: Vec3,
+    brot: Quat,
+    rings: [(f32, f32); 3],
+    tip: Option<f32>,
+    id: u32,
+    band: f32,
+    providers: &dyn vxl_phys_core::interop::ProviderColliders,
+    buf: &mut Vec<vxl_phys_core::interop::InteropContact>,
+) -> bool {
+    let m = Mat3::from_quat(brot);
+    let axis = m.mul_vec3(Vec3::Y);
+    // 世界 −Y 在环平面内的分量（归一化即"环上最低"方向）：e = a·(a·Y) − Y；其模 = |sin(轴与 Y 的角)|。
+    let e = axis * axis.y - Vec3::Y;
+    // 映回局部系取起始角（环平面 = 局部 XZ 平面 ⇒ φ = atan2(z, x)）；水平环没有最低方向 ⇒ 退回 0°。
+    let phi = if e.length_squared() > 1e-8 {
+        let l = brot.conjugate().rotate_vec3(e);
+        l.z.atan2(l.x)
+    } else {
+        0.0
+    };
+    let mut supported = false;
+    for (cy, rho) in rings {
+        for k in 0..4 {
+            let th = phi + std::f32::consts::FRAC_PI_2 * k as f32;
+            let local = Vec3::new(rho * th.cos(), cy, rho * th.sin());
+            supported |= providers.contacts_point(id, bpos + m.mul_vec3(local), band, buf);
+        }
+    }
+    if let Some(ty) = tip {
+        supported |= providers.contacts_point(id, bpos + axis * ty, band, buf);
     }
     supported
 }

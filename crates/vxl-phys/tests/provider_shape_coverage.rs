@@ -6,11 +6,11 @@
 //! `narrow/src/tests.rs` 又受尺寸棘轮约束 ⇒ 只能在门面级用 `World` **黑盒**搭场景（本文件）。
 //!
 //! **口径（黑盒，不读接触集）**：对照组 `Box`/`Sphere` 停在地板上（证明场景与通道是通的）；
-//! **已修复**：`Capsule` 直立（单点支撑）与侧躺（多样本线接触）都停在地板上；
-//! **仍缺口**：`Cylinder`/`Cone`（同族修法"端面圆 + 母线采样"未做）⇒ 断言还是"一路下沉"。
+//! **已修复组①**：`Capsule`（沿轴 5 球采样）——直立（单点支撑）与侧躺（线接触）都停在地板上；
+//! **已修复组②**：`Cylinder`/`Cone`（端面圆 + 母线采样）——直立与侧躺都停在地板上。
 //!
-//! 已知取舍（写清不藏）：判据用的是**平地板**（`h ≡ 0`）——比 arena 那条起伏网简单，但对"有没有接触"
-//! 这件事足够，且读数（停/穿）是二值的、不吃容差。纯 CPU ⇒ **CI 会真跑**。
+//! 已知取舍：判据用**平地板**（h ≡ 0），比 arena 起伏网简单，但"停/穿"是二值的、不吃容差；纯 CPU ⇒ CI 会真跑。
+//! ⚠️ 本文件已顶到尺寸棘轮上限（213 行）⇒ **再加用例前先把 helper 抽到 `tests/common/mod.rs`**，否则 god 门会红。
 
 use vxl_phys::*;
 use vxl_phys_core::{PhysConfig, Quat, Shape, Vec3};
@@ -106,6 +106,11 @@ fn lowest_y(shape: &Shape, pos: Vec3, rot: Quat) -> f32 {
     }
 }
 
+/// 侧躺姿态：绕 Z 转 90°（局部 +Y 轴 → 世界 −X，即轴水平）。
+fn lying() -> Quat {
+    Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2)
+}
+
 /// 一个体的"静止/穿透"读数：`(最低点 y, 是否还在动)`。
 fn reading(w: &World, i: usize) -> (f32, bool) {
     let (p, r) = w.bodies.pose(i);
@@ -172,15 +177,19 @@ fn box_sphere_capsule_rest_on_provider_floor() {
             half_height: HALF_H,
             radius: RADIUS,
         },
-        Quat::from_axis_angle(Vec3::Z, std::f32::consts::FRAC_PI_2),
+        lying(),
     );
 }
 
-/// **缺口组**：圆柱 / 圆锥今天仍**不产接触** ⇒ 一路下沉（同族修法未做）。
-/// 修法方向（`SURVEY-SOFT-CLOTH-AND-CONVERSION.md` §5.1 末）：**端面圆 + 母线采样**——记轴上球采样
-/// **覆盖不到圆柱侧面**（球只在球心正对的轴向高度上碰到侧面）⇒ 样本要放到"端面圆周"与"母线"上去。
+/// **已修复组②**：圆柱 / 圆锥（`ring_provider_contacts`：端面圆 + 母线采样）——直立与侧躺都停住。
+///
+/// 侧躺的**稳定位形**两种形状不一样（别按一个模子读；两条都是实测）：
+/// - **圆柱**侧躺 = **线接触**（母线平行于地面，三个采样环各出 1 点、共线）⇒ 停在质心高 `radius`；
+/// - **圆锥**侧躺 = 先由底圈单点接触（轴正水平时那点是唯一接触点，**不稳定**）⇒ 自己滚到
+///   **母线贴地**（轴与地面成半顶角 26.57°、顶点与底圈最低点同时贴地）才入睡 —— 这是真物理。
+///   实测质心高 0.1562、`|轴与竖直夹角|` 的 cos = **0.8945**（= cos 26.57°）。
 #[test]
-fn cylinder_and_cone_still_fall_through_provider_floor() {
+fn cylinder_and_cone_rest_on_provider_floor() {
     for (name, shape) in [
         (
             "cylinder（圆柱）",
@@ -197,13 +206,7 @@ fn cylinder_and_cone_still_fall_through_provider_floor() {
             },
         ),
     ] {
-        let (w, i) = drop_scene(shape, 2.0, Quat::IDENTITY);
-        let (y, moving) = reading(&w, i);
-        println!("  · {name}：最低点 y = {y:+.4}（修好后应 ≈ 0）；还在动={moving}");
-        assert!(
-            y < -0.5,
-            "{name} 今天**不该**停住（`provider_shape_contacts` 对它 `_ => false` ⇒ 无接触）——\
-             若它停了，说明缺口已被修好 ⇒ **把这条断言翻过来**（改成 |y| < 0.1）"
-        );
+        assert_rests(&format!("{name} 直立"), shape, Quat::IDENTITY);
+        assert_rests(&format!("{name} 侧躺"), shape, lying());
     }
 }
