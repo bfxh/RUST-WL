@@ -18,9 +18,7 @@ FORBID = "rayon"
 def main():
     root = gc.repo_root()
     hits = []
-    for rel in gc.list_rs(root, git_tracked=False):
-        if not rel.endswith("Cargo.toml"):
-            continue
+    for rel in gc.list_cargo_toml(root):
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             text = f.read()
         if FORBID in gc.parse_cargo_deps(text):

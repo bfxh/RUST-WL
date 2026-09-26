@@ -6,8 +6,9 @@
 判据名单取空集都会让门空转却绿）。本脚本给每道棘轮门注入一次最小违规文件，
 注入后门必须红（退出码 != 0 且打印 ❌）；注入前门已绿（基线通过）。
 
-dag / rayon 为结构性硬判：靠真实数据已验证绿（无环+顺序合规 / 无 rayon 依赖），
-其注入需改 Cargo.toml，归手动/后续，本探针跳过并注明。
+.rs 注入：unwrap/unsafe/linelen/glob/todo/god/cyc/nest/args/fastmath/asm/staticmut。
+Cargo.toml 注入（结构性硬判）：rayon/cpp/license——注入一个含违例的 manifest 必须转红。
+dag 为结构性硬判且依赖 workspace 拓扑布局，注入改动大，靠真实数据已验证绿，归手动。
 
 归 full 档（CI 显式跑），不进提交钩子（每门跑两遍较重）。
 """
@@ -39,12 +40,19 @@ PROBES = {
         'fn p(){ let _ = fadd_fast(1.0f32, 2.0f32); }\n'),
     "asm-gate":     ("probe_asm.rs",
         'fn p(){ unsafe { asm!("nop"); } }\n'),
+    "staticmut-gate": ("probe_staticmut.rs",
+        'static mut PROBE: i32 = 0;\nfn p(){ unsafe { PROBE = 1; } }\n'),
+}
+
+# Cargo.toml 注入探针：结构性硬判，注入含违例的 manifest 必须转红
+TOML_PROBES = {
+    "rayon-gate":   '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\nrayon = "1"\n',
+    "cpp-gate":     '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\ncxx = "0.7"\n',
+    "license-gate": '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense = "GPL-3.0"\n',
 }
 
 SKIP = {
-    "dag-gate":   "结构性硬判：真实数据已验证绿（19 crate 无环+顺序合规），注入需改 Cargo.toml，归手动",
-    "rayon-gate": "结构性硬判：真实数据已验证绿（无 rayon 依赖），注入需改 Cargo.toml，归手动",
-    "cpp-gate":   "结构性硬判：真实数据已验证绿（无 cxx/autocxx/cpp 依赖），注入需改 Cargo.toml，归手动",
+    "dag-gate":   "结构性硬判：真实数据已验证绿（19 crate 无环+顺序合规），注入需改 workspace members + crate 布局，归手动",
 }
 
 
@@ -57,9 +65,8 @@ def run_gate(gate):
     )
 
 
-def main():
+def _probe_rs():
     fails = []
-    skipped = []
     try:
         for gate, (fname, content) in PROBES.items():
             os.makedirs(PROBE_DIR, exist_ok=True)
@@ -77,16 +84,44 @@ def main():
     finally:
         if os.path.isdir(PROBE_DIR):
             shutil.rmtree(PROBE_DIR, ignore_errors=True)
+    return fails
 
+
+def _probe_toml():
+    fails = []
+    try:
+        for gate, content in TOML_PROBES.items():
+            os.makedirs(PROBE_DIR, exist_ok=True)
+            with open(os.path.join(PROBE_DIR, "Cargo.toml"), "w", encoding="utf-8") as f:
+                f.write(content)
+            out = run_gate(gate)
+            shutil.rmtree(PROBE_DIR, ignore_errors=True)
+            caught = out.returncode != 0 and "❌" in out.stdout
+            if caught:
+                print(f"✅ {gate}: 注入最小违例 manifest 后转红（是真门）")
+            else:
+                print(f"❌ {gate}: 注入违例 manifest 后仍绿 / 崩溃 —— 门可能为空门！")
+                print("   rc:", out.returncode, "| stdout:", repr(out.stdout[:300]), "| stderr:", repr(out.stderr[:300]))
+                fails.append(gate)
+    finally:
+        if os.path.isdir(PROBE_DIR):
+            shutil.rmtree(PROBE_DIR, ignore_errors=True)
+    return fails
+
+
+def main():
+    fails = []
+    skipped = []
+    fails += _probe_rs()
+    fails += _probe_toml()
     for gate, why in SKIP.items():
         print(f"ℹ️  {gate}: 跳过注入验证 —— {why}")
         skipped.append(gate)
-
     print("=" * 50)
     if fails:
         print(f"gate-probe 失败：{len(fails)} 道疑似空门 —— {', '.join(fails)}")
         sys.exit(1)
-    print(f"gate-probe 通过：{len(PROBES)} 道注入验证均转红；{len(skipped)} 道硬判归手动（{', '.join(skipped)}）")
+    print(f"gate-probe 通过：{len(PROBES) + len(TOML_PROBES)} 道注入验证均转红；{len(skipped)} 道硬判归手动（{', '.join(skipped)}）")
     sys.exit(0)
 
 
