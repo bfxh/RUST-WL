@@ -3,6 +3,12 @@ name = "vxl-phys-soft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "vxl_phys 专项模块（骨架，见 docs/SPEC.md）"
+description = "vxl_phys 软体/布料（XPBD）：绳索最小闭环已落地，见 docs/SPEC.md §4.6"
 
 [dependencies]
+vxl-phys-core = { workspace = true }
+
+[dev-dependencies]
+# 判据要落在**真实三角网地形**上（`TriMesh` 自带 `ProviderColliders` 实现）——
+# 只自造一个 collider 就等于绕开引擎真正走的那条提供者通道。
+vxl-phys-terrain = { workspace = true }
