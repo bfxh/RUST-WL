@@ -224,3 +224,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/vocab_scan.sh .
+
+  # ---- 依赖许可审计（cargo-deny；§0/§11「禁 GPL 传染」的传递依赖层面）----
+  # 轻量 ratchet 层的 license-gate 只查本仓各 crate 的直接依赖；本作业用 cargo-deny
+  # 查整条传递依赖树，禁 GPL/AGPL/LGPL 传染。deny.toml 在仓根，cargo-deny 自动读取。
+  cargo-deny:
+    name: 依赖许可审计 (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 安装 cargo-deny
+        run: cargo install cargo-deny --locked --version 0.14.24
+      - name: 许可审计（禁 GPL/AGPL/LGPL 传染）
+        run: cargo deny check licenses
