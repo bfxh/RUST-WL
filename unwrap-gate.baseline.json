@@ -1,0 +1,10 @@
+{
+  "crates/vxl-phys-core/src/mem.rs": 5,
+  "crates/vxl-phys-core/tests/loom_primitives.rs": 3,
+  "crates/vxl-phys-narrow/src/heightfield.rs": 2,
+  "crates/vxl-phys-narrow/src/lib.rs": 1,
+  "crates/vxl-phys-terrain/src/lib.rs": 2,
+  "crates/vxl-phys/examples/determinism.rs": 1,
+  "crates/vxl-phys/examples/m0_gates.rs": 3,
+  "crates/vxl-phys/src/lib.rs": 2
+}

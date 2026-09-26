@@ -205,6 +205,18 @@ jobs:
           echo "唯一哈希数 = $n（应为 1；>1 即跨平台不一致）"
           test "$n" -eq 1
 
+  # ---- 棘轮门禁（Python 纯 stdlib；SPEC §1/§6/§11 等机器化判据；详见 scripts/）----
+  ratchet:
+    name: 棘轮门禁
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 跑门禁（dag/rayon/unwrap/unsafe/linelen/glob/todo/god/cyc/nest/args + selftest + probe）
+        run: python scripts/local_gate.py
+
   # ---- 词汇禁令扫描（裁决 61；施工令 T6）----
   vocab:
     name: 词汇禁令扫描
