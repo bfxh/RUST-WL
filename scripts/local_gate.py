@@ -5,8 +5,8 @@
 CI 的 ratchet 作业只调本文件；本文件列出全部门禁步骤。改门禁 = 改这里 + 对应脚本 +
 基线，三处同源（gate_selftest 的 S1 校验 ci.yml 是否调用本文件）。
 
-硬判（存量须为 0）：dag-gate / rayon-gate / cpp-gate / fastmath-gate / asm-gate /
-staticmut-gate / license-gate / dbg-gate / print-gate / memfind-core-gate /
+硬判（存量须为 0）：dag-gate / rayon-gate / cpp-gate / fastmath-gate / f64-gate /
+asm-gate / staticmut-gate / license-gate / dbg-gate / print-gate / memfind-core-gate /
 engine-dep-gate。
 棘轮（存量进基线，只准减，新增即红）：unwrap / unsafe / linelen / glob / todo / god /
 cyc / nest / args / clone。
@@ -23,6 +23,7 @@ STEPS = [
     ("rayon-gate",   ["scripts/rayon_gate.py"]),
     ("cpp-gate",     ["scripts/cpp_gate.py"]),
     ("fastmath-gate",["scripts/fastmath_gate.py"]),
+    ("f64-gate",     ["scripts/f64_gate.py"]),
     ("asm-gate",     ["scripts/asm_gate.py"]),
     ("staticmut-gate",["scripts/staticmut_gate.py"]),
     ("license-gate", ["scripts/license_gate.py"]),
