@@ -42,6 +42,12 @@ PROBES = {
         'fn p(){ unsafe { asm!("nop"); } }\n'),
     "staticmut-gate": ("probe_staticmut.rs",
         'static mut PROBE: i32 = 0;\nfn p(){ unsafe { PROBE = 1; } }\n'),
+    "dbg-gate":     ("probe_dbg.rs",
+        'fn p(){ let _ = dbg!(1 + 1); }\n'),
+    "print-gate":   ("probe_print.rs",
+        'fn p(){ println!("leak"); }\n'),
+    "clone-gate":   ("probe_clone.rs",
+        'fn p(){ let v = vec![1i32]; let _ = v.clone(); }\n'),
 }
 
 # Cargo.toml 注入探针：结构性硬判，注入含违例的 manifest 必须转红
