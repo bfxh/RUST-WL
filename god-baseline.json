@@ -469,6 +469,11 @@
   "max_fn_lines": 43,
   "max_type_members": 0
  },
+ "crates/vxl-phys-gpu/tests/two_block_order.rs": {
+  "file_lines": 172,
+  "max_fn_lines": 74,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-integrate/src/lib.rs": {
   "file_lines": 113,
   "max_fn_lines": 35,
@@ -703,6 +708,11 @@
   "file_lines": 533,
   "max_fn_lines": 78,
   "max_type_members": 8
+ },
+ "crates/vxl-phys-terrain/src/plane_set.rs": {
+  "file_lines": 369,
+  "max_fn_lines": 58,
+  "max_type_members": 7
  },
  "crates/vxl-phys-terrain/src/voxel.rs": {
   "file_lines": 222,

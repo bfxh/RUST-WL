@@ -2,14 +2,14 @@
 //!
 //! 可破坏地形（§4.9）：高度场体素账本 + 柱状支撑图。
 //! M0：高度场集合管理 + 挖掘（dig）+ 包围盒输出；断裂/Voronoi 在 vxl-phys-destruction。
-//! 体素域（ROUTE §3）：`voxel::VoxelVolume`（占据位图 + 局域 SDF）实现
-//! `CollisionProvider`，是「兼容」轴上第一个新域 provider。
-//! 网格域（ROUTE §3 最后一块）：`mesh::TriMesh`（三角网 + 均匀网格加速）——
-//! 静态关卡几何的提供者（薄壳接触语义，见模块文档）。
+//! 体素域（ROUTE §3）：`voxel::VoxelVolume`（占据位图 + 局域 SDF）实现 `CollisionProvider`，是「兼容」轴上第一个新域 provider。
+//! 网格域（ROUTE §3）：`mesh::TriMesh`（三角网 + 均匀网格加速）——静态关卡几何的提供者（薄壳接触语义）。
+//! 凸体域：`plane_set::HalfSpaceSet`（外向半空间之交）——「点/球/盒 vs 任意凸体」的解析最小面接触（T3-②）。
 
 #![forbid(unsafe_code)]
 
 pub mod mesh;
+pub mod plane_set;
 pub mod voxel;
 
 use vxl_phys_broad::Aabb;
