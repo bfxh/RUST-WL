@@ -380,9 +380,14 @@
   "max_type_members": 12
  },
  "crates/vxl-phys-gpu/src/pipeline.rs": {
-  "file_lines": 877,
-  "max_fn_lines": 94,
+  "file_lines": 857,
+  "max_fn_lines": 87,
   "max_type_members": 16
+ },
+ "crates/vxl-phys-gpu/src/pipeline/bind_layout.rs": {
+  "file_lines": 63,
+  "max_fn_lines": 21,
+  "max_type_members": 0
  },
  "crates/vxl-phys-gpu/src/pipeline/bodies.rs": {
   "file_lines": 248,
@@ -444,6 +449,11 @@
   "max_fn_lines": 20,
   "max_type_members": 0
  },
+ "crates/vxl-phys-gpu/tests/grid_table_determinism.rs": {
+  "file_lines": 215,
+  "max_fn_lines": 65,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-gpu/tests/sorted_copies_bitwise.rs": {
   "file_lines": 150,
   "max_fn_lines": 41,
@@ -452,6 +462,11 @@
  "crates/vxl-phys-gpu/tests/sorted_copies_boundary.rs": {
   "file_lines": 191,
   "max_fn_lines": 42,
+  "max_type_members": 0
+ },
+ "crates/vxl-phys-gpu/tests/sorted_seed_localize.rs": {
+  "file_lines": 206,
+  "max_fn_lines": 43,
   "max_type_members": 0
  },
  "crates/vxl-phys-integrate/src/lib.rs": {

@@ -22,6 +22,7 @@
 use wgpu::util::DeviceExt;
 
 // ── 按域拆出的子模块（子目录 pipeline/）
+mod bind_layout;
 mod bodies;
 mod coupling;
 mod gpu_setup;
@@ -271,33 +272,9 @@ pub(crate) fn make_pipelines(device: &wgpu::Device) -> Pipes {
     let m_int = sh("integrate.wgsl", include_str!("integrate.wgsl"));
 
     // 网格：0 uniform + 1(pos,只读) + 2..=7(读写)
-    let bl_grid = mk_layout(
-        device,
-        "p.bl_grid",
-        &[
-            (0, Kind::Uniform),
-            (1, Kind::Ro),
-            (2, Kind::Rw),
-            (3, Kind::Rw),
-            (4, Kind::Rw),
-            (5, Kind::Rw),
-            (6, Kind::Rw),
-            (7, Kind::Rw),
-        ],
-    );
+    let bl_grid = mk_layout(device, "p.bl_grid", &bind_layout::spec("urwwwwww"));
     // 密度：0 uniform | 1 pos(只读) | 3 pmass(只读) | 5/6 格表(只读) | 7 dens(读写)
-    let bl_dens = mk_layout(
-        device,
-        "p.bl_dens",
-        &[
-            (0, Kind::Uniform),
-            (1, Kind::Ro),
-            (3, Kind::Ro),
-            (5, Kind::Ro),
-            (6, Kind::Ro),
-            (7, Kind::Rw),
-        ],
-    );
+    let bl_dens = mk_layout(device, "p.bl_dens", &bind_layout::spec("ur_r_rrw"));
     // 力：0 uniform | 1..=7 只读（含 dens）| 8 out(读写)
     let bl_force = mk_layout(
         device,
@@ -498,6 +475,9 @@ impl Packet {
     ) -> Result<(Self, walls::ExtraBufs), String> {
         let (_, device, queue) = crate::probe::device_for(adapter_index)?;
         let n = cfg.n;
+        // **盒按全量粒子现算**（§25.2 的修法）：不再抄调用方那张可能过期的表 ⇒ 盒必然覆盖全部粒子
+        // （原先盒外粒子会被钳进边缘格 ⇒ 格爆满 ⇒  跳过规范化 ⇒ 2b 路径不可复现）。
+        let cfg = bind_layout::covering_box(cfg, pos_flat);
         let total = cfg.total;
         // 四段各进一个 helper（`new` 由 310 行降到 ~90）：**持有结构体而不是就地解构**——
         // 后一段（bind group）要借前几段（`&bufs`/`&prm`/`&pipes`），解构会把它们移走。
