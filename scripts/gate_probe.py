@@ -55,6 +55,10 @@ TOML_PROBES = {
     "rayon-gate":   '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\nrayon = "1"\n',
     "cpp-gate":     '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\ncxx = "0.7"\n',
     "license-gate": '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense = "GPL-3.0"\n',
+    # §10：求解核心不得依赖 vxl-phys-memfind（_gate_probe 不在资产面白名单 → 命中）
+    "memfind-core-gate": '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\nvxl-phys-memfind = { path = "../vxl-phys-memfind" }\n',
+    # §0：既有引擎 crate 不得作为 [dependencies]
+    "engine-dep-gate": '[package]\nname = "_gate_probe"\nversion = "0.0.0"\nlicense.workspace = true\n\n[dependencies]\nrapier3d = "0.18"\n',
 }
 
 SKIP = {

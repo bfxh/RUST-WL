@@ -6,7 +6,8 @@ CI 的 ratchet 作业只调本文件；本文件列出全部门禁步骤。改�
 基线，三处同源（gate_selftest 的 S1 校验 ci.yml 是否调用本文件）。
 
 硬判（存量须为 0）：dag-gate / rayon-gate / cpp-gate / fastmath-gate / asm-gate /
-staticmut-gate / license-gate / dbg-gate / print-gate。
+staticmut-gate / license-gate / dbg-gate / print-gate / memfind-core-gate /
+engine-dep-gate。
 棘轮（存量进基线，只准减，新增即红）：unwrap / unsafe / linelen / glob / todo / god /
 cyc / nest / args / clone。
 元门：gate-selftest（门禁自检）/ gate-probe（逐门注入验证是真门）。
@@ -27,6 +28,8 @@ STEPS = [
     ("license-gate", ["scripts/license_gate.py"]),
     ("dbg-gate",     ["scripts/dbg_gate.py"]),
     ("print-gate",   ["scripts/print_gate.py"]),
+    ("memfind-core-gate", ["scripts/memfind_core_gate.py"]),
+    ("engine-dep-gate", ["scripts/engine_dep_gate.py"]),
     ("clone-gate",   ["scripts/clone_gate.py", "--git-tracked"]),
     ("unwrap-gate",  ["scripts/unwrap_gate.py", "--git-tracked"]),
     ("unsafe-gate",  ["scripts/unsafe_gate.py", "--git-tracked"]),
