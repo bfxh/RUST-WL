@@ -28,6 +28,7 @@ mod gpu_setup;
 mod gpu_types;
 mod reaction;
 mod readback;
+mod sorted;
 mod stepper;
 mod wall_table;
 mod walls;
@@ -251,14 +252,18 @@ pub(crate) struct Pipes {
     pub p_int: wgpu::ComputePipeline,
 }
 
+/// 建一个着色器模块（`make_pipelines` 里 5 次同一形状；提出去是为了让那个函数**变短**——
+/// god 门是棘轮：文件长一行的代价是"最长函数必须更短"）。
+fn sh_module(device: &wgpu::Device, label: &str, src: &str) -> wgpu::ShaderModule {
+    device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(src.into()),
+    })
+}
+
 pub(crate) fn make_pipelines(device: &wgpu::Device) -> Pipes {
     // —— 五个着色器模块 + 八条管线 ——
-    let sh = |label: &str, src: &str| {
-        device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
-            source: wgpu::ShaderSource::Wgsl(src.into()),
-        })
-    };
+    let sh = |label: &str, src: &str| sh_module(device, label, src);
     let m_grid = sh("grid.wgsl", include_str!("grid.wgsl"));
     let m_dens = sh("density.wgsl", include_str!("density.wgsl"));
     let m_force = sh("force.wgsl", include_str!("force.wgsl"));
@@ -445,7 +450,25 @@ impl Packet {
         vel_flat: &[f32],
         pmass: &[f32],
     ) -> Result<Self, String> {
-        Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass).map(|(p, _)| p)
+        Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass, false).map(|(p, _)| p)
+    }
+
+    /// **格序副本档**（`PLAN-gpu.md` §23.1）：两个邻域相位改吃"按格序摆"的副本（每子步一趟
+    /// `gather` 加一趟 `scatter`）。10M 档实测 **208.42 → 177.50 ms/tick（−14.8%）**，且与
+    /// [`new`](Packet::new) 的结果**逐位相同**（漂移表逐字相同 ⇒ 不是换代）。
+    ///
+    /// 做成**独立构造器**而不是 `PacketCfg` 的一个字段：一来"要不要这一档"是**整条管线**的选择
+    /// （不是某次运行的参数），二来 `PacketCfg` 的字面量在 5 个探针里各写一份，加字段会逼它们各长一行
+    /// （god 门是棘轮，见 §13.7 的"棘轮管既有文件"）。与 [`new_with_walls`](Packet::new_with_walls)
+    /// **互斥**：壁面档改的是索引序的 `dens`，格序档下 `dens` 是副本 ⇒ 同时开会**静默失效**。
+    pub fn new_sorted(
+        adapter_index: usize,
+        cfg: PacketCfg,
+        pos_flat: &[f32],
+        vel_flat: &[f32],
+        pmass: &[f32],
+    ) -> Result<Self, String> {
+        Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass, true).map(|(p, _)| p)
     }
 
     /// 同 [`new`](Packet::new)，并**顺带**建好**壁面鬼影阶段**（`wall_ghost.wgsl`）：它要绑
@@ -458,18 +481,20 @@ impl Packet {
         vel_flat: &[f32],
         pmass: &[f32],
     ) -> Result<(Self, WallStage), String> {
-        let (pkt, extra) = Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass)?;
+        let (pkt, extra) = Self::build(adapter_index, cfg, pos_flat, vel_flat, pmass, false)?;
         let walls = WallStage::new(&pkt, extra);
         Ok((pkt, walls))
     }
 
     /// 建包实体：顺带把**没被 `Packet` 持有**的两把句柄（`items`/`dens`）回给调用者（给壁面阶段）。
+    /// `want_sorted` = 要不要格序副本档（见 [`new_sorted`](Packet::new_sorted)）。
     fn build(
         adapter_index: usize,
         cfg: PacketCfg,
         pos_flat: &[f32],
         vel_flat: &[f32],
         pmass: &[f32],
+        want_sorted: bool,
     ) -> Result<(Self, walls::ExtraBufs), String> {
         let (_, device, queue) = crate::probe::device_for(adapter_index)?;
         let n = cfg.n;
@@ -481,6 +506,15 @@ impl Packet {
         let prm = make_params(&device, &cfg, n, total);
         let pipes = make_pipelines(&device);
         let binds = make_bind_groups(&device, &bufs, &prm, &pipes);
+        // **格序副本档**：见 `sorted.rs` 的适用范围说明——这里只做「纯流体」这条守门
+        //（壁面档那条由构造器分家保证：`new_with_walls` 走平铺档）。
+        let sorted = if want_sorted && cfg.n_fluid == cfg.n {
+            Some(sorted::make_sorted(
+                &device, &queue, n, cfg.mass, &bufs, &prm, &pipes,
+            ))
+        } else {
+            None
+        };
         // 常驻包围盒阶段（借用 `bufs.pos_b`；借用在此结束，随后字段被移进 `Self`）。
         let bbox = crate::bbox::BboxStage::new(
             &device,
@@ -498,7 +532,6 @@ impl Packet {
             // 空转、不改变结果（4 MB 的拷贝换来"零回读"，实测净赚）。
             total: if cfg.recompute_box { cap_total } else { total },
             groups_n: n.div_ceil(64),
-            groups_fluid: cfg.n_fluid.div_ceil(64),
             groups_total: if cfg.recompute_box {
                 cap_total.div_ceil(64)
             } else {
@@ -528,6 +561,7 @@ impl Packet {
             bg_force: binds.bg_force,
             bg_eos: binds.bg_eos,
             bg_int: binds.bg_int,
+            sorted,
             readback_b: bufs.readback_b,
         };
         Ok((
@@ -572,8 +606,21 @@ impl Packet {
         if stages & 0b000_0100 != 0 {
             dispatch(enc, &self.p_canon, &self.bg_grid, self.groups_total);
         }
+        // **格序副本档**（`cfg.sort_copies`）：只要有一个相位要吃副本，就先搬一趟；`scatter` 紧跟
+        // 力之后（**只在力跑过时**才回写——否则会把上一子步的 `out_c` 按**当前**置换乱写到 `out`）。
+        let s = self.sorted.as_ref();
+        if let Some(s) = s {
+            if stages & 0b011_1000 != 0 {
+                dispatch(enc, &s.p_gather, &s.bg_gather, self.groups_n);
+            }
+        }
         if stages & 0b000_1000 != 0 {
-            dispatch(enc, &self.p_dens, &self.bg_dens, self.groups_n);
+            dispatch(
+                enc,
+                &self.p_dens,
+                s.map_or(&self.bg_dens, |s| &s.bg_dens),
+                self.groups_n,
+            );
             // **壁面镜像鬼影**（可选档）：按 CPU 的口径必须**紧跟密度、在 EOS 之前**
             // （它改的是 `dens` ⇒ 压力读到的才是补过的密度）。条目为 0 时是空操作。
             if let Some(w) = walls {
@@ -581,15 +628,29 @@ impl Packet {
             }
         }
         if stages & 0b001_0000 != 0 {
-            dispatch(enc, &self.p_eos, &self.bg_eos, self.groups_n);
+            dispatch(
+                enc,
+                &self.p_eos,
+                s.map_or(&self.bg_eos, |s| &s.bg_eos),
+                self.groups_n,
+            );
         }
         if stages & 0b010_0000 != 0 {
-            dispatch(enc, &self.p_force, &self.bg_force, self.groups_n);
+            dispatch(
+                enc,
+                &self.p_force,
+                s.map_or(&self.bg_force, |s| &s.bg_force),
+                self.groups_n,
+            );
+            if let Some(s) = s {
+                dispatch(enc, &s.p_scatter, &s.bg_scatter, self.groups_n);
+            }
         }
         if stages & 0b100_0000 != 0 {
             // 积分**只跑流体前缀**：边界粒子（2b）是运动学冻结的，被积分会飘走——
             // 与 CPU `FluidSystem::substep` 的 `for i in 0..nf` 逐条对应。
-            dispatch(enc, &self.p_int, &self.bg_int, self.groups_fluid);
+            // 积分只跑流体前缀（组数就地算：以前存成字段，为 god 门的"类型成员数"棘轮腾位）。
+            dispatch(enc, &self.p_int, &self.bg_int, cfg.n_fluid.div_ceil(64));
             // **壁面投影**（可选档）：CPU `substep` 末尾的 `boundary_pass` 对应物——
             // 按同一张平面表把穿透粒子推回静置线、法向速度归零。无壁面档时是空操作。
             if let Some(w) = walls {

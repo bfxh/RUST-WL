@@ -63,8 +63,6 @@ pub struct Packet {
     /// 活的格数（**诊断/未来用途**：`recompute_box` 时它是分配额度——真值由 GPU 侧决定）。
     pub(crate) total: u32,
     pub(crate) groups_n: u32,
-    /// 流体前缀的组数（积分相位用；见 `PacketCfg::n_fluid`）。
-    pub(crate) groups_fluid: u32,
     pub(crate) groups_total: u32,
     /// 格表：`start`（每格起点，长度 `total + 1`）与 `cursor`（`place` 用的可变游标）。
     /// 二者现在**只由 `grid.wgsl` 写**（`scan` 一次写两份，省掉每子步的 `copy_buffer_to_buffer`），
@@ -98,4 +96,6 @@ pub struct Packet {
     pub(crate) bg_eos: wgpu::BindGroup,
     pub(crate) bg_int: wgpu::BindGroup,
     pub(crate) readback_b: wgpu::Buffer,
+    /// **格序副本档**的常驻物（`cfg.sort_copies` 且适用时才有；见 `sorted.rs`）。
+    pub(crate) sorted: Option<super::sorted::Sorted>,
 }

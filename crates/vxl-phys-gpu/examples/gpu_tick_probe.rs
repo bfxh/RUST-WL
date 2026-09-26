@@ -74,13 +74,13 @@ struct Args {
     /// `--tank`：给 2b **边界粒子**（地板 + 四壁的静态盒体）——用来验"边界粒子在 GPU 侧也跑得对"：
     /// 密度/力核里的 `sum_b`/`m_j = pmass[j]` 是 2b 的数学，积分则必须**只跑流体前缀**。
     tank: bool,
-    /// `--cpu-threads K`：**CPU 对照档**的线程数（默认 1 = 与历史读数同口径）。>1 走并行档——
-    /// 常驻测试 `parallel_equals_serial_bitwise` 已证两者**逐位相同** ⇒ 判据不受影响，
-    /// 但千万粒档的 CPU 对照从"十几分钟"降到"一两分钟"（大档验收的前提）。
+    /// `--cpu-threads K`：**CPU 对照档**的线程数（默认 1 = 与历史同口径；>1 走并行档，常驻测试
+    /// `parallel_equals_serial_bitwise` 已证两者**逐位相同** ⇒ 判据不受影响，只是大档快几十倍）。
     cpu_threads: usize,
-    /// `--pipe`：**管线档**回读演示（`PLAN-gpu` §19.1 ③）——`defer_readback` 只发起不等待，
-    /// 每 tick 等一下 tick 之前的回读 ⇒ 量与"回读等待被下一 tick 的计算遮住"能省多少。
+    /// `--pipe`：**管线档**回读演示（§19.1 ③）——只发起不等待 ⇒ 量"回读等待被下一 tick 的计算遮住"能省多少。
     pipe: bool,
+    /// `--sorted`：**格序副本档**（§23.1；判据 = 与平铺档**逐位相同**）。
+    sorted: bool,
 }
 
 fn parse_args() -> Args {
@@ -106,6 +106,7 @@ fn parse_args() -> Args {
             .and_then(|v| v.parse().ok())
             .unwrap_or(1),
         pipe: rest.iter().any(|a| a == "--pipe"),
+        sorted: rest.iter().any(|a| a == "--sorted"),
     }
 }
 
@@ -180,6 +181,7 @@ fn build_packet(
     h: f32,
     adapter_index: usize,
     follow_box: bool,
+    sorted: bool,
 ) -> Option<(Packet, PacketCfg)> {
     let (gmin, ginv, gdims) = {
         let gd = f.neighbor_grid();
@@ -232,10 +234,15 @@ fn build_packet(
         xsph_eps: f.config().xsph_viscosity,
         max_speed_frac: f.config().max_speed_frac,
         recompute_box: follow_box,
-        // 跟随时给足额度（= CPU 侧同一个预算上限）：粒子散开后箱子变大，格表要装得下。
         grid_bins_cap: if follow_box { 1 << 20 } else { total },
     };
-    match Packet::new(adapter_index, pc, &pos_flat, &vel_flat, &pmass) {
+    #[allow(clippy::type_complexity)] // fn 指针：两个构造器签名一致，按开关选一个
+    let mk: fn(usize, PacketCfg, &[f32], &[f32], &[f32]) -> Result<Packet, String> = if sorted {
+        Packet::new_sorted
+    } else {
+        Packet::new
+    };
+    match mk(adapter_index, pc, &pos_flat, &vel_flat, &pmass) {
         Ok(p) => Some((p, pc)),
         Err(e) => {
             println!("GPU 路径不可用：{e}");
@@ -366,8 +373,7 @@ fn time_gpu(
         box_ms = t.box_ms / gpu_ticks.max(1) as f32;
     }
     let gpu_ms = reps.iter().cloned().fold(f32::INFINITY, f32::min);
-    // **相位消融**（位：1 分箱 / 2 扫描+占位 / 4 规范化 / 8 密度 / 16 EOS / 32 力 / 64 积分）
-    // 单项单次测量有 ±2 ms 噪声 ⇒ 每项 2 次取最小（总量那一行才是可信的主读数）。
+    // **相位消融**（位：1 分箱 / 2 扫描+占位 / 4 规范化 / 8 密度 / 16 EOS / 32 力 / 64 积分）⇒ 每项 2 次取最小。
     let mut stage_ms = Vec::new();
     for (name, mask) in [
         ("分箱", 0b000_0001u32),
@@ -557,7 +563,7 @@ fn main() {
     };
     let np = f.raw_particles().0.len();
     let n_fluid = f.raw_particles().3;
-    let Some((mut pk, pc)) = build_packet(&f, s.h, a.adapter_index, a.follow_box) else {
+    let Some((mut pk, pc)) = build_packet(&f, s.h, a.adapter_index, a.follow_box, a.sorted) else {
         return;
     };
     stage("build_packet（建卡上管线/缓冲 + 首次上传）");
