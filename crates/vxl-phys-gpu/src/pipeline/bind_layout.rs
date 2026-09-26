@@ -26,7 +26,7 @@ use super::*;
 pub(crate) fn covering_box(cfg: PacketCfg, pos_flat: &[f32]) -> PacketCfg {
     let mut lo = vxl_phys_core::Vec3::new(f32::INFINITY, f32::INFINITY, f32::INFINITY);
     let mut hi = vxl_phys_core::Vec3::new(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
-    for p in pos_flat.chunks_exact(3) {
+    for p in pos_flat.as_chunks::<3>().0 {
         let v = vxl_phys_core::Vec3::new(p[0], p[1], p[2]);
         lo = lo.min(v);
         hi = hi.max(v);
