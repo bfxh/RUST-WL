@@ -88,3 +88,31 @@
 - **转换物理（T2）是新维度**：ROUTE 的作用矩阵（§80-84）没有它；`StateBridge`（表示转换）是它的既有接口位置（零实现）。
 - **开关形态照抄既有先例**（`config.rs:141` 的"0=关、关闭时逐位不变"、`narrow_tier.rs:92` 的"整趟回退"、
   新文件 `world_step/<feature>.rs` 避开尺寸门）⇒ T2 的四个子特性都能做到"默认关、既有判据不受影响"。
+
+## 4. 补记（2026-09-26）：把"窄相缺口"变成判据时撞到的**可见性墙**
+
+用户问"布料等等是不是有问题"，调研给出的**具体缺陷**是窄相的三条**静默缺失**（有形状、无接触）：
+
+| 缺口 | 现状 | 为什么对布料致命 |
+|---|---|---|
+| **capsule / cylinder / cone vs provider** | `provider_pair` 只受理 `Box`/`Sphere`/`ConvexHull`，其余 `_ => false`（`narrow/src/pair_shaped.rs:157-177`） | 布节点/胶囊 vs 任意几何是**主力**用法；今天**一个接触都不产**（体直接穿过去） |
+| **provider vs provider** | 直接返回不支持（`pair_shaped.rs:141-143`） | 两块地形/两个 trimesh 互碰 |
+| **三角网自碰撞** | 无 | 布-布自碰撞 |
+
+**撞到的墙（这条决定了下一步在哪一级写判据）**：窄相入口 `process_pair_shaped` 是 **`pub(crate)`**
+（`narrow/src/pair_shaped.rs:11`）⇒ **`crates/*/tests/` 这类集成测试够不到它**；而 crate 内部的
+`narrow/src/tests.rs` 受**尺寸门棘轮**约束（加行要配"函数变短"）⇒ 于是"先把缺口钉成判据"这件事
+**在窄相这一级做不了**，得抬到**门面级**（`vxl-phys`）用 `World` 搭场景来钉。
+
+**下一步的确切做法**（新会话起手）：
+1. **新文件** `crates/vxl-phys/tests/capsule_on_provider.rs`（新文件只判阈值 ⇒ 不撞棘轮）；
+2. 模板：`crates/vxl-phys/src/tests.rs:422`（World 级：`apply_impact_destruction` 的用法）+
+   `crates/vxl-phys/examples/trimesh_rest_probe.rs:19-27`（provider 怎么挂、怎么读接触）；
+3. 判据（**今天就该绿、且钉住"今天是穿过去"**）：
+   - 静态 `TriMesh` 地板上放一个 **capsule** ⇒ 今天**无接触** ⇒ 体一路下沉（复现缺口）；
+   - 同一场景换 **box** ⇒ 有接触、静置高度符合 `depth` 口径（对照组，证明场景搭对了）；
+   - 一句话写在断言里：**"这条 `✗` 是已知缺口；修好（capsule 走 `contacts_sphere` 沿轴采样）之后
+     本断言要翻过来"** ⇒ 判据先立、修法后到。
+4. 修法方向（供拍板）：capsule 对 provider 用**沿轴 N 个球采样 + `contacts_sphere`**（无需给 trait 加
+   `contacts_capsule`；球采样数固定 ⇒ 确定性）；cylinder/cone 同理可用**端面圆 + 母线采样**。
+   ⚠️ 加接触会**改变**"胶囊压在 provider 上"的既有场景读数（今天它们是穿过去的）⇒ 按换代级流程走。
