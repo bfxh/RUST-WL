@@ -305,9 +305,9 @@
   "max_type_members": 10
  },
  "crates/vxl-phys-gpu/examples/gpu_layout_probe.rs": {
-  "file_lines": 719,
-  "max_fn_lines": 94,
-  "max_type_members": 10
+  "file_lines": 768,
+  "max_fn_lines": 69,
+  "max_type_members": 9
  },
  "crates/vxl-phys-gpu/examples/gpu_narrow_probe/diag.rs": {
   "file_lines": 370,

@@ -76,22 +76,29 @@ impl Layout {
 }
 
 /// 一份排布：槽位化的输入数组 + 重建的网格表 + 解释用诊断量。
+/// 一张排布的格表（三张捆一起：`Arrangement` 的成员数是棘轮门看着的量）。
+struct Grid {
+    start: Vec<u32>,
+    items: Vec<u32>,
+    /// 逐槽位的格下标（自检用）。
+    bins: Vec<u32>,
+}
+
 struct Arrangement {
     pos_flat: Vec<f32>,
     vel_flat: Vec<f32>,
     press: Vec<f32>,
-    cell_start: Vec<u32>,
-    cell_items: Vec<u32>,
-    /// 逐槽位的格下标（自检用）。
-    bins: Vec<u32>,
+    grid: Grid,
     /// 采样：连续 32 槽的邻域并集 / 32（1.0 = 整 warp 共享同一片格 ⇒ 理想局部性）。
     nbr_per_warp: f64,
     /// 采样：槽 k 与 k+1 的空间距离均值（米）。
     step_dist_m: f64,
     /// 候选对数（三档必须相同 ⇒ "工作量相同"这条前提被守住）。
     pairs: u64,
-    /// 跑出来的一份 dens（跨档对拍：排布不该改物理）。
-    dens: Vec<f32>,
+    /// 槽位 k ← 原粒子 `perm[k]`（跨档逐位对拍的桥）。
+    perm: Vec<u32>,
+    /// 两相位输出**拼成一条**：`dens[n] ‖ acc[3n] ‖ xsph[3n]`（拼一条同上——成员数有上限）。
+    out: Vec<f32>,
 }
 
 /// 与 `vxl-phys-fluid/src/grid.rs::bin_index_of` **同式**（格下标 + 越界钳位）。
@@ -260,13 +267,16 @@ fn build_arrangement(
         pos_flat,
         vel_flat,
         press: pr,
-        cell_start,
-        cell_items,
-        bins,
+        grid: Grid {
+            start: cell_start,
+            items: cell_items,
+            bins,
+        },
         nbr_per_warp,
         step_dist_m,
         pairs,
-        dens: Vec::new(),
+        perm,
+        out: Vec::new(),
     }
 }
 
@@ -394,9 +404,9 @@ fn self_checks(
     np: usize,
     total: usize,
 ) {
-    let base_start = &arrs[0].1.cell_start;
+    let base_start = &arrs[0].1.grid.start;
     for (l, a) in arrs {
-        assert_eq!(&a.cell_start, base_start, "{:?} 的 start 不同", l.name());
+        assert_eq!(&a.grid.start, base_start, "{:?} 的 start 不同", l.name());
     }
     let p0 = arrs[0].1.pairs;
     for (l, a) in arrs {
@@ -416,7 +426,7 @@ fn self_checks(
     assert_eq!(oob, 0, "有粒子落在格盒外 ⇒ 27 格 stencil 不再覆盖全邻域");
     assert!(within1 > 99.9, "bin_of 与引擎公式不一致（差 >1 格）");
     for (l, a) in arrs {
-        let (bad, ident) = table_consistent(&a.bins, &a.cell_start, &a.cell_items, total);
+        let (bad, ident) = table_consistent(&a.grid.bins, &a.grid.start, &a.grid.items, total);
         assert_eq!(bad, 0, "{:?} 的表不自洽：{bad} 项", l.name());
         if l.name() == Layout::Sorted.name() {
             assert_eq!(ident as usize, np, "sorted 档不是恒等置换（{ident}/{np}）");
@@ -498,15 +508,19 @@ fn run_once(arr: &mut Arrangement, params: PhaseParams, np: usize, reps: usize) 
         vel_flat: &arr.vel_flat,
         pmass: &pmass,
         press: &arr.press,
-        cell_start: &arr.cell_start,
-        cell_items: &arr.cell_items,
+        cell_start: &arr.grid.start,
+        cell_items: &arr.grid.items,
     };
     let out = probe::phases_on_adapter(0, &inputs, params, np, reps);
     if let Some(e) = out.error {
         panic!("GPU 路径不可用：{e}");
     }
-    if arr.dens.is_empty() {
-        arr.dens = out.dens.clone();
+    if arr.out.is_empty() {
+        // 拼成一条：dens[n] ‖ acc[3n] ‖ xsph[3n]
+        arr.out = Vec::with_capacity(out.dens.len() * 7);
+        arr.out.extend_from_slice(&out.dens);
+        arr.out.extend_from_slice(&out.acc);
+        arr.out.extend_from_slice(&out.xsph);
     }
     (out.per_dispatch_ms as f64, out.setup_ms)
 }
@@ -537,21 +551,46 @@ fn solve(r1: usize, p1: f64, r2: usize, p2: f64) -> (f64, f64, bool) {
     (if ok { c } else { p1.max(p2) }, r, ok)
 }
 
-/// 排布不该改物理：**分位对齐**比密度（槽位口径不同、求和序不同 ⇒ 只判"同分布"）。
-fn physics_check(arrs: &[(Layout, Arrangement)]) {
-    let mut s0 = arrs[0].1.dens.clone();
-    s0.sort_unstable_by(|p, q| p.partial_cmp(q).unwrap());
+/// f32 的单调位序键（ulp 比较用；负数区要翻转）。
+fn ukey(x: f32) -> i32 {
+    let b = x.to_bits() as i32;
+    if b < 0 {
+        i32::MIN.wrapping_sub(b)
+    } else {
+        b
+    }
+}
+
+/// **接线判据（逐位一致）**：`<档>[k]` 必须与 `natural[perm[k]]` **逐位相同**。
+///
+/// 为什么这条是接线的判据：生产上要把两核改成"读格序副本"（`x_c[m] = x[perm[m]]`）——那时每个粒子的
+/// **邻域枚举序列**必须一字不变，否则就不是"只改访存"，而会动默认档的冻结值与哈希。所以接线前先在这里
+/// 把"逐位"立住。
+///
+/// ⚠️ **判据必须能否证**：`random` 档的槽位序与粒子索引序无关 ⇒ 它格内枚举的是**另一批粒子的序列**
+/// ⇒ 它**必须**报出不符。若三档都报 0 不符，说明这条判据没有分辨力（是坏的），不许当绿灯用。
+fn equivalence_check(arrs: &[(Layout, Arrangement)]) {
+    let nat = &arrs[0].1;
+    println!("\n== 接线判据：逐位一致（`<档>[k]` vs `natural[perm[k]]`）==");
     for (l, a) in arrs.iter().skip(1) {
-        let mut s1 = a.dens.clone();
-        s1.sort_unstable_by(|p, q| p.partial_cmp(q).unwrap());
-        let mut rel = 0.0f32;
-        for (x, y) in s0.iter().zip(s1.iter()) {
-            rel = rel.max((x - y).abs() / x.abs().max(1e-3));
+        let n = a.out.len() / 7; // 拼条口径：dens[n] ‖ acc[3n] ‖ xsph[3n]
+        let mut parts: Vec<String> = Vec::new();
+        for (name, base, per) in [("dens", 0usize, 1usize), ("acc", n, 3), ("xsph", 4 * n, 3)] {
+            let len = n * per;
+            let mut bad = 0usize;
+            let mut maxu = 0u32;
+            for t in 0..len {
+                // `per` = 每粒几个 f32：槽位下标 = t / per，分量 = t % per
+                let j = a.perm[t / per] as usize * per + (t % per);
+                let (x, y) = (a.out[base + t], nat.out[base + j]);
+                if x.to_bits() != y.to_bits() {
+                    bad += 1;
+                }
+                maxu = maxu.max(ukey(x).abs_diff(ukey(y)));
+            }
+            parts.push(format!("{name} 不符 {bad}/{len} maxulp {maxu}"));
         }
-        println!(
-            "  物理对拍 {:<7}：分位对齐后密度最大相对差 {rel:.3e}（⇒ 工作量与物理一致）",
-            l.name()
-        );
+        println!("  {:<7}{}", l.name(), parts.join(" | "));
     }
 }
 
@@ -622,6 +661,41 @@ fn build_scene(n: usize, cpu_threads: usize) -> FluidSystem {
     f
 }
 
+/// 建场景 + **按当前位置现算箱子** + 建三档排布 + 过四条自检（`main` 的前半段）。
+///
+/// 箱子必须现算、不能直接借引擎那份：引擎的格表是 `substep()` **开头**建的、`step()` 末尾又积分了
+/// 一次 ⇒ 它对应**上一个子步的位置**，照它分箱会有一批粒子落在盒外（实测 1.8%），27 格 stencil
+/// 就不再覆盖全邻域。顺带这也让 `natural` 档与管线的访问模式逐条对齐。
+fn prepare(
+    n: usize,
+    cpu_threads: usize,
+) -> (FluidSystem, Box3, [u32; 3], Vec<(Layout, Arrangement)>) {
+    let f = build_scene(n, cpu_threads);
+    let gd = f.neighbor_grid();
+    let pos: Vec<Vec3> = f.positions().to_vec();
+    let np = pos.len();
+    let (lo, hi) = pos
+        .iter()
+        .fold((pos[0], pos[0]), |(l, h), p| (l.min(*p), h.max(*p)));
+    let (min, bin, dims) = grid_box(lo, hi, f.config().smoothing_radius, GRID_MAX_BINS);
+    let b = Box3 {
+        min,
+        inv: 1.0 / bin,
+        dims: (dims[0], dims[1], dims[2]),
+    };
+    println!(
+        "== 排布判别（{np} 粒；箱 {dims:?} = {} 格 ⇒ 格边 {bin:.4} m，h={}）==",
+        b.total(),
+        f.config().smoothing_radius
+    );
+    let arrs: Vec<(Layout, Arrangement)> = Layout::all()
+        .into_iter()
+        .map(|l| (l, build_arrangement(&b, l, &gd, &f)))
+        .collect();
+    self_checks(&arrs, &gd, &pos, &b, np, b.total());
+    (f, b, dims, arrs)
+}
+
 fn main() {
     let (n, cpu_threads, rounds, rest) = parse_args();
     // `--diag-only` 纯 CPU：只跑局部性衰减曲线（不碰 GPU、不需要独占锁）。
@@ -643,40 +717,15 @@ fn main() {
         println!("  [{i}] {a}");
     }
 
-    let f = build_scene(n, cpu_threads);
-    let gd = f.neighbor_grid();
-    let pos: Vec<Vec3> = f.positions().to_vec();
-    let np = pos.len();
-    // **箱子按当前位置现算**（与管线 `substep()` 同一条规则、同一时刻）——不能直接借引擎那份：
-    // 它是上一个子步建的，粒子已外移 ⇒ 会有一批粒子落在盒外（实测 1.8%），27 格 stencil 就
-    // 不再覆盖全邻域。顺带这也让 `natural` 档与管线的访问模式逐条对齐。
-    let (lo, hi) = pos
-        .iter()
-        .fold((pos[0], pos[0]), |(l, h), p| (l.min(*p), h.max(*p)));
-    let (min, bin, dims) = grid_box(lo, hi, f.config().smoothing_radius, GRID_MAX_BINS);
-    let b = Box3 {
-        min,
-        inv: 1.0 / bin,
-        dims: (dims[0], dims[1], dims[2]),
-    };
-    let total = b.total();
-    println!(
-        "== 排布判别（{np} 粒；箱 {dims:?} = {total} 格 ⇒ 格边 {bin:.4} m，h={}）==",
-        f.config().smoothing_radius
-    );
-
-    let mut arrs: Vec<(Layout, Arrangement)> = Layout::all()
-        .into_iter()
-        .map(|l| (l, build_arrangement(&b, l, &gd, &f)))
-        .collect();
-    self_checks(&arrs, &gd, &pos, &b, np, total);
+    let (f, b, dims, mut arrs) = prepare(n, cpu_threads);
+    let np = f.len();
 
     // —— 计时：交错轮（两轮取最小），每档两档 repeats 解 `c` 与 `R` ——
     let h = f.config().smoothing_radius;
     let k6 = 315.0 / (64.0 * std::f32::consts::PI * h.powi(9));
     let g = f.config().gravity;
     let params = PhaseParams {
-        gmin: [min.x, min.y, min.z],
+        gmin: [b.min.x, b.min.y, b.min.z],
         inv: b.inv,
         h2: h * h,
         k6,
@@ -699,7 +748,7 @@ fn main() {
     let (r1, r2) = (get(&rest, "--r1", 8), get(&rest, "--r2", 32));
     let best = measure_all(&mut arrs, params, np, r1, r2, rounds);
     report_table(&arrs, &best);
-    physics_check(&arrs);
+    equivalence_check(&arrs);
     if let Some(cp) = diag {
         println!();
         diag_curve(n, cpu_threads, &cp);
