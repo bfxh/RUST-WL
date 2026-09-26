@@ -212,3 +212,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: bash scripts/vocab_scan.sh .
+
+  # ---- 依赖许可审计（cargo-deny；§0/§11「禁 GPL 传染」的传递依赖层面）----
+  # 轻量 ratchet 层的 license-gate 只查本仓各 crate 的直接依赖；本作业用 cargo-deny
+  # 查整条传递依赖树，禁 GPL/AGPL/LGPL 传染。deny.toml 在仓根，cargo-deny 自动读取。
+  cargo-deny:
+    name: 依赖许可审计 (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: 安装 cargo-deny
+        # 钉 0.20.2：0.14 系解析不了 RUSTSEC 新公告的 CVSS 4.0 字段（RUSTSEC-2026-0124
+        # 即触发 "unsupported CVSS version: 4.0"，advisory DB 加载即崩）；升 0.20.2 后
+        # 本地实测 deny.toml 兼容（licenses ok）。
+        run: cargo install cargo-deny --locked --version 0.20.2
+      - name: 依赖审计（禁 GPL/AGPL/LGPL 传染 + RUSTSEC 漏洞 + 多版本/wildcard）
+        run: cargo deny check
