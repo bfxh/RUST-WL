@@ -1,13 +1,13 @@
 //! # vxl-phys-destruction
-//!
 //! 预断裂/运行时断裂/碎片（§4.9）—— M2 落地（集成方实装验收）。
-//!
 //! - 预断裂：Voronoi 分片（质心排序确定性），离线/装载期生成；
-//! - 运行时断裂：冲击能量阈值 E_threshold（按材质 J 表）触发 Voronoi 细分一层；
-//!   碎片继承动量；
+//! - 运行时断裂：冲击能量阈值 E_threshold（按材质 J 表）触发 Voronoi 细分一层；碎片继承动量；
 //! - 结构稳定性：连接约束网络按应力断裂 → 连锁坍塌；碎片休眠阈值放宽一档。
+//! - 冲量分级：冲击 → 碎裂档级 → site 数（受预算封顶）——策略是纯函数，见 。
 
 #![forbid(unsafe_code)]
+
+pub mod impact_tiers;
 
 /// §4.9 碎片预算档。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

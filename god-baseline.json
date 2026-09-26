@@ -164,6 +164,11 @@
   "max_fn_lines": 32,
   "max_type_members": 0
  },
+ "crates/vxl-phys-destruction/src/impact_tiers.rs": {
+  "file_lines": 243,
+  "max_fn_lines": 21,
+  "max_type_members": 6
+ },
  "crates/vxl-phys-destruction/src/lib.rs": {
   "file_lines": 47,
   "max_fn_lines": 7,
