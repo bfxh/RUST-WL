@@ -1,14 +1,18 @@
 # cargo-deny 配置（RUST-WL / vxl_phys）
-# 目标：§0/§11「许可 MIT OR Apache-2.0；依赖审计禁 GPL 传染」。
-# 本文件只管许可审计（独立 CI 作业 `cargo-deny`），不碰既有的轻量 ratchet 层。
+# 目标：§0/§11「许可 MIT OR Apache-2.0；依赖审计禁 GPL 传染」+ §11 依赖漏洞审计（RUSTSEC）。
+# 本文件只管依赖审计（独立 CI 作业 `cargo-deny`），不碰既有的轻量 ratchet 层。
+# CI 跑 `cargo deny check`（licenses + advisories + bans 全量）。
 
 [advisories]
 version = 2
-# 仅做许可审计；advisory/RUSTSEC 库默认开启，但本作业只跑 `cargo deny check licenses`
+# RUSTSEC 漏洞库默认开启；CI 联网拉 advisory-db。本地沙箱拦截 github git 协议，无法离线预验证，
+# 故 advisories 结果以 real-CI 为准。
 
 [licenses]
 version = 2
-# 允许的宽松许可（与 license-gate 的 PERMISSIVE 口径一致）
+# 允许的宽松许可（与 license-gate 的 PERMISSIVE 口径一致）。
+# cargo-deny 中 `allow` 为「许可白名单」：凡不在 allow 里的许可（含 GPL/AGPL/LGPL 家族）一律判违例，
+# 因此无需额外 `deny` 列表（且 0.14 的 `deny` 键已 deprecated）。
 allow = [
     "MIT",
     "MIT-0",
@@ -25,14 +29,6 @@ allow = [
     "BSL-1.0",
     "Unicode-DFS-2016",
     "Unicode-3.0",
-]
-# 明确禁止的 copyleft / GPL 传染许可（cargo-deny 用裸 GNU id 覆盖 -only/-or-later 两种变体）
-deny = [
-    "GPL-2.0",
-    "GPL-3.0",
-    "AGPL-3.0",
-    "LGPL-2.1",
-    "LGPL-3.0",
 ]
 # 0.8：允许 cargo-deny 在较低置信度下判定许可（避免漏判双许可 / 模糊声明）
 confidence-threshold = 0.8
