@@ -25,8 +25,8 @@ jobs:
           - { os: ubuntu-latest, label: "GCC / x86_64", linker: "" }
           - { os: ubuntu-latest, label: "Clang+LLD / x86_64", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy, rustfmt
       - name: Clang 工具链（clang 行）
@@ -48,8 +48,8 @@ jobs:
     name: miri (core 子集)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
         with:
           components: miri
       - name: miri test -p vxl-phys-core
@@ -62,8 +62,8 @@ jobs:
     name: loom (并发原语)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: loom 模型测试
         env:
           RUSTFLAGS: --cfg loom
@@ -75,8 +75,8 @@ jobs:
     name: TSan (并行路径)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
         with:
           components: rust-src
       - name: TSan 并行契约测试
@@ -93,8 +93,8 @@ jobs:
     name: ASan (core + 门槛短跑)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
         with:
           components: rust-src
       - name: ASan core 单测
@@ -122,8 +122,8 @@ jobs:
           - { os: ubuntu-latest, label: "GCC", linker: "" }
           - { os: ubuntu-latest, label: "Clang", linker: "-C linker=clang -C link-arg=-fuse-ld=lld" }
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Clang 工具链（clang 行）
         if: contains(matrix.label, 'Clang')
         run: sudo apt-get update && sudo apt-get install -y clang lld
@@ -135,7 +135,7 @@ jobs:
         env:
           RUSTFLAGS: ${{ matrix.linker }}
         run: cargo run --release -p vxl-phys --example determinism | tee determinism-${{ matrix.label }}.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gates-${{ matrix.label }}
           path: |
@@ -147,8 +147,8 @@ jobs:
     name: 确定性 (GCC-aarch64/qemu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-unknown-linux-gnu
       - name: 交叉工具链 + QEMU
@@ -162,7 +162,7 @@ jobs:
         run: |
           cargo run --release --target aarch64-unknown-linux-gnu -p vxl-phys --example determinism \
             | tee determinism-GCC-aarch64.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: gates-GCC-aarch64
           path: determinism-GCC-aarch64.txt
@@ -173,7 +173,7 @@ jobs:
     needs: [determinism, determinism-arm64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with: { path: arts }
       - name: gate_scene.hash.final 全等断言（x86_64 三编译器）
         run: |
@@ -210,5 +210,5 @@ jobs:
     name: 词汇禁令扫描
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash scripts/vocab_scan.sh .
