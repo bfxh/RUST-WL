@@ -449,6 +449,11 @@
   "max_fn_lines": 41,
   "max_type_members": 0
  },
+ "crates/vxl-phys-gpu/tests/sorted_copies_boundary.rs": {
+  "file_lines": 191,
+  "max_fn_lines": 42,
+  "max_type_members": 0
+ },
  "crates/vxl-phys-integrate/src/lib.rs": {
   "file_lines": 113,
   "max_fn_lines": 35,
