@@ -4,8 +4,7 @@
 //! - 凸-凸：SAT（面法线 + 棱叉积轴）+ 参考面 Sutherland–Hodgman 裁剪 → ≤4 点流形；
 //! - 球：解析（球-球 / 球-凸体最近点）；
 //! - 高度场：列采样特化（§2.4「列裁剪 + 局部采样」的 M0 版）；
-//! - GJK/EPA 通用凸路径：**凸体外壳 × {盒|球|外壳}**（`gjk.rs`，多点流形由外壳面顶点细化）；
-//!   **外壳 × 提供者**走顶点采样（逐顶点 SDF 解析）。
+//! - GJK/EPA 通用凸路径：**凸体外壳 × {盒|球|外壳}**（`gjk.rs`）；**{盒|球|外壳|胶囊} × 提供者**见 `provider.rs`。
 //!
 //! 流形法线约定：`normal` 从 a 指向 b；求解器把 +n 冲量施加给 b、−n 施加给 a。
 //! skin = speculative margin（§4.3）：分离距离 ≤ skin 仍生成「预期接触」。
@@ -34,6 +33,7 @@ mod pair;
 mod pair_shaped;
 mod phase;
 mod prims;
+mod provider;
 mod sat;
 mod store;
 mod support;

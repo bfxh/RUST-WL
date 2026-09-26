@@ -109,8 +109,9 @@ impl DefaultNarrowPhase {
     }
 
     /// **外部碰撞提供者参与的对**（体素/网格/喷溅场…；ROUTE §2.1 兼容轴）。
-    /// 只有「盒 vs provider」走此路径（其余形状待 provider 专用解法补齐）；
-    /// 法线约定与高度场一致：provider 在 a → +n_s（外向）；在 b → −n_s。
+    /// 受理的形状面：`Box` / `Sphere` / `ConvexHull` / `Capsule`（其余形状待专用解法，
+    /// 见 `provider.rs::provider_shape_contacts`）；
+    /// 法线约定与高度场一致：提供者在 a → +n_s（外向）；在 b → −n_s。
     ///
     /// 返回 `true` = 本段已处理（**进入本段后所有路径都结束整对**，与原实现一致）。
     #[allow(clippy::too_many_arguments)]
@@ -166,30 +167,19 @@ impl DefaultNarrowPhase {
             let band = self
                 .skin
                 .max(vrel.length() * (1.0 / 60.0) * 1.5 + self.skin);
-            let ok = match *body_shape {
-                Shape::Box { half } => providers.contacts_box(id, half, bpos, brot, band, &mut buf),
-                // 球：SDF 类提供者解析求解（`depth = r − sdf(center)`）
-                Shape::Sphere { radius } => {
-                    providers.contacts_sphere(id, bpos, radius, band, &mut buf)
-                }
-                // 外壳 vs 提供者：**顶点采样**（逐顶点按 SDF 解析求深度/法线；
-                // 多点 ⇒ 面接触稳定）。顶点序即特征序之外的 provider 特征由各点给。
-                Shape::ConvexHull { .. } => {
-                    // 世界点走缓存（同体同帧多对时只做一次 O(n) 变换）
-                    let side = if pr_is_a { 1 } else { 0 };
-                    let body = if pr_is_a { b } else { a };
-                    if !self.fill_hull_world(side, body, body_shape, bpos, brot) {
-                        return true;
-                    }
-                    let mut supported = false;
-                    for k in 0..self.hull_pts[side].len() {
-                        supported |=
-                            providers.contacts_point(id, self.hull_pts[side][k], band, &mut buf);
-                    }
-                    supported
-                }
-                _ => false, // 其余形状 vs provider：待专用查询
-            };
+            // 体形状 → 候选接触：**分发与采样在 `provider.rs`**（本文件受尺寸棘轮，
+            // 只准减不许胖 ⇒ 会继续长的采样代码不放这里）。受理面见该文件。
+            let ok = self.provider_shape_contacts(
+                body_shape,
+                if pr_is_a { b } else { a },
+                bpos,
+                brot,
+                id,
+                pr_is_a,
+                band,
+                providers,
+                &mut buf,
+            );
             if !ok || buf.is_empty() {
                 return true; // 不支持 / 全部顶点都不在接触带内
             }
