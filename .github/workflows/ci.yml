@@ -224,5 +224,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: 安装 cargo-deny
         run: cargo install cargo-deny --locked --version 0.14.24
-      - name: 许可审计（禁 GPL/AGPL/LGPL 传染）
-        run: cargo deny check licenses
+      - name: 依赖审计（禁 GPL/AGPL/LGPL 传染 + RUSTSEC 漏洞 + 多版本/wildcard）
+        run: cargo deny check
