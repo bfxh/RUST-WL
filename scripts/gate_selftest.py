@@ -18,7 +18,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 与 local_gate.STEPS 同步（避免循环 import，此处单列常量）
 RATCHET_BASELINED = [
     "unwrap-gate", "unsafe-gate", "linelen-gate", "glob-gate",
-    "todo-gate", "god-gate", "cyc-gate", "nest-gate", "args-gate",
+    "todo-gate", "god-gate", "cyc-gate", "nest-gate", "args-gate", "clone-gate",
 ]
 CI_YML = os.path.join(ROOT, ".github", "workflows", "ci.yml")
 ANCHOR = "scripts/local_gate.py"  # 单一入口：local_gate 内部再跑 selftest + probe
