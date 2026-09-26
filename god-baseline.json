@@ -989,6 +989,11 @@
   "max_fn_lines": 37,
   "max_type_members": 0
  },
+ "crates/vxl-phys/tests/provider_shape_coverage.rs": {
+  "file_lines": 190,
+  "max_fn_lines": 61,
+  "max_type_members": 0
+ },
  "crates/vxl-phys/tests/rest_height_contract.rs": {
   "file_lines": 236,
   "max_fn_lines": 41,
