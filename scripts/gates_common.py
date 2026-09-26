@@ -393,6 +393,41 @@ def parse_cargo_deps(text):
     return names
 
 
+def parse_cargo_dep_sections(text):
+    """返回 {section: set(dep_names)}，section ∈ {dependencies, dev-dependencies,
+    build-dependencies}。同时处理 [dependencies."feature"] 子表——子表内的依赖名仍计入
+    所属主段。用于「只查 [dependencies]（不含 dev/build）」的门（禁引擎依赖、
+    memfind 不进求解核心）。"""
+    sections = {}
+    cur = None
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("["):
+            m = _DEP_SECTION_RE.match(s)
+            if m:
+                cur = m.group(1)          # dependencies / dev-dependencies / build-dependencies
+            else:
+                cur = None
+            continue
+        if cur is None:
+            continue
+        km = re.match(r"^([A-Za-z0-9_-]+)\s*=", s)
+        if km:
+            sections.setdefault(cur, set()).add(km.group(1))
+    return sections
+
+
+def cargo_pkg_name(text):
+    """返回该 Cargo.toml [package] 段的 name；虚拟 workspace（无 [package]）返回 None。"""
+    m = re.search(r"\[\s*package\s*\](.*?)(?:\n\[|\Z)", text, re.S)
+    if not m:
+        return None
+    nm = re.search(r"^\s*name\s*=\s*\"([^\"]+)\"", m.group(1), re.M)
+    return nm.group(1) if nm else None
+
+
 def parse_members(text):
     """返回根 Cargo.toml [workspace] members 列表（有序）。"""
     m = re.search(r"members\s*=\s*\[(.*?)\]", text, re.S)
