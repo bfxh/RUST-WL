@@ -1,0 +1,6 @@
+{
+  "crates/vxl-phys-broad/src/lib.rs": 2,
+  "crates/vxl-phys-narrow/src/lib.rs": 4,
+  "crates/vxl-phys-solver/src/lib.rs": 2,
+  "crates/vxl-phys/examples/m0_gates.rs": 1
+}
