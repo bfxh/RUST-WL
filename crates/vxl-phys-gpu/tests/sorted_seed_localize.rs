@@ -128,7 +128,16 @@ fn per_substep(
     let mut out = Vec::with_capacity(STEPS);
     for _ in 0..STEPS {
         pk.run_substep(pc, 1.0 / 60.0, 0b111_1111, Some(walls));
-        out.push((walls.read_dens(pk, np), pk.snapshot().1));
+        // 【仪器自证】同一步连读两次（不推子步）必须逐位一致——否则 `read_dens` 本身不定，
+        // 本探针的一切结论作废（§24.2 写死的第一步）。
+        let d0 = walls.read_dens(pk, np);
+        let d1 = walls.read_dens(pk, np);
+        assert_eq!(
+            n_diff(&d0, &d1),
+            0,
+            "❌ 仪器自证失败：`read_dens` 同一步读两次就不一致 ⇒ 本探针结论不可用"
+        );
+        out.push((d1, pk.snapshot().1));
     }
     out
 }
