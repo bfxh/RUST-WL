@@ -76,7 +76,7 @@ fn scene() -> FluidSystem {
     f
 }
 
-fn cfg_for(f: &FluidSystem) -> PacketCfg {
+fn cfg_for(f: &FluidSystem, follow_box: bool) -> PacketCfg {
     let h = f.config().smoothing_radius;
     let (gmin, ginv, gdims) = {
         let gd = f.neighbor_grid();
@@ -107,8 +107,13 @@ fn cfg_for(f: &FluidSystem) -> PacketCfg {
         clamp_neg: f.config().tensile_instability_suppression,
         xsph_eps: f.config().xsph_viscosity,
         max_speed_frac: f.config().max_speed_frac,
-        recompute_box: false,
-        grid_bins_cap: gdims.0 * gdims.1 * gdims.2,
+        // 【判别】`follow_box` = 每子步在卡上按**全量粒子**重算包围盒（= 覆盖盒）——管线里现成的档。
+        recompute_box: follow_box,
+        grid_bins_cap: if follow_box {
+            1 << 20
+        } else {
+            gdims.0 * gdims.1 * gdims.2
+        },
     }
 }
 
@@ -161,39 +166,40 @@ fn dens_or_vel_first_substep_that_diverges() {
         return;
     }
     let f = scene();
-    let pc = cfg_for(&f);
+    let pc = cfg_for(&f, false);
     let np = pc.n as usize;
     let (pos, vel, pmass) = flatten_all(&f);
-    let (mut pk, walls) = Packet::new_with_walls(0, pc, &pos, &vel, &pmass).expect("建包失败");
-    // 空镜面表 ⇒ 鬼影是空操作（物理不变），只为拿到 `dens` 读回口。
-    let mut walls = walls;
-    assert_eq!(
-        walls.upload(&pk, WallSide::Mirror, &[], &[], &[]),
-        0,
-        "空表应当无事发生"
-    );
-    // 两遍：同一设备、同一初值（`restore` 回初值）、同一子步切法。
-    pk.restore(&pos, &vel);
-    let a = per_substep(&mut pk, &walls, &pc, np);
-    pk.restore(&pos, &vel);
-    let b = per_substep(&mut pk, &walls, &pc, np);
-    let mut first_dens = None;
-    let mut first_vel = None;
-    println!("== 逐子步定位（混合场景；同一 `Packet`/设备，两遍各 {STEPS} 子步）==");
-    for s in 0..STEPS {
-        let dd = n_diff(&a[s].0, &b[s].0);
-        let dv = n_diff(&a[s].1, &b[s].1);
-        if dd > 0 && first_dens.is_none() {
-            first_dens = Some(s + 1);
-        }
-        if dv > 0 && first_vel.is_none() {
-            first_vel = Some(s + 1);
-        }
-        println!("  · 子步 {}：dens 不符 {} | vel 不符 {}", s + 1, dd, dv);
+    // 【修法判别】同一场景跑两档盒：`follow_box=false`（配**固定盒**，管线默认口径，盒抄引擎那张旧表）
+    // 与 `true`（每子步在卡上按**全量粒子**重算 = **覆盖盒**）。若后者把不确定性消掉 ⇒ 修法就是"用覆盖盒"。
+    for follow in [false, true] {
+        let pc = cfg_for(&f, follow);
+        let (mut pk, walls) = Packet::new_with_walls(0, pc, &pos, &vel, &pmass).expect("建包失败");
+        // 空镜面表 ⇒ 鬼影是空操作（物理不变），只为拿到 `dens` 读回口。
+        let mut walls = walls;
+        assert_eq!(
+            walls.upload(&pk, WallSide::Mirror, &[], &[], &[]),
+            0,
+            "空表应当无事发生"
+        );
+        // 两遍：同一设备、同一初值（`restore` 回初值）、同一子步切法。
+        pk.restore(&pos, &vel);
+        let a = per_substep(&mut pk, &walls, &pc, np);
+        pk.restore(&pos, &vel);
+        let b = per_substep(&mut pk, &walls, &pc, np);
+        let tag = if follow {
+            "覆盖盒(follow)"
+        } else {
+            "固定盒(默认)"
+        };
+        let (dd, dv) = (
+            n_diff(&a[STEPS - 1].0, &b[STEPS - 1].0),
+            n_diff(&a[STEPS - 1].1, &b[STEPS - 1].1),
+        );
+        println!(
+            "== [{tag}] 逐子步（{STEPS} 子步；子步 1 的 dens/vel 与末子步）==\n  · 子步 1：dens {} | vel {}\n  · 子步 {STEPS}：dens {dd} | vel {dv}",
+            n_diff(&a[0].0, &b[0].0),
+            n_diff(&a[0].1, &b[0].1)
+        );
     }
-    println!(
-        "⇒ 判读：dens 首差 {:?}，vel 首差 {:?}（None = 该量始终一致）——dens 先差 ⇒ 病根在密度阶段/格表；\
-         dens 一直同而 vel 差 ⇒ 在 eos/力/积分。",
-        first_dens, first_vel
-    );
+    let _ = (pos, vel);
 }
