@@ -35,11 +35,16 @@ PROBES = {
         'fn p(){ if true { if true { if true { if true { if true { if true { let _=1; } } } } } } }\n'),
     "args-gate":    ("probe_args.rs",
         'fn p(a:i32,b:i32,c:i32,d:i32,e:i32,f:i32,g:i32,h:i32,i:i32){}\n'),
+    "fastmath-gate": ("probe_fastmath.rs",
+        'fn p(){ let _ = fadd_fast(1.0f32, 2.0f32); }\n'),
+    "asm-gate":     ("probe_asm.rs",
+        'fn p(){ unsafe { asm!("nop"); } }\n'),
 }
 
 SKIP = {
     "dag-gate":   "结构性硬判：真实数据已验证绿（19 crate 无环+顺序合规），注入需改 Cargo.toml，归手动",
     "rayon-gate": "结构性硬判：真实数据已验证绿（无 rayon 依赖），注入需改 Cargo.toml，归手动",
+    "cpp-gate":   "结构性硬判：真实数据已验证绿（无 cxx/autocxx/cpp 依赖），注入需改 Cargo.toml，归手动",
 }
 
 
