@@ -49,6 +49,24 @@ def list_rs(root, git_tracked):
     return res
 
 
+def list_cargo_toml(root):
+    """返回仓内全部 Cargo.toml 的仓库相对路径（跳过 target/.git）。
+
+    注意：list_rs 只返回 .rs 文件，扫 Cargo.toml 依赖门（rayon/cpp/license）必须
+    用本函数，不能用 list_rs 再过滤 Cargo.toml —— 那样会一个 manifest 都匹配不到，
+    门变成「空门」（绿但什么都不查）。
+    """
+    res = []
+    for dp, _, fns in os.walk(root):
+        base = os.path.basename(dp)
+        if base in ("target", ".git"):
+            continue
+        if "Cargo.toml" in fns:
+            rel = os.path.relpath(os.path.join(dp, "Cargo.toml"), root).replace(os.sep, "/")
+            res.append(rel)
+    return res
+
+
 # --------------------------------------------------------------------------
 # 掩码：把字符串/字符/注释抹成不含花括号的占位
 # --------------------------------------------------------------------------
